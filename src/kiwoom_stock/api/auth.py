@@ -19,7 +19,8 @@ class Authenticator:
         
         # 2. 키움 문서에 명시된 필수 헤더 추가
         headers = {
-            "Content-Type": "application/json;charset=UTF-8"
+            "Content-Type": "application/json;charset=UTF-8",
+            "api-id": "au10001"  # 필수 항목 추가
         }
         
         # 3. 바디 데이터
