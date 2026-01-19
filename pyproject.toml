@@ -1,0 +1,16 @@
+# kiwoom_project/pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiwoom_stock"
+version = "0.1.0"
+description = "Kiwoom REST API Stock Monitoring System"
+dependencies = [
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
