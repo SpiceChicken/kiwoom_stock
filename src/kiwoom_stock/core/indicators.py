@@ -7,7 +7,7 @@ import statistics
 import math
 
 
-class RSICalculator:
+class Indicators:
     """RSI 및 볼린저 밴드를 계산하는 클래스"""
     
     def __init__(self, period: int = 14):
@@ -87,3 +87,25 @@ class RSICalculator:
             "mid": round(sma, 2),
             "lower": round(sma - (std_dev * stdev), 2)
         }
+
+    @staticmethod
+    def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+        """
+        ATR(Average True Range) 계산
+        시장의 변동성 강도를 측정합니다.
+        """
+        if len(closes) < period + 1:
+            return 0.0
+        
+        tr_list = []
+        for i in range(1, len(closes)):
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i] - closes[i-1])
+            )
+            tr_list.append(tr)
+            
+        # 와일더의 이동평균 방식 적용
+        atr = statistics.mean(tr_list[-period:])
+        return round(atr, 2)
