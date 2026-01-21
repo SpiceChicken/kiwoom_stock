@@ -11,11 +11,11 @@ def main():
     try:
         # 1. 설정 로드 (루트 폴더의 config.json, strategy_config.json 읽기)
         # 1-1. 시스템 설정 로드 (보안/인프라)
-        with open('config.json', 'r') as f:
+        with open('config/config.json', 'r') as f:
             system_config = json.load(f)
 
         # 1-2. 전략 설정 로드 (로직/수치)
-        with open('strategy_config.json', 'r') as f:
+        with open('config/strategy_config.json', 'r') as f:
             strategy_params = json.load(f)
 
         # 1-3. 통합

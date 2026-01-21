@@ -28,7 +28,7 @@ ENV/
 .venv/
 
 # Configuration and Secrets (중요!)
-config.json
+config/
 *.txt
 *.csv
 .env

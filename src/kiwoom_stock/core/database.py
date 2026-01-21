@@ -14,20 +14,27 @@ class TradeLogger:
         self._create_table()
 
     def _create_table(self):
+        """지표별 상세 점수 컬럼 추가"""
         query = """
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            stock_code TEXT NOT NULL,
+            stock_code TEXT,
             stock_name TEXT,
-            status TEXT DEFAULT 'OPEN',     -- 'OPEN' (보유 중), 'CLOSED' (매도 완료)
             buy_price REAL,
-            buy_time TEXT,
             buy_score REAL,
+            -- 상세 지표 점수 컬럼 추가 --
+            alpha_score REAL,
+            supply_score REAL,
+            vwap_score REAL,
+            trend_score REAL,
+            -----------------------
+            buy_time TEXT,
             buy_regime TEXT,
             sell_price REAL,
-            sell_time TEXT,
             profit_rate REAL,
-            exit_reason TEXT
+            sell_time TEXT,
+            sell_reason TEXT,
+            status TEXT DEFAULT 'OPEN'
         )
         """
         self.conn.execute(query)
@@ -41,17 +48,22 @@ class TradeLogger:
         return {row['stock_code']: dict(row) for row in rows}
 
     def record_buy(self, data: Dict) -> int:
-        """매수 신호 발생 시 새로운 'OPEN' 레코드를 생성합니다."""
+        """상세 점수를 포함하여 매수 기록"""
         query = """
-        INSERT INTO trades (stock_code, stock_name, status, buy_price, buy_time, buy_score, buy_regime)
-        VALUES (?, ?, 'OPEN', ?, ?, ?, ?)
+        INSERT INTO trades (
+            stock_code, stock_name, buy_price, buy_score, 
+            alpha_score, supply_score, vwap_score, trend_score,
+            buy_time, buy_regime
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        cursor = self.conn.execute(query, (
-            data['stock_code'], data['stock_name'], data['buy_price'],
-            data['buy_time'], data['buy_score'], data['buy_regime']
-        ))
+        params = (
+            data['stock_code'], data['stock_name'], data['buy_price'], data['buy_score'],
+            data['alpha_score'], data['supply_score'], data['vwap_score'], data['trend_score'],
+            data['buy_time'], data['buy_regime']
+        )
+        cursor = self.conn.execute(query, params)
         self.conn.commit()
-        return cursor.lastrowid  # 생성된 레코드의 PK 반환
+        return cursor.lastrowid
 
     def record_sell(self, db_id: int, sell_price: float, profit_rate: float, reason: str):
         """매도 시 해당 레코드를 'CLOSED' 상태로 업데이트합니다."""

@@ -239,24 +239,44 @@ class TradingStrategy:
     def get_dynamic_thresholds(self, regime: str) -> Dict[str, float]:
         return self._get_regime_config(regime).get("thresholds", {})
 
-    def calculate_conviction_score(self, metrics: Dict, regime: str) -> float:
-        """지표 강도 비례 점수 산출"""
+    def calculate_conviction_score(self, metrics: Dict, regime: str):
+        """총점과 상세 지표 점수를 함께 반환합니다."""
         w = self.get_scoring_weights(regime)
-        score = 0.0
-        # Alpha
-        score += max(0, min(100, 50 + (metrics['alpha'] * 2.5))) * w.get('alpha', 0.25)
-        # Supply
+        
+        # 1. Alpha 점수 계산 (0~100)
+        alpha_raw = max(0, min(100, 50 + (metrics['alpha'] * 2.5)))
+        
+        # 2. Supply 점수 계산 (0~100)
         total_vol = max(1, metrics.get('volume', 1))
         s_ratio = (metrics.get('net_buy', 0) / total_vol) * 100
         synergy = 20 if (metrics['f_buy'] > 0 and metrics['i_buy'] > 0) else (-20 if (metrics['f_buy'] < 0 and metrics['i_buy'] < 0) else 0)
-        score += max(0, min(100, (s_ratio * 50) + synergy)) * w.get('supply', 0.25)
-        # VWAP
+        supply_raw = max(0, min(100, (s_ratio * 50) + synergy))
+        
+        # 3. VWAP 점수 계산 (0~100)
         dev = (metrics['price'] / metrics['vwap'] - 1) * 100 if metrics['vwap'] > 0 else 0
-        score += max(0, min(100, 50 + (dev * 25))) * w.get('vwap', 0.25)
-        # Trend
+        vwap_raw = max(0, min(100, 50 + (dev * 25)))
+        
+        # 4. Trend 점수 계산 (0~100)
         t_rsi = metrics['trend_rsi']
-        score += max(0, min(100, 50 + ((t_rsi - 50) * 2.5) if t_rsi >= 50 else t_rsi)) * w.get('trend', 0.25)
-        return round(score, 1)
+        trend_raw = max(0, min(100, 50 + ((t_rsi - 50) * 2.5) if t_rsi >= 50 else t_rsi))
+        
+        # 최종 가중치 합산
+        total_score = round(
+            (alpha_raw * w.get('alpha', 0.25)) + 
+            (supply_raw * w.get('supply', 0.25)) + 
+            (vwap_raw * w.get('vwap', 0.25)) + 
+            (trend_raw * w.get('trend', 0.25)), 1
+        )
+        
+        # 상세 점수 딕셔너리 생성
+        details = {
+            "alpha": round(alpha_raw, 1),
+            "supply": round(supply_raw, 1),
+            "vwap": round(vwap_raw, 1),
+            "trend": round(trend_raw, 1)
+        }
+        
+        return total_score, details
 
 class Notifier:
     """[Helper] 알림 송신 서비스"""
@@ -319,7 +339,7 @@ class MultiTimeframeRSIMonitor:
                 "trend_rsi": self.trend_calc.calculate([d['close'] for d in trend_data])
             }
 
-            score = self.strategy.calculate_conviction_score(metrics, self.analyzer.market_regime)
+            score, score_details = self.strategy.calculate_conviction_score(metrics, self.analyzer.market_regime)
             momentum = round(score - self.score_history.get(stock_code, score), 1)
             self.score_history[stock_code] = score
             
@@ -328,7 +348,13 @@ class MultiTimeframeRSIMonitor:
             if momentum >= self.strategy.momentum_threshold: status = "🚀수급폭발"
 
             self.status_log[stock_code] = {"price": curr_price, "score": score, "momentum": momentum, "reason": status}
-            return {**metrics, "stock_code": stock_code, "score": score, "momentum": momentum} if score >= th['alert'] else None
+            return {
+                **metrics, 
+                **{f"{k}_score": v for k, v in score_details.items()}, # alpha_score 등 추가
+                "stock_code": stock_code, 
+                "score": score, 
+                "momentum": momentum
+            } if score >= th['alert'] else None
         except Exception as e:
             logger.error(f"Condition check failed for {stock_code}: {e}", exc_info=True)
             return None
@@ -340,8 +366,8 @@ class MultiTimeframeRSIMonitor:
             try:
                 self.stock_mgr.update_target_stocks()
                 if not self.stock_mgr.is_monitoring_time():
-                        logger.info("Market is closed. Shutting down system.")
-                        break
+                    logger.info("Market is closed. Shutting down system.")
+                    break
 
                 self.analyzer.update_regime()
                 self.analyzer.fetch_supply_data()
@@ -369,9 +395,19 @@ class MultiTimeframeRSIMonitor:
                     if res:
                         th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
                         if res['score'] >= th['strong'] and stock not in self.stock_mgr.active_positions:
-                            buy_data = {"stock_code": stock, "stock_name": name, "buy_price": log['price'], 
-                                        "buy_score": log['score'], "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                                        "buy_regime": self.analyzer.market_regime}
+                            buy_data = {
+                                "stock_code": stock, 
+                                "stock_name": name, 
+                                "buy_price": log['price'], 
+                                "buy_score": log['score'],
+                                # res에 포함된 상세 점수 전달
+                                "alpha_score": res['alpha_score'],
+                                "supply_score": res['supply_score'],
+                                "vwap_score": res['vwap_score'],
+                                "trend_score": res['trend_score'],
+                                "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
+                                "buy_regime": self.analyzer.market_regime
+                            }
                             buy_data['id'] = self.db.record_buy(buy_data)
                             self.stock_mgr.active_positions[stock] = buy_data
                             self.notifier.send_buy_alert(res)
