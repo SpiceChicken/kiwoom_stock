@@ -2,15 +2,24 @@
 
 import sys
 import time
+import json
 
 from kiwoom_stock.api.client import KiwoomClient
 from kiwoom_stock.monitoring.engine import MultiTimeframeRSIMonitor
-from kiwoom_stock.utils.config import load_config, get_base_url
 
 def main():
     try:
-        # 1. 설정 로드 (루트 폴더의 config.json 읽기)
-        config = load_config()
+        # 1. 설정 로드 (루트 폴더의 config.json, strategy_config.json 읽기)
+        # 1-1. 시스템 설정 로드 (보안/인프라)
+        with open('config.json', 'r') as f:
+            system_config = json.load(f)
+
+        # 1-2. 전략 설정 로드 (로직/수치)
+        with open('strategy_config.json', 'r') as f:
+            strategy_params = json.load(f)
+
+        # 1-3. 통합
+        config = {**system_config, **strategy_params}
 
         # 2. 네트워크 및 서버 연결 대기 로직 (Retry)
         max_retries = 10
@@ -24,7 +33,7 @@ def main():
                 client = KiwoomClient(
                     appkey=config['appkey'],
                     secretkey=config['secretkey'],
-                    base_url=get_base_url()
+                    base_url=config['base_url']
                 )
                 print("✅ 서버 연결 및 인증에 성공했습니다.")
                 break

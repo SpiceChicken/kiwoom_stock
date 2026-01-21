@@ -1,0 +1,32 @@
+{
+    "market": {
+        "proxy_code": "069500",
+        "market_tp": "001",
+        "check_interval": 60
+    },
+    "strategy": {
+        "momentum_threshold": 10.0,
+        "regimes": {
+            "안정적 강세장": {
+                "weights": {"alpha": 0.4, "supply": 0.2, "vwap": 0.2, "trend": 0.2},
+                "thresholds": {"strong": 75.0, "alert": 65.0, "interest": 55.0}
+            },
+            "변동성 강세장": {
+                "weights": {"alpha": 0.2, "supply": 0.4, "vwap": 0.3, "trend": 0.1},
+                "thresholds": {"strong": 80.0, "alert": 75.0, "interest": 70.0}
+            },
+            "패닉 하락장": {
+                "weights": {"alpha": 0.1, "supply": 0.5, "vwap": 0.2, "trend": 0.2},
+                "thresholds": {"strong": 85.0, "alert": 75.0, "interest": 65.0}
+            },
+            "default": {
+                "weights": {"alpha": 0.3, "supply": 0.3, "vwap": 0.3, "trend": 0.1},
+                "thresholds": {"strong": 80.0, "alert": 70.0, "interest": 60.0}
+            }
+        }
+    },
+    "filters": {
+        "etf_keywords": ["KODEX", "TIGER", "ACE", "SOL", "RISE", "HANARO", "PLUS", "KoAct", "TIMEFOLIO"],
+        "max_stocks": 40
+    }
+}
