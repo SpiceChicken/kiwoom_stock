@@ -33,6 +33,7 @@ config.json
 *.csv
 .env
 *.db
+logs/
 
 # IDEs
 .vscode/

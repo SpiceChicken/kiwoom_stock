@@ -7,6 +7,8 @@ import time
 import statistics
 import sys
 import logging
+import os
+from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from typing import Dict, List, Optional
 from collections import deque
@@ -15,13 +17,107 @@ from ..api.parser import clean_numeric
 from ..core.indicators import Indicators
 from kiwoom_stock.core.database import TradeLogger
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# --- [로깅 시스템 고도화 설정] ---
+
+# 에러 로그를 제외하기 위한 필터 클래스 정의
+class ExcludeErrorFilter(logging.Filter):
+    def filter(self, record):
+        # ERROR(40) 레벨보다 낮은 로그(DEBUG, INFO, WARNING)만 허용합니다.
+        return record.levelno < logging.ERROR
+        
+def setup_structured_logging():
+    """로그 폴더 생성 및 핸들러 설정 (에러 분리 필터 적용)"""
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    # 콘솔 핸들러 (기존 유지)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', '%H:%M:%S'))
+
+    # 2. trading.log 핸들러 설정 (필터 적용)
+    file_format = logging.Formatter(
+        '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "module": "%(module)s", "message": "%(message)s"}'
+    )
+    file_handler = TimedRotatingFileHandler(
+        filename=f"{log_dir}/trading.log",
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8"
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(file_format)
+    
+    # [핵심] 필터를 추가하여 ERROR 이상의 로그가 trading.log에 기록되는 것을 방지합니다.
+    file_handler.addFilter(ExcludeErrorFilter())
+
+    # 3. error.log 핸들러 (에러만 수집 - 기존 유지)
+    error_handler = TimedRotatingFileHandler(
+        filename=f"{log_dir}/error.log",
+        when="D",
+        interval=1,
+        backupCount=90,
+        encoding="utf-8"
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(file_format)
+
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    logger.addHandler(error_handler)
+
+setup_structured_logging()
 logger = logging.getLogger(__name__)
+
+# --- [모듈별 로깅 적용] ---
+
+class MarketAnalyzer:
+    """[Helper] 시장 환경 분석기"""
+    def __init__(self, client, trend_calc: Indicators, market_config: Dict):
+        self.client = client
+        self.trend_calc = trend_calc
+        self.market_proxy_code = market_config.get("proxy_code", "069500")
+        self.market_tp = market_config.get("market_tp", "001")
+        
+        self.market_regime = "Unknown"
+        self.market_atr_history = deque(maxlen=20)
+        self.supply_cache: Dict[str, Dict] = {}
+
+    def update_regime(self):
+        """레짐 변화 시에만 로깅하여 가독성을 높입니다."""
+        try:
+            chart_data = self.client.market.get_minute_chart(self.market_proxy_code, tic="60")
+            closes = [item['close'] for item in chart_data]
+            rsi = self.trend_calc.calculate(closes)
+            
+            # ATR 계산 (로직 유지)
+            tr_list = []
+            for i in range(1, len(chart_data)):
+                h, l, pc = chart_data[i]['high'], chart_data[i]['low'], chart_data[i-1]['close']
+                tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
+            atr = statistics.mean(tr_list[-14:]) if tr_list else 0.0
+            self.market_atr_history.append(atr)
+
+            avg_atr = statistics.mean(self.market_atr_history) if len(self.market_atr_history) >= 5 else atr
+            is_volatile = atr > (avg_atr * 1.1)
+
+            prev_regime = self.market_regime
+            if rsi >= 60:
+                self.market_regime = "안정적 강세장" if not is_volatile else "변동성 강세장"
+            elif rsi <= 40:
+                self.market_regime = "조용한 하락장" if not is_volatile else "패닉 하락장"
+            else:
+                self.market_regime = "평온 구간"
+
+            if prev_regime != self.market_regime:
+                logger.info(f"Market Regime Changed: {prev_regime} -> {self.market_regime} (RSI: {rsi:.1f}, ATR: {atr:.2f})")
+        except Exception as e:
+            logger.error(f"Failed to update market regime: {str(e)}", exc_info=True)
 
 class MarketAnalyzer:
     """[Helper] 시장 환경 분석기: 레짐 진단 및 수급 캐싱 담당"""
@@ -202,6 +298,8 @@ class MultiTimeframeRSIMonitor:
         self.status_log = {}
         self.score_history = {}
 
+        logger.info("Monitoring Engine Initialized.")
+
     def check_conditions(self, stock_code: str) -> Optional[Dict]:
         """종목 스캔 및 전략 실행"""
         try:
@@ -231,48 +329,61 @@ class MultiTimeframeRSIMonitor:
 
             self.status_log[stock_code] = {"price": curr_price, "score": score, "momentum": momentum, "reason": status}
             return {**metrics, "stock_code": stock_code, "score": score, "momentum": momentum} if score >= th['alert'] else None
-        except: return None
+        except Exception as e:
+            logger.error(f"Condition check failed for {stock_code}: {e}", exc_info=True)
+            return None
 
     def run(self):
         """메인 실행 루프"""
+        logger.info("Starting Monitoring Loop...")
         while True:
-            self.stock_mgr.update_target_stocks()
-            if not self.stock_mgr.is_monitoring_time(): break
+            try:
+                self.stock_mgr.update_target_stocks()
+                if not self.stock_mgr.is_monitoring_time():
+                        logger.info("Market is closed. Shutting down system.")
+                        break
 
-            self.analyzer.update_regime()
-            self.analyzer.fetch_supply_data()
-            
-            for stock in self.stock_mgr.stocks: self.check_conditions(stock)
-            
-            sorted_stocks = sorted(self.stock_mgr.stocks, key=lambda x: self.status_log.get(x, {}).get('momentum', 0), reverse=True)
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 시장 레짐: {self.analyzer.market_regime}")
-            print(f"{'종목명':<10} | {'점수':<5} | {'모멘텀':<6} | {'상태':<10}")
-            print("-" * 55)
-
-            for stock in sorted_stocks:
-                res = self.check_conditions(stock)
-                log = self.status_log.get(stock)
-                if not log or "price" not in log: continue
-
-                # 보유 종목 매도 감시 위임
-                self.stock_mgr.monitor_active_signals(stock, log['price'], log['score'])
+                self.analyzer.update_regime()
+                self.analyzer.fetch_supply_data()
                 
-                # 화면 출력 및 알림
-                name = self.stock_mgr.stock_names.get(stock, stock)
-                m_str = f"+{log['momentum']}" if log['momentum'] > 0 else f"{log['momentum']}"
-                print(f"{name:<10} | {log['score']:>5.1f} | {m_str:>6} | {log['reason']:<10}")
+                for stock in self.stock_mgr.stocks: self.check_conditions(stock)
                 
-                if res:
-                    th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
-                    if res['score'] >= th['strong'] and stock not in self.stock_mgr.active_positions:
-                        buy_data = {"stock_code": stock, "stock_name": name, "buy_price": log['price'], 
-                                    "buy_score": log['score'], "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                                    "buy_regime": self.analyzer.market_regime}
-                        buy_data['id'] = self.db.record_buy(buy_data)
-                        self.stock_mgr.active_positions[stock] = buy_data
-                        self.notifier.send_buy_alert(res)
-                    if log['momentum'] >= self.strategy.momentum_threshold:
-                        self.notifier.send_momentum_alert(res)
+                sorted_stocks = sorted(self.stock_mgr.stocks, key=lambda x: self.status_log.get(x, {}).get('momentum', 0), reverse=True)
+                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 시장 레짐: {self.analyzer.market_regime}")
+                print(f"{'종목명':<10} | {'점수':<5} | {'모멘텀':<6} | {'상태':<10}")
+                print("-" * 55)
 
-            time.sleep(self.config.get("check_interval", 60))
+                for stock in sorted_stocks:
+                    res = self.check_conditions(stock)
+                    log = self.status_log.get(stock)
+                    if not log or "price" not in log: continue
+
+                    # 보유 종목 매도 감시 위임
+                    self.stock_mgr.monitor_active_signals(stock, log['price'], log['score'])
+                    
+                    # 화면 출력 및 알림
+                    name = self.stock_mgr.stock_names.get(stock, stock)
+                    m_str = f"+{log['momentum']}" if log['momentum'] > 0 else f"{log['momentum']}"
+                    print(f"{name:<10} | {log['score']:>5.1f} | {m_str:>6} | {log['reason']:<10}")
+                    
+                    if res:
+                        th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
+                        if res['score'] >= th['strong'] and stock not in self.stock_mgr.active_positions:
+                            buy_data = {"stock_code": stock, "stock_name": name, "buy_price": log['price'], 
+                                        "buy_score": log['score'], "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
+                                        "buy_regime": self.analyzer.market_regime}
+                            buy_data['id'] = self.db.record_buy(buy_data)
+                            self.stock_mgr.active_positions[stock] = buy_data
+                            self.notifier.send_buy_alert(res)
+                        if log['momentum'] >= self.strategy.momentum_threshold:
+                            self.notifier.send_momentum_alert(res)
+
+                time.sleep(self.config.get("check_interval", 60))
+            except KeyboardInterrupt:
+                logger.warning("System interrupted by user.")
+                break
+            except Exception as e:
+                logger.critical(f"Critical error in main loop: {e}", exc_info=True)
+                time.sleep(10) # 치명적 에러 시 잠시 대기 후 재시도
+        
         sys.exit(0)
