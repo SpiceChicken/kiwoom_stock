@@ -29,17 +29,15 @@ kiwoom_stock/
 └── logs/               # 구조화된 운영/에러 로그 파일
 ```
 
-🚀 사용 방법
-1. 설정 (Configuration)
+## 🚀 사용 방법
+
+### 1. 설정 (Configuration)
 config/ 폴더 내에 시스템 설정(config.json)과 전략 설정(strategy_config.json)을 준비합니다.
 
-2. 실행 및 모니터링
-실시간 엔진 구동: python main.py
+### 2. 실행 및 모니터링
+* 실시간 엔진 구동: python main.py
+* 로그 확인: tail -f logs/trading.log (Linux/Mac) 또는 메모장으로 확인
 
-로그 확인: tail -f logs/trading.log (Linux/Mac) 또는 메모장으로 확인
-
-3. 사후 분석 (Analysis)
-일별 성과 리포트: python tools/backtest_reporter.py 실행 시 Rich 라이브러리 기반의 시각화 표 출력.
-
-로직 효용성 진단: python tools/trade_validator.py를 통해 개별 지표의 수익 기여도 확인.
-
+### 3. 사후 분석 (Analysis)
+* 일별 성과 리포트: python tools/backtest_reporter.py 실행 시 Rich 라이브러리 기반의 시각화 표 출력.
+* 로직 효용성 진단: python tools/trade_validator.py를 통해 개별 지표의 수익 기여도 확인.
