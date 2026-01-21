@@ -42,10 +42,10 @@ class MarketService:
             "invsr": investor_tp,
             "frgn_all": "1" if investor_tp == "6" else "0",
             "smtm_netprps_tp": "0",
-            "stex_tp": "3"
+            "stex_tp": "1"
         })
         
-        items = data.get("stk_invsr_smtm_netprps_qry", [])
+        items = data.get("opmr_invsr_trde", [])
         # netprps_qty 등을 미리 숫자로 변환하여 반환
         return [{
             **i,
