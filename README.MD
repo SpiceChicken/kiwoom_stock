@@ -27,6 +27,7 @@ kiwoom_stock/
 ├── tools/              # 분석 툴킷 (Reporter, Validator, DB Manager)
 ├── config/             # 시스템 및 전략 설정 (JSON)
 └── logs/               # 구조화된 운영/에러 로그 파일
+```
 
 🚀 사용 방법
 1. 설정 (Configuration)
@@ -41,3 +42,4 @@ config/ 폴더 내에 시스템 설정(config.json)과 전략 설정(strategy_co
 일별 성과 리포트: python tools/backtest_reporter.py 실행 시 Rich 라이브러리 기반의 시각화 표 출력.
 
 로직 효용성 진단: python tools/trade_validator.py를 통해 개별 지표의 수익 기여도 확인.
+
