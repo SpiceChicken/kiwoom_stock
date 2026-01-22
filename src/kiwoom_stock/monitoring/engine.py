@@ -210,18 +210,29 @@ class StockManager:
         if stock_code not in self.active_positions: return
 
         pos = self.active_positions[stock_code]
-        # 점수가 50점 미만으로 하락 시 매도 처리
+        profit = round((current_price / pos['buy_price'] - 1) * 100, 2)
+        
+        # 1. 당일 종가 매도 로직 (Time-based Exit)
+        now_time = datetime.now().strftime("%H:%M")
+        exit_time = "15:20" # 기본값 15:20
+        
+        if now_time >= exit_time:
+            self.db.record_sell(pos['id'], current_price, profit, "Day Trade Close")
+            print(f"🕒 [종가 매도] {pos['stock_name']} | 수익률: {profit:+.2f}% | 사유: 장 마감 강제 청산")
+            del self.active_positions[stock_code]
+            return
+
+        # 2. 기존 점수 하락 매도 (Score Decay)
         if current_score < 50:
-            profit = round((current_price / pos['buy_price'] - 1) * 100, 2)
             self.db.record_sell(pos['id'], current_price, profit, "Score Decay")
-            print(f"📉 [가상 매도] {pos['stock_name']} | 수익률: {profit:+}% | 사유: 점수 하락")
+            print(f"📉 [가상 매도] {pos['stock_name']} | 수익률: {profit:+.2f}% | 사유: 점수 하락")
             del self.active_positions[stock_code]
 
     def is_monitoring_time(self) -> bool:
         """장 운영 시간 체크"""
         now = datetime.now()
         if now.weekday() >= 5: return False
-        return now.replace(hour=8, minute=30) <= now <= now.replace(hour=15, minute=40)
+        return now.replace(hour=8, minute=30) <= now <= now.replace(hour=15, minute=30)
 
 class TradingStrategy:
     """[Strategy] 트레이딩 전략 및 점수 산출: 하드코딩된 가중치/임계값 제거"""
@@ -239,26 +250,35 @@ class TradingStrategy:
     def get_dynamic_thresholds(self, regime: str) -> Dict[str, float]:
         return self._get_regime_config(regime).get("thresholds", {})
 
+    def get_min_thresholds(self) -> Dict[str, float]:
+        """레짐별 4대 지표 하한선 설정을 반환합니다."""
+        return self.settings.get("min_thresholds", {})
+
     def calculate_conviction_score(self, metrics: Dict, regime: str):
         """총점과 상세 지표 점수를 함께 반환합니다."""
         w = self.get_scoring_weights(regime)
         
-        # 1. Alpha 점수 계산 (0~100)
-        alpha_raw = max(0, min(100, 50 + (metrics['alpha'] * 2.5)))
+        # 1. Alpha 점수: 민감도 하향 (2.5 -> 1.5) 
+        # 시장 지수 대비 초과 수익률이 더 높아야 고득점이 가능하도록 변경
+        alpha_raw = max(0, min(100, 50 + (metrics['alpha'] * 1.5)))
         
-        # 2. Supply 점수 계산 (0~100)
+        # 2. Supply 점수: 기존 로직 유지 (고정)
         total_vol = max(1, metrics.get('volume', 1))
         s_ratio = (metrics.get('net_buy', 0) / total_vol) * 100
         synergy = 20 if (metrics['f_buy'] > 0 and metrics['i_buy'] > 0) else (-20 if (metrics['f_buy'] < 0 and metrics['i_buy'] < 0) else 0)
         supply_raw = max(0, min(100, (s_ratio * 50) + synergy))
         
-        # 3. VWAP 점수 계산 (0~100)
+        # 3. VWAP 점수: 민감도 대폭 하향 (25 -> 10) 
+        # 1월 22일 모든 종목이 100점을 기록했던 현상을 방어하기 위해,
+        # 가격 이격도가 5% 이상일 때만 100점에 도달하도록 수정 (기존은 2%에서 100점)
         dev = (metrics['price'] / metrics['vwap'] - 1) * 100 if metrics['vwap'] > 0 else 0
-        vwap_raw = max(0, min(100, 50 + (dev * 25)))
+        vwap_raw = max(0, min(100, 50 + (dev * 10)))
         
-        # 4. Trend 점수 계산 (0~100)
+        # 4. Trend 점수: 민감도 하향 (2.5 -> 1.5) 
+        # 단순히 RSI가 70을 넘는 것만으로는 부족하며, 80 이상의 강력한 과매수 구간에 
+        # 진입해야 100점에 근접하도록 문턱을 높임
         t_rsi = metrics['trend_rsi']
-        trend_raw = max(0, min(100, 50 + ((t_rsi - 50) * 2.5) if t_rsi >= 50 else t_rsi))
+        trend_raw = max(0, min(100, 50 + ((t_rsi - 50) * 1.5) if t_rsi >= 50 else t_rsi))
         
         # 최종 가중치 합산
         total_score = round(
@@ -365,12 +385,17 @@ class MultiTimeframeRSIMonitor:
         while True:
             try:
                 self.stock_mgr.update_target_stocks()
-                if not self.stock_mgr.is_monitoring_time():
-                    logger.info("Market is closed. Shutting down system.")
-                    break
+                # if not self.stock_mgr.is_monitoring_time():
+                #     logger.info("Market is closed. Shutting down system.")
+                #     break
 
                 self.analyzer.update_regime()
                 self.analyzer.fetch_supply_data()
+
+                # 현재 시간 확인
+                now_str = datetime.now().strftime('%H:%M')
+                entry_deadline = self.config.get("strategy", {}).get("entry_deadline", "14:30")
+                is_entry_allowed = now_str < entry_deadline
                 
                 for stock in self.stock_mgr.stocks: self.check_conditions(stock)
                 
@@ -394,23 +419,33 @@ class MultiTimeframeRSIMonitor:
                     
                     if res:
                         th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
-                        if res['score'] >= th['strong'] and stock not in self.stock_mgr.active_positions:
-                            buy_data = {
-                                "stock_code": stock, 
-                                "stock_name": name, 
-                                "buy_price": log['price'], 
-                                "buy_score": log['score'],
-                                # res에 포함된 상세 점수 전달
-                                "alpha_score": res['alpha_score'],
-                                "supply_score": res['supply_score'],
-                                "vwap_score": res['vwap_score'],
-                                "trend_score": res['trend_score'],
-                                "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                                "buy_regime": self.analyzer.market_regime
-                            }
-                            buy_data['id'] = self.db.record_buy(buy_data)
-                            self.stock_mgr.active_positions[stock] = buy_data
-                            self.notifier.send_buy_alert(res)
+            
+                        # [비즈니스 로직] 4개 지표 하한선 필터 (교집합 필터)
+                        min_th = self.strategy.get_min_thresholds()
+                        
+                        is_qualified = (
+                            res['alpha_score'] >= min_th['alpha'] and
+                            res['supply_score'] >= min_th['supply'] and
+                            res['vwap_score'] >= min_th['vwap'] and
+                            res['trend_score'] >= min_th['trend']
+                        )
+                        
+                        # [최종 진입 조건] 총점 통과 + 지표 하한선 통과 + 진입 가능 시간 내
+                        if res['score'] >= th['strong'] and is_qualified and is_entry_allowed:
+                            if stock not in self.stock_mgr.active_positions:
+                                # 매수 실행 및 DB 기록
+                                buy_data = {
+                                    "stock_code": stock, "stock_name": self.stock_mgr.stock_names.get(stock, stock),
+                                    "buy_price": log['price'], "buy_score": log['score'],
+                                    "alpha_score": res['alpha_score'], "supply_score": res['supply_score'],
+                                    "vwap_score": res['vwap_score'], "trend_score": res['trend_score'],
+                                    "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    "buy_regime": self.analyzer.market_regime
+                                }
+                                buy_data['id'] = self.db.record_buy(buy_data)
+                                self.stock_mgr.active_positions[stock] = buy_data
+                                self.notifier.send_buy_alert(res)
+
                         if log['momentum'] >= self.strategy.momentum_threshold:
                             self.notifier.send_momentum_alert(res)
 
