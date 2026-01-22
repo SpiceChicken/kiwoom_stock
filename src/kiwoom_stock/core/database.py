@@ -69,7 +69,7 @@ class TradeLogger:
         """매도 시 해당 레코드를 'CLOSED' 상태로 업데이트합니다."""
         query = """
         UPDATE trades 
-        SET status = 'CLOSED', sell_price = ?, sell_time = ?, profit_rate = ?, exit_reason = ?
+        SET status = 'CLOSED', sell_price = ?, sell_time = ?, profit_rate = ?, sell_reason = ?
         WHERE id = ?
         """
         self.conn.execute(query, (
