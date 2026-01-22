@@ -75,81 +75,35 @@ setup_structured_logging()
 logger = logging.getLogger(__name__)
 
 # --- [모듈별 로깅 적용] ---
-
-class MarketAnalyzer:
-    """[Helper] 시장 환경 분석기"""
-    def __init__(self, client, trend_calc: Indicators, market_config: Dict):
-        self.client = client
-        self.trend_calc = trend_calc
-        self.market_proxy_code = market_config.get("proxy_code", "069500")
-        self.market_tp = market_config.get("market_tp", "001")
-        
-        self.market_regime = "Unknown"
-        self.market_atr_history = deque(maxlen=20)
-        self.supply_cache: Dict[str, Dict] = {}
-
-    def update_regime(self):
-        """레짐 변화 시에만 로깅하여 가독성을 높입니다."""
-        try:
-            chart_data = self.client.market.get_minute_chart(self.market_proxy_code, tic="60")
-            closes = [item['close'] for item in chart_data]
-            rsi = self.trend_calc.calculate(closes)
-            
-            # ATR 계산 (로직 유지)
-            tr_list = []
-            for i in range(1, len(chart_data)):
-                h, l, pc = chart_data[i]['high'], chart_data[i]['low'], chart_data[i-1]['close']
-                tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
-            atr = statistics.mean(tr_list[-14:]) if tr_list else 0.0
-            self.market_atr_history.append(atr)
-
-            avg_atr = statistics.mean(self.market_atr_history) if len(self.market_atr_history) >= 5 else atr
-            is_volatile = atr > (avg_atr * 1.1)
-
-            prev_regime = self.market_regime
-            if rsi >= 60:
-                self.market_regime = "안정적 강세장" if not is_volatile else "변동성 강세장"
-            elif rsi <= 40:
-                self.market_regime = "조용한 하락장" if not is_volatile else "패닉 하락장"
-            else:
-                self.market_regime = "평온 구간"
-
-            if prev_regime != self.market_regime:
-                logger.info(f"Market Regime Changed: {prev_regime} -> {self.market_regime} (RSI: {rsi:.1f}, ATR: {atr:.2f})")
-        except Exception as e:
-            logger.error(f"Failed to update market regime: {str(e)}", exc_info=True)
-
 class MarketAnalyzer:
     """[Helper] 시장 환경 분석기: 레짐 진단 및 수급 캐싱 담당"""
     def __init__(self, client, trend_calc: Indicators, market_config: Dict):
         self.client = client
         self.trend_calc = trend_calc
         self.market_proxy_code = market_config.get("proxy_code", "069500")
-        self.market_tp = market_config.get("market_tp", "001")
-        
         self.market_rsi = 50.0
-        self.market_atr = 0.0
         self.market_regime = "Unknown"
         self.market_atr_history = deque(maxlen=20)
         self.supply_cache: Dict[str, Dict] = {}
 
     def update_regime(self):
-        """RSI와 ATR을 분석하여 시장의 성격을 정의합니다."""
+        """RSI와 ATR 분석을 통한 시장 성격 정의"""
         try:
             chart_data = self.client.market.get_minute_chart(self.market_proxy_code, tic="60")
             closes = [item['close'] for item in chart_data]
             self.market_rsi = self.trend_calc.calculate(closes)
             
-            # ATR 계산
             tr_list = []
             for i in range(1, len(chart_data)):
                 h, l, pc = chart_data[i]['high'], chart_data[i]['low'], chart_data[i-1]['close']
                 tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
-            self.market_atr = statistics.mean(tr_list[-14:]) if tr_list else 0.0
-            self.market_atr_history.append(self.market_atr)
-
-            avg_atr = statistics.mean(self.market_atr_history) if len(self.market_atr_history) >= 5 else self.market_atr
-            is_volatile = self.market_atr > (avg_atr * 1.1)
+            
+            atr = statistics.mean(tr_list[-14:]) if tr_list else 0.0
+            self.market_atr_history.append(atr)
+            avg_atr = statistics.mean(self.market_atr_history) if len(self.market_atr_history) >= 5 else atr
+            
+            is_volatile = atr > (avg_atr * 1.1)
+            prev_regime = self.market_regime
 
             if self.market_rsi >= 60:
                 self.market_regime = "안정적 강세장" if not is_volatile else "변동성 강세장"
@@ -157,6 +111,9 @@ class MarketAnalyzer:
                 self.market_regime = "조용한 하락장" if not is_volatile else "패닉 하락장"
             else:
                 self.market_regime = "평온 구간"
+
+            if prev_regime != self.market_regime:
+                logger.info(f"Market Regime Changed: {prev_regime} -> {self.market_regime}")
         except Exception as e:
             logger.error(f"시장 분석 실패: {e}")
 
@@ -177,16 +134,18 @@ class MarketAnalyzer:
 
 class StockManager:
     """[Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리"""
-    def __init__(self, client, db: TradeLogger, filter_config: Dict, market_tp: str):
+    def __init__(self, client, db: TradeLogger, filter_config: Dict, strategy_config: Dict):
         self.client = client
         self.db = db
-        self.market_tp = market_tp
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
         self.max_stocks = filter_config.get("max_stocks", 40)
         
         self.stocks: List[str] = []
         self.stock_names: Dict[str, str] = {}
         self.active_positions = self.db.load_open_positions()
+
+        self.exit_time = strategy_config.get("day_trade_exit_time", "15:30")
+        self.decay_rate = strategy_config.get("score_decay_rate", 0.15)
 
     def update_target_stocks(self):
         """보유 종목을 최우선으로 포함하여 감시 리스트를 갱신합니다."""
@@ -214,33 +173,32 @@ class StockManager:
         
         # 1. 당일 종가 매도 로직 (Time-based Exit)
         now_time = datetime.now().strftime("%H:%M")
-        exit_time = "15:20" # 기본값 15:20
         
-        if now_time >= exit_time:
+        if now_time >= self.exit_time:
             self.db.record_sell(pos['id'], current_price, profit, "Day Trade Close")
             print(f"🕒 [종가 매도] {pos['stock_name']} | 수익률: {profit:+.2f}% | 사유: 장 마감 강제 청산")
             del self.active_positions[stock_code]
             return
 
         # 2. 기존 점수 하락 매도 (Score Decay)
-        # 2-1. 설정에서 하락 허용 비율 로드 (기본값 15%)
-        decay_rate = self.config.get("strategy", {}).get("score_decay_rate", 0.15)
-        # 진입 점수 기반 상대적 매도 임계값 산출
-        sell_threshold = pos['buy_score'] * (1 - decay_rate)
+        sell_threshold = pos['buy_score'] * (1 - self.decay_rate)
         
         # 2-2. 상대적 점수 이탈 시 매도 실행
         if current_score < sell_threshold:
             self.db.record_sell(pos['id'], current_price, profit, "Relative Score Decay")
             print(f"📉 [매도 실행] {pos['stock_name']} | 수익률: {profit:+.2f}% | "
-                f"사유: 점수 {decay_rate*100:.0f}% 이탈 (기준: {sell_threshold:.1f})")
+                f"사유: 점수 {self.decay_rate*100:.0f}% 이탈 (기준: {sell_threshold:.1f})")
             del self.active_positions[stock_code]
             return
 
     def is_monitoring_time(self) -> bool:
-        """장 운영 시간 체크"""
+        """장 운영 시간 체크 (에러 수정 버전)"""
         now = datetime.now()
         if now.weekday() >= 5: return False
-        return now.replace(hour=8, minute=30) <= now <= now.replace(hour=15, minute=30)
+        
+        now_str = now.strftime("%H:%M")
+        # 시작 시간(09:00 권장)과 종료 시간(exit_time) 사이인지 문자열로 안전하게 비교
+        return "08:30" <= now_str <= self.exit_time
 
 class TradingStrategy:
     """[Strategy] 트레이딩 전략 및 점수 산출: 하드코딩된 가중치/임계값 제거"""
@@ -258,13 +216,13 @@ class TradingStrategy:
     def get_dynamic_thresholds(self, regime: str) -> Dict[str, float]:
         return self._get_regime_config(regime).get("thresholds", {})
 
-    def get_min_thresholds(self) -> Dict[str, float]:
-        """레짐별 4대 지표 하한선 설정을 반환합니다."""
-        return self.settings.get("min_thresholds", {})
+    def get_min_thresholds(self, regime: str) -> Dict[str, float]:
+        """레짐별 4대 지표 하한선 로드"""
+        return self._get_regime_config(regime).get("min_thresholds", {})
 
     def calculate_conviction_score(self, metrics: Dict, regime: str):
         """총점과 상세 지표 점수를 함께 반환합니다."""
-        w = self.get_scoring_weights(regime)
+        w = self._get_regime_config(regime).get("weights", {"alpha":0.25, "supply":0.25, "vwap":0.25, "trend":0.25})
         
         # 1. Alpha 점수: 민감도 하향 (2.5 -> 1.5) 
         # 시장 지수 대비 초과 수익률이 더 높아야 고득점이 가능하도록 변경
@@ -339,8 +297,8 @@ class MultiTimeframeRSIMonitor:
         # 모듈 초기화 (Config 분배)        
         self.analyzer = MarketAnalyzer(client, self.trend_calc, market_config)
         self.db = TradeLogger()
-        self.stock_mgr = StockManager(client, self.db, filter_config, market_config.get("market_tp", "001"))
-        self.strategy = TradingStrategy(strategy_config)
+        self.strategy = TradingStrategy(config['strategy'])
+        self.stock_mgr = StockManager(client, TradeLogger(), config.get("filters", {}), config['strategy'])
         self.notifier = Notifier(self.stock_mgr.stock_names)
         
         self.status_log = {}
@@ -393,9 +351,9 @@ class MultiTimeframeRSIMonitor:
         while True:
             try:
                 self.stock_mgr.update_target_stocks()
-                if not self.stock_mgr.is_monitoring_time():
-                    logger.info("Market is closed. Shutting down system.")
-                    break
+                # if not self.stock_mgr.is_monitoring_time():
+                #     logger.info("Market is closed. Shutting down system.")
+                #     break
 
                 self.analyzer.update_regime()
                 self.analyzer.fetch_supply_data()
@@ -429,7 +387,7 @@ class MultiTimeframeRSIMonitor:
                         th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
             
                         # [비즈니스 로직] 4개 지표 하한선 필터 (교집합 필터)
-                        min_th = self.strategy.get_min_thresholds()
+                        min_th = self.strategy.get_min_thresholds(self.analyzer.market_regime)
                         
                         is_qualified = (
                             res['alpha_score'] >= min_th['alpha'] and
