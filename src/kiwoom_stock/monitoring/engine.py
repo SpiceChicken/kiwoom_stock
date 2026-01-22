@@ -223,10 +223,18 @@ class StockManager:
             return
 
         # 2. 기존 점수 하락 매도 (Score Decay)
-        if current_score < 50:
-            self.db.record_sell(pos['id'], current_price, profit, "Score Decay")
-            print(f"📉 [가상 매도] {pos['stock_name']} | 수익률: {profit:+.2f}% | 사유: 점수 하락")
+        # 2-1. 설정에서 하락 허용 비율 로드 (기본값 15%)
+        decay_rate = self.config.get("strategy", {}).get("score_decay_rate", 0.15)
+        # 진입 점수 기반 상대적 매도 임계값 산출
+        sell_threshold = pos['buy_score'] * (1 - decay_rate)
+        
+        # 2-2. 상대적 점수 이탈 시 매도 실행
+        if current_score < sell_threshold:
+            self.db.record_sell(pos['id'], current_price, profit, "Relative Score Decay")
+            print(f"📉 [매도 실행] {pos['stock_name']} | 수익률: {profit:+.2f}% | "
+                f"사유: 점수 {decay_rate*100:.0f}% 이탈 (기준: {sell_threshold:.1f})")
             del self.active_positions[stock_code]
+            return
 
     def is_monitoring_time(self) -> bool:
         """장 운영 시간 체크"""
@@ -385,9 +393,9 @@ class MultiTimeframeRSIMonitor:
         while True:
             try:
                 self.stock_mgr.update_target_stocks()
-                # if not self.stock_mgr.is_monitoring_time():
-                #     logger.info("Market is closed. Shutting down system.")
-                #     break
+                if not self.stock_mgr.is_monitoring_time():
+                    logger.info("Market is closed. Shutting down system.")
+                    break
 
                 self.analyzer.update_regime()
                 self.analyzer.fetch_supply_data()
