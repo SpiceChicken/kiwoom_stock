@@ -5,15 +5,15 @@
 
 import sys
 import logging
-from .utils import setup_structured_logging # [신규] 유틸리티에서 로깅 설정 가져오기
 import time as time_mod
 from datetime import datetime, time
 from typing import Dict, Optional
 
 from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
-from .manager import StockManager
+from .manager import StockManager, Position
 from .notifier import Notifier
+from .utils import setup_structured_logging
 from kiwoom_stock.core.database import TradeLogger
 from ..core.indicators import Indicators
 
@@ -211,7 +211,7 @@ class MultiTimeframeRSIMonitor:
                                     "buy_regime": self.analyzer.market_regime.value
                                 }
                                 buy_data['id'] = self.db.record_buy(buy_data)
-                                self.stock_mgr.active_positions[stock] = buy_data
+                                self.stock_mgr.active_positions[stock] = Position(**buy_data)
                                 self.notifier.notify_buy(buy_data)
 
                         if log['momentum'] >= self.strategy.momentum_threshold:
