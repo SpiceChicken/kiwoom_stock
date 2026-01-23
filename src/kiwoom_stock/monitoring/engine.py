@@ -12,6 +12,7 @@ import time as time_mod  # time.sleep() 등에 사용
 from datetime import datetime, time  # datetime.time 객체로 사용
 from typing import Dict, List, Optional
 from collections import deque
+from enum import Enum
 
 from ..api.parser import clean_numeric
 from ..core.indicators import Indicators
@@ -74,6 +75,14 @@ def setup_structured_logging():
 setup_structured_logging()
 logger = logging.getLogger(__name__)
 
+class MarketRegime(Enum):
+    STABLE_BULL = "안정적 강세장"
+    VOLATILE_BULL = "변동성 강세장"
+    QUIET_BEAR = "조용한 하락장"
+    PANIC_BEAR = "패닉 하락장"
+    NEUTRAL = "평온 구간"
+    UNKNOWN = "Unknown"
+
 # --- [모듈별 로깅 적용] ---
 class MarketAnalyzer:
     """[Helper] 시장 환경 분석기: 레짐 진단 및 수급 캐싱 담당"""
@@ -82,7 +91,7 @@ class MarketAnalyzer:
         self.trend_calc = trend_calc
         self.market_proxy_code = market_config.get("proxy_code", "069500")
         self.market_rsi = 50.0
-        self.market_regime = "Unknown"
+        self.market_regime = MarketRegime.UNKNOWN
         self.market_atr_history = deque(maxlen=20)
         self.supply_cache: Dict[str, Dict] = {}
 
@@ -106,14 +115,14 @@ class MarketAnalyzer:
             prev_regime = self.market_regime
 
             if self.market_rsi >= 60:
-                self.market_regime = "안정적 강세장" if not is_volatile else "변동성 강세장"
+                self.market_regime = MarketRegime.VOLATILE_BULL if is_volatile else MarketRegime.STABLE_BULL
             elif self.market_rsi <= 40:
-                self.market_regime = "조용한 하락장" if not is_volatile else "패닉 하락장"
+                self.market_regime = MarketRegime.PANIC_BEAR if is_volatile else MarketRegime.QUIET_BEAR
             else:
-                self.market_regime = "평온 구간"
+                self.market_regime = MarketRegime.NEUTRAL
 
             if prev_regime != self.market_regime:
-                logger.info(f"Market Regime Changed: {prev_regime} -> {self.market_regime}")
+                logger.info(f"Market Regime Changed: {prev_regime.value} -> {self.market_regime.value}")
         except Exception as e:
             logger.error(f"시장 분석 실패: {e}")
 
@@ -228,23 +237,49 @@ class TradingStrategy:
         self.settings = strategy_config
         self.momentum_threshold = strategy_config.get("momentum_threshold", 10.0)
 
-    def _get_regime_config(self, regime: str) -> Dict:
+        # 캐싱을 위한 내부 상태 변수
+        self._current_regime = MarketRegime.UNKNOWN
+        self._cached_config = {}
+
+    def update_context(self, regime: MarketRegime):
+        """
+        레짐이 변경될 때만 호출하여 관련 설정을 내부 메모리에 캐싱합니다.
+       
+        """
+        if self._current_regime == regime and self._cached_config:
+            return # 변경 사항이 없으면 유지
+
+        self._current_regime = regime
         regimes = self.settings.get("regimes", {})
-        return regimes.get(regime, regimes.get("default", {}))
+        # 해당 레짐 설정 로드, 없으면 default 로드
+        self._cached_config = regimes.get(regime.value, regimes.get("default", {}))
+        logger.info(f"Strategy context updated to: {regime.value}")
 
-    def get_scoring_weights(self, regime: str) -> Dict[str, float]:
-        return self._get_regime_config(regime).get("weights", {})
+    @property
+    def weights(self) -> Dict[str, float]:
+        """현재 레짐의 가중치를 반환합니다. (누락 시 균등 가중치)"""
+        return self._cached_config.get("weights", {
+            "alpha": 0.25, "supply": 0.25, "vwap": 0.25, "trend": 0.25
+        })
 
-    def get_dynamic_thresholds(self, regime: str) -> Dict[str, float]:
-        return self._get_regime_config(regime).get("thresholds", {})
+    @property
+    def entry_thresholds(self) -> Dict[str, float]:
+        """현재 레짐의 진입 임계값을 반환합니다. (누락 시 보수적 기준)"""
+        return self._cached_config.get("thresholds", {
+            "strong": 85.0, "interest": 75.0, "alert": 70.0
+        })
 
-    def get_min_thresholds(self, regime: str) -> Dict[str, float]:
-        """레짐별 4대 지표 하한선 로드"""
-        return self._get_regime_config(regime).get("min_thresholds", {})
+    @property
+    def min_thresholds(self) -> Dict[str, float]:
+        """
+        현재 레짐의 개별 지표 하한선을 반환합니다.
+        레짐별 설정 -> 공통 루트 설정 순으로 참조합니다.
+        """
+        return self._cached_config.get("min_thresholds", self.settings.get("min_thresholds", {}))
 
-    def calculate_conviction_score(self, metrics: Dict, regime: str):
+    def calculate_conviction_score(self, metrics: Dict):
         """총점과 상세 지표 점수를 함께 반환합니다."""
-        w = self._get_regime_config(regime).get("weights", {"alpha":0.25, "supply":0.25, "vwap":0.25, "trend":0.25})
+        w = self.weights
         
         # 1. Alpha 점수: 민감도 하향 (2.5 -> 1.5) 
         # 시장 지수 대비 초과 수익률이 더 높아야 고득점이 가능하도록 변경
@@ -351,11 +386,11 @@ class MultiTimeframeRSIMonitor:
                 "trend_rsi": self.trend_calc.calculate([d['close'] for d in trend_data])
             }
 
-            score, score_details = self.strategy.calculate_conviction_score(metrics, self.analyzer.market_regime)
+            score, score_details = self.strategy.calculate_conviction_score(metrics)
             momentum = round(score - self.score_history.get(stock_code, score), 1)
             self.score_history[stock_code] = score
             
-            th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
+            th = self.strategy.entry_thresholds
             status = "🔥강력추천" if score >= th['strong'] else ("👀관심" if score >= th['interest'] else "관망")
             if momentum >= self.strategy.momentum_threshold: status = "🚀수급폭발"
 
@@ -408,16 +443,19 @@ class MultiTimeframeRSIMonitor:
                     logger.info("Market is closed. Shutting down system.")
                     break
 
+                # 1. 시장 상황 파악
                 self.analyzer.update_regime()
-                self.analyzer.fetch_supply_data()
 
-                # 현재 시간 확인
-                current_time = datetime.now().time()
+                # 2. 파악된 레짐으로 전략 컨텍스트 동기화 (여기서 딱 한 번만 캐싱 수행)
+                self.strategy.update_context(self.analyzer.market_regime)
+
+                # 3. 외인/기관 수급 상황 파악
+                self.analyzer.fetch_supply_data()
                 
                 for stock in self.stock_mgr.stocks: self.check_conditions(stock)
                 
                 sorted_stocks = sorted(self.stock_mgr.stocks, key=lambda x: self.status_log.get(x, {}).get('momentum', 0), reverse=True)
-                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 시장 레짐: {self.analyzer.market_regime}")
+                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 시장 레짐: {self.analyzer.market_regime.value}")
                 print(f"{'종목명':<10} | {'점수':<5} | {'모멘텀':<6} | {'상태':<10}")
                 print("-" * 55)
 
@@ -434,13 +472,15 @@ class MultiTimeframeRSIMonitor:
                     m_str = f"+{log['momentum']}" if log['momentum'] > 0 else f"{log['momentum']}"
                     print(f"{name:<10} | {log['score']:>5.1f} | {m_str:>6} | {log['reason']:<10}")
                     
-                    if res:
-                        th = self.strategy.get_dynamic_thresholds(self.analyzer.market_regime)
-                        # [비즈니스 로직] 4개 지표 하한선 필터 (교집합 필터)
-                        min_th = self.strategy.get_min_thresholds(self.analyzer.market_regime)
-                        
+                    if res:                        
                         # [추상화 적용] 진입 판정 호출
-                        if self.evaluate_entry_signal(stock, res, th, min_th, current_time):
+                        # [Pythonic] 메서드 괄호()와 인자 전달이 사라져 가독성이 극대화됨
+                        if self.evaluate_entry_signal(
+                            stock, res, 
+                            self.strategy.entry_thresholds, # Property 접근
+                            self.strategy.min_thresholds,   # Property 접근
+                            datetime.now().time()
+                        ):
                             if stock not in self.stock_mgr.active_positions:
                                 # 매수 실행 및 DB 기록
                                 buy_data = {
@@ -449,7 +489,7 @@ class MultiTimeframeRSIMonitor:
                                     "alpha_score": res['alpha_score'], "supply_score": res['supply_score'],
                                     "vwap_score": res['vwap_score'], "trend_score": res['trend_score'],
                                     "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    "buy_regime": self.analyzer.market_regime
+                                    "buy_regime": self.analyzer.market_regime.value
                                 }
                                 buy_data['id'] = self.db.record_buy(buy_data)
                                 self.stock_mgr.active_positions[stock] = buy_data
