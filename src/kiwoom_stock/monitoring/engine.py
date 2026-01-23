@@ -13,6 +13,7 @@ from datetime import datetime, time, timedelta  # datetime.time 객체로 사용
 from typing import Dict, List, Optional
 from collections import deque
 from enum import Enum
+from dataclasses import dataclass, asdict
 
 from ..api.parser import clean_numeric
 from ..core.indicators import Indicators
@@ -141,17 +142,38 @@ class MarketAnalyzer:
         except Exception as e:
             logger.error(f"수급 캐싱 실패: {e}")
 
+@dataclass
+class Position:
+    id: int
+    stock_code: str
+    stock_name: str
+    buy_price: float
+    buy_score: float
+    alpha_score: float
+    supply_score: float
+    vwap_score: float
+    trend_score: float
+    buy_time: str
+    buy_regime: str
+
 class StockManager:
     """[Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리"""
     def __init__(self, client, db: TradeLogger, filter_config: Dict, strategy_config: Dict):
         self.client = client
         self.db = db
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
-        self.max_stocks = filter_config.get("max_stocks", 40)
+        self.max_stocks = filter_config.get("max_stocks", 50)
         
         self.stocks: List[str] = []
         self.stock_names: Dict[str, str] = {}
-        self.active_positions = self.db.load_open_positions()
+
+        raw_positions = self.db.load_open_positions()
+        # [개선] Position 객체로 관리
+        self.active_positions: Dict[str, Position] = {
+            code: Position(**data) for code, data in raw_positions.items()
+        }
+        # [안전장치] 계좌 전체 손실 제한 (예: -5%)
+        self.total_loss_limit = strategy_config.get("total_loss_limit", -0.05)
 
         # [최적화] 문자열을 time 객체로 미리 변환 (루프 내 오버헤드 제거)
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
@@ -165,6 +187,30 @@ class StockManager:
         self.decay_rate = strategy_config.get("score_decay_rate", 0.15)
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025) # 기본 2.5%
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.015)
+
+    def check_kill_switch(self, status_log: Dict) -> bool:
+        """DB에 기록된 당일 확정 손익과 현재 보유 종목의 미실현 손익을 합산합니다."""
+        
+        # 1. 기존 매매 데이터(DB)에서 오늘 확정된 누적 수익률 가져오기
+        # TradeLogger에 오늘 날짜의 'CLOSED' 상태인 profit_rate 합계를 구하는 메서드가 있다고 가정
+        realized_pnl = self.db.get_today_realized_pnl() # [핵심 개선] DB 데이터 참조
+        
+        # 2. 현재 보유 중인 종목(active_positions)의 실시간 손익 계산
+        unrealized_pnl = 0.0
+        for code, pos in self.active_positions.items():
+            log = status_log.get(code)
+            if log and "price" in log:
+                # 내 기존 매수 데이터(pos['buy_price'])와 현재가 비교
+                profit = (log['price'] / pos['buy_price'] - 1) * 100
+                unrealized_pnl += profit
+                
+        # 3. 전체 합산 (확정 + 미실현)
+        total_pnl = realized_pnl + unrealized_pnl
+        
+        if total_pnl <= self.total_loss_limit:
+            logger.critical(f"🚨 [KILL-SWITCH] 오늘 전체 손실 {total_pnl:.2f}% 도달 (한도: {self.total_loss_limit}%)")
+            return True
+        return False
 
     def get_exit_reason(self, pos: Dict, current_price: float, current_score: float, strong_threshold: float) -> Optional[str]:
         """
@@ -200,12 +246,16 @@ class StockManager:
         """보유 종목을 최우선으로 포함하여 감시 리스트를 갱신합니다."""
         try:
             new_stocks = list(self.active_positions.keys())
+            seen_codes = set(new_stocks) # [최적화] 중복 체크용 Set
             upper_list = self.client.market.get_top_trading_value(market_tp="001")
             
             for item in upper_list:
+                if len(new_stocks) >= self.max_stocks: break
                 code, name = item['stk_cd'], item['stk_nm']
                 if any(kw in name for kw in self.etf_keywords): continue
-                if code not in new_stocks: new_stocks.append(code)
+                if code not in seen_codes:
+                    new_stocks.append(code)
+                    seen_codes.add(code)
                 self.stock_names[code] = name
             
             self.stocks = new_stocks[:self.max_stocks]
@@ -444,29 +494,51 @@ class MultiTimeframeRSIMonitor:
         logger.info("Starting Monitoring Loop...")
         while True:
             try:
+                # # [안전장치] 시장 마감 확인 및 가동 중단
+                # if not self.stock_mgr.is_monitoring_time():
+                #     logger.info("Market is closed. Shutting down system.")
+                #     break
+                
                 self.stock_mgr.update_target_stocks()
-                if not self.stock_mgr.is_monitoring_time():
-                    logger.info("Market is closed. Shutting down system.")
-                    break
-
                 # 1. 시장 상황 파악
                 self.analyzer.update_regime()
-
                 # 2. 파악된 레짐으로 전략 컨텍스트 동기화 (여기서 딱 한 번만 캐싱 수행)
                 self.strategy.update_context(self.analyzer.market_regime)
-
                 # 3. 외인/기관 수급 상황 파악
                 self.analyzer.fetch_supply_data()
                 
-                for stock in self.stock_mgr.stocks: self.check_conditions(stock)
+                # [최적화] API 호출 중복 제거: 한 번의 루프에서 모든 데이터 수집 및 결과 저장
+                scan_results = {}
+                for stock in self.stock_mgr.stocks:
+                    res = self.check_conditions(stock)
+                    if res: scan_results[stock] = res
                 
-                sorted_stocks = sorted(self.stock_mgr.stocks, key=lambda x: self.status_log.get(x, {}).get('momentum', 0), reverse=True)
+                # 킬스위치 작동
+                if self.stock_mgr.check_kill_switch(self.status_log):
+                    logger.critical("블랙 스완 대응: 전 종목 시장가 매도 및 시스템 긴급 셧다운")
+                    
+                    for code in list(self.stock_mgr.active_positions.keys()):
+                        pos = self.stock_mgr.active_positions[code]
+                        log = self.status_log.get(code)
+                        current_price = log['price'] if log else pos['buy_price'] # 가격 정보 없으면 매수가 기준
+                        
+                        # [개선] 판정 로직을 거치지 않고 직접 DB 기록 및 포지션 삭제
+                        profit = round((current_price / pos['buy_price'] - 1) * 100, 2)
+                        self.db.record_sell(pos['id'], current_price, profit, "KILL-SWITCH ACTIVATED")
+                        print(f"🚫 [긴급 매도] {pos['stock_name']} | 손익: {profit}%")
+                        
+                    break # 메인 루프 탈출
+                
+                # 모멘텀 기준 정렬 (status_log 참조)
+                sorted_stocks = sorted(self.stock_mgr.stocks, 
+                                       key=lambda x: self.status_log.get(x, {}).get('momentum', 0), 
+                                       reverse=True)
                 print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 시장 레짐: {self.analyzer.market_regime.value}")
                 print(f"{'종목명':<10} | {'점수':<5} | {'모멘텀':<6} | {'상태':<10}")
                 print("-" * 55)
 
                 for stock in sorted_stocks:
-                    res = self.check_conditions(stock)
+                    res = scan_results.get(stock)
                     log = self.status_log.get(stock)
                     if not log or "price" not in log: continue
 

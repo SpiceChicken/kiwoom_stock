@@ -77,3 +77,25 @@ class TradeLogger:
             profit_rate, reason, db_id
         ))
         self.conn.commit()
+
+    def get_today_realized_pnl(self) -> float:
+        """
+        오늘 매도 완료(CLOSED)된 모든 종목의 누적 수익률 합계를 DB에서 직접 계산하여 반환합니다.
+        프로그램 재시작 시에도 오늘 하루의 전체 손익을 정확히 추적할 수 있습니다.
+        """
+        # 1. 오늘 날짜 문자열 생성 (YYYY-MM-DD)
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        # 2. SQL 쿼리: 오늘(sell_time LIKE 'YYYY-MM-DD%') 매도된 종목의 profit_rate 합산
+        query = "SELECT SUM(profit_rate) as total_pnl FROM trades WHERE status = 'CLOSED' AND sell_time LIKE ?"
+        
+        try:
+            cursor = self.conn.execute(query, (f"{today_str}%",))
+            result = cursor.fetchone()
+            
+            # 3. 결과 반환 (오늘 거래가 없어서 결과가 None인 경우 0.0 반환)
+            return result['total_pnl'] if result['total_pnl'] is not None else 0.0
+        except Exception as e:
+            # 로깅 시스템이 설정되어 있다면 활용 (예: logger.error)
+            print(f"오늘 수익률 조회 실패: {e}")
+            return 0.0
