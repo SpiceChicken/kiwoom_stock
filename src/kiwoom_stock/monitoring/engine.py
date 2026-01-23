@@ -9,7 +9,7 @@ import logging
 import os
 from logging.handlers import TimedRotatingFileHandler
 import time as time_mod  # time.sleep() 등에 사용
-from datetime import datetime, time  # datetime.time 객체로 사용
+from datetime import datetime, time, timedelta  # datetime.time 객체로 사용
 from typing import Dict, List, Optional
 from collections import deque
 from enum import Enum
@@ -156,13 +156,17 @@ class StockManager:
         # [최적화] 문자열을 time 객체로 미리 변환 (루프 내 오버헤드 제거)
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
         self.exit_time_obj = time.fromisoformat(exit_str)
+        # [수정] 장 마감 3분 전 강제 청산 시간 계산 (오버헤드 방지를 위해 미리 계산)
+        # datetime.combine을 사용하여 안전하게 시간 연산 수행
+        dummy_dt = datetime.combine(datetime.today(), self.exit_time_obj)
+        self.forced_exit_time = (dummy_dt - timedelta(minutes=3)).time()
         
         # [신규] 익절/손절/감쇠 설정 로드
         self.decay_rate = strategy_config.get("score_decay_rate", 0.15)
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025) # 기본 2.5%
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.015)
 
-    def get_exit_reason(self, pos: Dict, current_price: float, current_score: float) -> Optional[str]:
+    def get_exit_reason(self, pos: Dict, current_price: float, current_score: float, strong_threshold: float) -> Optional[str]:
         """
         설정된 익절/손절/시간/점수 조건을 검사하여 매도 사유를 반환합니다.
    
@@ -170,16 +174,19 @@ class StockManager:
         # 현재 수익률 계산 (소수점 단위)
         profit_rate = (current_price / pos['buy_price'] - 1)
         
-        # 1. 시간 기반 당일 청산 (최우선)
-        if datetime.now().time() >= self.exit_time_obj:
-            return "Day Trade Close"
+        # 1. 시간 기반 당일 청산 (장 마감 3분 전부터 최우선 수행)
+        if datetime.now().time() >= self.forced_exit_time:
+            return "Day Trade Close (3m Early)"
             
         # 2. 하드 손절 (Stop Loss) - 설정값 이하로 하락 시 즉시 매도
         if profit_rate <= self.stop_loss_rate:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
             
-        # 3. 목표 수익 도달 (Take Profit) - 설정값 이상 상승 시 수익 확정
+        # 3. 지능형 익절 (Take Profit)
+        # 수익률이 목표치 이상이지만, 점수가 여전히 강하면(strong_threshold 이상) 매도를 미룹니다.
         if profit_rate >= self.target_profit_rate:
+            if current_score >= strong_threshold:
+                return None # 기세가 좋으므로 익절 보류 (Let the winner run)
             return f"Take Profit (+{profit_rate*100:.1f}%)"
 
         # 4. 상대적 점수 하락 (Score Decay)
@@ -206,7 +213,7 @@ class StockManager:
         except Exception as e:
             logger.error(f"종목 갱신 실패: {e}")
 
-    def monitor_active_signals(self, stock_code, current_price, current_score):
+    def monitor_active_signals(self, stock_code, current_price, current_score, strong_threshold):
         """보유 종목의 매도 조건을 감시하고 DB에 기록합니다."""
         if stock_code not in self.active_positions:
             return
@@ -214,7 +221,7 @@ class StockManager:
         pos = self.active_positions[stock_code]
         
         # [추상화 호출] 판정은 평가기에게 맡깁니다.
-        reason = self.get_exit_reason(pos, current_price, current_score)
+        reason = self.get_exit_reason(pos, current_price, current_score, strong_threshold)
         
         if reason:
             profit = round((current_price / pos['buy_price'] - 1) * 100, 2)
@@ -291,11 +298,10 @@ class TradingStrategy:
         synergy = 20 if (metrics['f_buy'] > 0 and metrics['i_buy'] > 0) else (-20 if (metrics['f_buy'] < 0 and metrics['i_buy'] < 0) else 0)
         supply_raw = max(0, min(100, (s_ratio * 50) + synergy))
         
-        # 3. VWAP 점수: 민감도 대폭 하향 (25 -> 10) 
-        # 1월 22일 모든 종목이 100점을 기록했던 현상을 방어하기 위해,
-        # 가격 이격도가 5% 이상일 때만 100점에 도달하도록 수정 (기존은 2%에서 100점)
+        # 3. VWAP 점수: 민감도 추가 하향 (10 -> 8)
+        # 이제 가격 이격도가 약 6.25% 이상일 때만 100점에 도달합니다. (기존 5%)
         dev = (metrics['price'] / metrics['vwap'] - 1) * 100 if metrics['vwap'] > 0 else 0
-        vwap_raw = max(0, min(100, 50 + (dev * 10)))
+        vwap_raw = max(0, min(100, 50 + (dev * 8)))
         
         # 4. Trend 점수: 민감도 하향 (2.5 -> 1.5) 
         # 단순히 RSI가 70을 넘는 것만으로는 부족하며, 80 이상의 강력한 과매수 구간에 
@@ -465,7 +471,8 @@ class MultiTimeframeRSIMonitor:
                     if not log or "price" not in log: continue
 
                     # 보유 종목 매도 감시 위임
-                    self.stock_mgr.monitor_active_signals(stock, log['price'], log['score'])
+                    strong_thresholds = self.strategy.entry_thresholds.get('strong', 85.0)
+                    self.stock_mgr.monitor_active_signals(stock, log['price'], log['score'], strong_thresholds)
                     
                     # 화면 출력 및 알림
                     name = self.stock_mgr.stock_names.get(stock, stock)
