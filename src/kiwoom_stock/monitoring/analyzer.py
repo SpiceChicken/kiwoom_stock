@@ -1,6 +1,7 @@
 import statistics
 import logging
 from enum import Enum
+from datetime import datetime
 from collections import deque
 from typing import Dict
 from ..api.parser import clean_numeric
@@ -26,6 +27,7 @@ class MarketAnalyzer:
         self.market_regime = MarketRegime.UNKNOWN
         self.market_atr_history = deque(maxlen=20)
         self.supply_cache: Dict[str, Dict] = {}
+        self.last_supply_update = datetime.now() # [추가] 마지막 업데이트 시간 추적
 
     def update_regime(self):
         """RSI와 ATR 분석을 통한 시장 성격 정의"""
@@ -59,16 +61,40 @@ class MarketAnalyzer:
             logger.error(f"시장 분석 실패: {e}")
 
     def fetch_supply_data(self):
-        """외인/기관 수급 데이터를 분리하여 캐싱합니다."""
-        try:
-            self.supply_cache = {}
-            for invsr, key in [("6", "f"), ("7", "i")]:
+        """
+        외인/기관 수급 데이터를 분리하여 캐싱합니다. 
+        [개선] 실패 시 기존 데이터를 유지하고 성공 시에만 부분 업데이트(Atomic Update)합니다.
+        """
+        
+        success_count = 0
+        for invsr, key in [("6", "f"), ("7", "i")]:
+            try:
                 items = self.client.market.get_investor_supply(market_tp="001", investor_tp=invsr)
-                for item in items:
-                    code = item.get("stk_cd", "").split('_')[0]
-                    if not code: continue
-                    qty = clean_numeric(item.get("netprps_qty", "0"))
-                    if code not in self.supply_cache: self.supply_cache[code] = {'f': 0, 'i': 0}
-                    self.supply_cache[code][key] = qty
-        except Exception as e:
-            logger.error(f"수급 캐싱 실패: {e}")
+                
+                # 데이터가 정상 수신된 경우에만 업데이트 프로세스 진행
+                if items and len(items) > 0:
+                    for item in items:
+                        code = item.get("stk_cd", "").split('_')[0]
+                        if not code: continue
+                        
+                        qty = clean_numeric(item.get("netprps_qty", "0"))
+                        
+                        # 원자적 업데이트: 해당 종목-주체 데이터만 교체
+                        if code not in self.supply_cache:
+                            self.supply_cache[code] = {'f': 0, 'i': 0}
+                        self.supply_cache[code][key] = qty
+                    success_count += 1
+                else:
+                    logger.warning(f"수급 데이터({key}) 수신 결과가 비어있습니다. 이전 캐시를 유지합니다.")
+                    
+            except Exception as e:
+                # 에러 발생 시에도 self.supply_cache는 이전 루프의 상태를 유지함 (안전)
+                logger.error(f"수급 캐싱 중 예외 발생 (investor_tp={invsr}): {e}")
+
+        # 업데이트 시간 기록 및 신선도 체크
+        if success_count > 0:
+            self.last_supply_update = datetime.now()
+        
+        # [추가] 10분(600초) 이상 업데이트 실패 시 치명적 경고
+        if (datetime.now() - self.last_supply_update).total_seconds() > 600:
+            logger.critical("🚨 수급 데이터가 10분 이상 동결되었습니다. 키움 API 연결 상태를 확인하십시오.")
