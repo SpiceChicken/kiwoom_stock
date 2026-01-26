@@ -2,6 +2,8 @@ import sqlite3
 from datetime import datetime
 from typing import List, Dict
 
+from kiwoom_stock.monitoring.manager import Position
+
 ###### QUERY ######
 # 총 수익률 합계: SELECT SUM(profit_rate) FROM trades WHERE status='CLOSED'
 # 레짐별 평균 수익률: SELECT buy_regime, AVG(profit_rate) FROM trades GROUP BY buy_regime
@@ -65,16 +67,18 @@ class TradeLogger:
         self.conn.commit()
         return cursor.lastrowid
 
-    def record_sell(self, db_id: int, sell_price: float, profit_rate: float, reason: str):
+    def record_sell(self, pos: Position):
         """매도 시 해당 레코드를 'CLOSED' 상태로 업데이트합니다."""
+        profit_rate = pos.calc_profit_rate
+
         query = """
         UPDATE trades 
         SET status = 'CLOSED', sell_price = ?, sell_time = ?, profit_rate = ?, sell_reason = ?
         WHERE id = ?
         """
         self.conn.execute(query, (
-            sell_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            profit_rate, reason, db_id
+            pos.sell_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            profit_rate, pos.sell_reason, pos.id
         ))
         self.conn.commit()
 

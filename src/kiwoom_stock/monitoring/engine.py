@@ -38,7 +38,7 @@ class MultiTimeframeRSIMonitor:
         self.analyzer = MarketAnalyzer(client, self.trend_calc, market_config)
         self.strategy = TradingStrategy(strategy_config)
         self.stock_mgr = StockManager(client, TradeLogger(), filter_config, strategy_config)
-        self.notifier = Notifier(self.stock_mgr.stock_names)
+        self.notifier = Notifier(self.stock_mgr.stock_names, config)
 
         # [최적화] 진입 마감 시간을 time 객체로 캐싱
         entry_str = config['strategy'].get("entry_deadline", "14:30")
@@ -151,17 +151,21 @@ class MultiTimeframeRSIMonitor:
                 
                 # 킬스위치 작동
                 if self.stock_mgr.check_kill_switch(self.status_log):
-                    logger.critical("블랙 스완 대응: 전 종목 시장가 매도 및 시스템 긴급 셧다운")
+                    kill_switch_text = "블랙 스완 대응: 전 종목 시장가 매도 및 시스템 긴급 셧다운"
+                    logger.critical(kill_switch_text)
                     
                     for code in list(self.stock_mgr.active_positions.keys()):
                         pos = self.stock_mgr.active_positions[code]
                         log = self.status_log.get(code)
-                        current_price = log['price'] if log else pos.buy_price # 가격 정보 없으면 매수가 기준
+
+                        pos.sell_price = log['price'] if log else pos.buy_price
+                        pos.sell_reason = "KILL-SWITCH ACTIVATED"
                         
                         # [개선] 판정 로직을 거치지 않고 직접 DB 기록 및 포지션 삭제
-                        profit = round((current_price / pos.buy_price - 1) * 100, 2)
-                        self.db.record_sell(pos.id, current_price, profit, "KILL-SWITCH ACTIVATED")
-                        self.notifier.notify_sell(pos.stock_name, profit, "KILL-SWITCH ACTIVATED")
+                        self.db.record_sell(pos)
+                        self.notifier.notify_sell(pos)
+
+                    self.notifier.notify_critical(kill_switch_text)
                         
                     break # 메인 루프 탈출
                 
@@ -170,7 +174,7 @@ class MultiTimeframeRSIMonitor:
                                        key=lambda x: self.status_log.get(x, {}).get('momentum', 0), 
                                        reverse=True)
 
-                self.notifier.print_status_table_header(self.analyzer.market_regime.value)
+                self.notifier.start_status_session()
 
                 for stock in sorted_stocks:
                     res = scan_results.get(stock)
@@ -179,15 +183,13 @@ class MultiTimeframeRSIMonitor:
 
                     # 보유 종목 매도 감시 위임
                     strong_thresholds = self.strategy.entry_thresholds.get('strong', 85.0)
-                    self.stock_mgr.monitor_active_signals(stock, log['price'], log['score'], strong_thresholds, self.notifier)
+                    self.stock_mgr.monitor_active_signals(stock, log, strong_thresholds, self.notifier)
                     
                     # 화면 출력 및 알림
-                    self.notifier.notify_status(
-                        name = self.stock_mgr.stock_names.get(stock, stock),
-                        score=log['score'], 
-                        momentum=log['momentum'], 
-                        status=log['reason']
-                    )
+
+                    # log 딕셔너리에 분석에 필요한 종목명(name)을 추가
+                    log['name'] = self.stock_mgr.stock_names.get(stock, stock)
+                    self.notifier.collect_status(log)
                     
                     if res:                        
                         # [추상화 적용] 진입 판정 호출
@@ -214,6 +216,9 @@ class MultiTimeframeRSIMonitor:
 
                         if log['momentum'] >= self.strategy.momentum_threshold:
                             self.notifier.notify_momentum(res)
+
+                # 모든 종목 처리가 끝나면 한 번에 전송
+                self.notifier.flush_status(self.analyzer.market_regime.value)
 
                 time_mod.sleep(self.config.get("check_interval", 60))
             except KeyboardInterrupt:

@@ -3,8 +3,6 @@ from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-from .notifier import Notifier
-
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
 
@@ -27,6 +25,18 @@ class Position:
     profit_rate: Optional[float] = None
     sell_time: Optional[str] = None
     sell_reason: Optional[str] = None
+    
+    @property
+    def calc_profit_rate(self) -> float:
+        """
+        매수가 대비 수익률을 계산합니다.
+        """
+        # 0으로 나누기 방지 및 가격 미지정 시 0.0 반환
+        if not self.buy_price or not self.sell_price:
+            return 0.0
+            
+        # sell_price가 0이면(아직 매도 전) 현재가를 대신 넣거나 0.0을 반환하도록 설계 가능
+        return round((self.sell_price / self.buy_price - 1) * 100, 2)
 
 class StockManager:
     """[Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리"""
@@ -84,13 +94,13 @@ class StockManager:
             return True
         return False
 
-    def get_exit_reason(self, pos: Position, current_price: float, current_score: float, strong_threshold: float) -> Optional[str]:
+    def get_exit_reason(self, pos: Position, current_score: float, strong_threshold: float) -> Optional[str]:
         """
         설정된 익절/손절/시간/점수 조건을 검사하여 매도 사유를 반환합니다.
    
         """
         # 현재 수익률 계산 (소수점 단위)
-        profit_rate = (current_price / pos.buy_price - 1)
+        profit_rate = (pos.sell_price / pos.buy_price - 1)
         
         # 1. 시간 기반 당일 청산 (장 마감 3분 전부터 최우선 수행)
         if datetime.now().time() >= self.forced_exit_time:
@@ -135,21 +145,21 @@ class StockManager:
         except Exception as e:
             logger.error(f"종목 갱신 실패: {e}")
 
-    def monitor_active_signals(self, stock_code, current_price, current_score, strong_threshold, notifier):
+    def monitor_active_signals(self, stock_code, log: Dict, strong_threshold, notifier):
         """보유 종목의 매도 조건을 감시하고 DB에 기록합니다."""
         if stock_code not in self.active_positions:
             return
 
         pos = self.active_positions[stock_code]
+        pos.sell_price = log['price']
         
         # [추상화 호출] 판정은 평가기에게 맡깁니다.
-        reason = self.get_exit_reason(pos, current_price, current_score, strong_threshold)
+        pos.sell_reason = self.get_exit_reason(pos, log['score'], strong_threshold)
         
-        if reason:
-            profit = round((current_price / pos.buy_price - 1) * 100, 2)
+        if pos.sell_reason:
             # 매도 기록 및 포지션 제거
-            self.db.record_sell(pos.id, current_price, profit, reason)
-            notifier.notify_sell(pos.stock_name, profit, reason)
+            self.db.record_sell(pos)
+            notifier.notify_sell(pos)
             del self.active_positions[stock_code]
 
     def is_monitoring_time(self) -> bool:
