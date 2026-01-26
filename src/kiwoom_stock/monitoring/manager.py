@@ -31,8 +31,10 @@ class Position:
         """
         매수가 대비 수익률을 계산합니다.
         """
-        if self.buy_price == 0:
+        # 0으로 나누기 방지 및 가격 미지정 시 0.0 반환
+        if not self.buy_price or not self.sell_price:
             return 0.0
+            
         # sell_price가 0이면(아직 매도 전) 현재가를 대신 넣거나 0.0을 반환하도록 설계 가능
         return round((self.sell_price / self.buy_price - 1) * 100, 2)
 
