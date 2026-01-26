@@ -3,8 +3,6 @@ from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-from .notifier import Notifier
-
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
 
