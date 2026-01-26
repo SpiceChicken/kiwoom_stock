@@ -13,11 +13,9 @@ from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
 from .manager import StockManager, Position
 from .notifier import Notifier
-from .utils import setup_structured_logging
 from kiwoom_stock.core.database import TradeLogger
 from ..core.indicators import Indicators
 
-setup_structured_logging()
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
 

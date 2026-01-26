@@ -1,58 +1,50 @@
 # src/kiwoom_stock/main.py
 
 import sys
-import time
 import json
+import logging
 
 from kiwoom_stock.api.client import KiwoomClient
 from kiwoom_stock.monitoring.engine import MultiTimeframeRSIMonitor
+from kiwoom_stock.utils import setup_structured_logging
+
+# 로거 설정
+logger = logging.getLogger(__name__)
 
 def main():
+    # 1. 로깅 시스템 초기화 (콘솔 출력 + 파일 적재)
+    setup_structured_logging()
+    
     try:
-        # 1. 설정 로드 (루트 폴더의 config.json, strategy_config.json 읽기)
-        # 1-1. 시스템 설정 로드 (보안/인프라)
-        with open('config/config.json', 'r') as f:
-            system_config = json.load(f)
+        # 2. 설정 파일 로드
+        # 2-1. 시스템 설정 (API 키, URL 등)
+        try:
+            with open('config/config.json', 'r', encoding='utf-8') as f:
+                system_config = json.load(f)
+            # 2-2. 전략 파라미터 (임계값, 가중치 등)
+            with open('config/strategy_config.json', 'r', encoding='utf-8') as f:
+                strategy_params = json.load(f)
+        except FileNotFoundError as e:
+            logger.critical(f"설정 파일을 찾을 수 없습니다: {e}")
+            return
 
-        # 1-2. 전략 설정 로드 (로직/수치)
-        with open('config/strategy_config.json', 'r') as f:
-            strategy_params = json.load(f)
-
-        # 1-3. 통합
+        # 2-3. 설정 통합
         config = {**system_config, **strategy_params}
-
-        # 2. 네트워크 및 서버 연결 대기 로직 (Retry)
-        max_retries = 10
-        retry_delay = 10  # 10초 간격으로 시도
-        client = None
         
-        # 3. API 클라이언트 초기화 (인증 및 도메인 설정)
-        # 문서에 명시된 운영 도메인(https://api.kiwoom.com)을 사용합니다.
-        for i in range(max_retries):
-            try:
-                client = KiwoomClient(
+        # 클라이언트 생성 시점에 이미 _wait_for_ready()를 통해 
+        # 인터넷이 연결되고 토큰 발급까지 완료된 상태임이 보장됩니다.
+        client = KiwoomClient(
                     appkey=config['appkey'],
                     secretkey=config['secretkey'],
                     base_url=config['base_url']
                 )
-                print("✅ 서버 연결 및 인증에 성공했습니다.")
-                break
-            except Exception as e:
-                print(f"⚠️ 연결 시도 중 ({i+1}/{max_retries}): {e}")
-                if i < max_retries - 1:
-                    print(f"ℹ️ {retry_delay}초 후 다시 시도합니다...")
-                    time.sleep(retry_delay)
-                else:
-                    print("❌ 네트워크 연결 실패로 프로그램을 종료합니다.")
-                    sys.exit(1)
 
-        # 4. 모니터링 엔진 초기화
-        # MultiTimeframeRSIMonitor는 내부적으로 client.market 등을 사용합니다.
+        # 엔진 초기화 (이후 발생하는 에러는 네트워크가 아닌 로직 에러임)
         monitor = MultiTimeframeRSIMonitor(client, config)
         
-        print("🚀 키움 증권 올-웨더 모니터링 시스템을 시작합니다.")
+        logger.info("🚀 키움 증권 올-웨더 모니터링 시스템 가동 시작")
 
-        # 5. 프로세스 실행
+        # 프로세스 실행
         monitor.run()
         
     except KeyboardInterrupt:
