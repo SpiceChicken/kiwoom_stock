@@ -21,6 +21,12 @@ class Position:
     trend_score: float
     buy_time: str
     buy_regime: str
+    status: str = 'OPEN'
+    # [추가] DB에서 읽어올 때 포함될 수 있는 필드들 (기본값 None)
+    sell_price: Optional[float] = None
+    profit_rate: Optional[float] = None
+    sell_time: Optional[str] = None
+    sell_reason: Optional[str] = None
 
 class StockManager:
     """[Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리"""
@@ -39,7 +45,7 @@ class StockManager:
             code: Position(**data) for code, data in raw_positions.items()
         }
         # [안전장치] 계좌 전체 손실 제한 (예: -5%)
-        self.total_loss_limit = strategy_config.get("total_loss_limit", -0.05)
+        self.total_loss_limit = strategy_config.get("total_loss_limit", -5)
 
         # [최적화] 문자열을 time 객체로 미리 변환 (루프 내 오버헤드 제거)
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
@@ -67,7 +73,7 @@ class StockManager:
             log = status_log.get(code)
             if log and "price" in log:
                 # 내 기존 매수 데이터(pos['buy_price'])와 현재가 비교
-                profit = (log['price'] / pos['buy_price'] - 1) * 100
+                profit = (log['price'] / pos.buy_price - 1) * 100
                 unrealized_pnl += profit
                 
         # 3. 전체 합산 (확정 + 미실현)
@@ -78,13 +84,13 @@ class StockManager:
             return True
         return False
 
-    def get_exit_reason(self, pos: Dict, current_price: float, current_score: float, strong_threshold: float) -> Optional[str]:
+    def get_exit_reason(self, pos: Position, current_price: float, current_score: float, strong_threshold: float) -> Optional[str]:
         """
         설정된 익절/손절/시간/점수 조건을 검사하여 매도 사유를 반환합니다.
    
         """
         # 현재 수익률 계산 (소수점 단위)
-        profit_rate = (current_price / pos['buy_price'] - 1)
+        profit_rate = (current_price / pos.buy_price - 1)
         
         # 1. 시간 기반 당일 청산 (장 마감 3분 전부터 최우선 수행)
         if datetime.now().time() >= self.forced_exit_time:
@@ -102,7 +108,7 @@ class StockManager:
             return f"Take Profit (+{profit_rate*100:.1f}%)"
 
         # 4. 상대적 점수 하락 (Score Decay)
-        sell_threshold = pos['buy_score'] * (1 - self.decay_rate)
+        sell_threshold = pos.buy_score * (1 - self.decay_rate)
         if current_score < sell_threshold:
             return f"Score Decay (-{self.decay_rate*100:.0f}%)"
 
@@ -140,9 +146,9 @@ class StockManager:
         reason = self.get_exit_reason(pos, current_price, current_score, strong_threshold)
         
         if reason:
-            profit = round((current_price / pos['buy_price'] - 1) * 100, 2)
+            profit = round((current_price / pos.buy_price - 1) * 100, 2)
             # 매도 기록 및 포지션 제거
-            self.db.record_sell(pos['id'], current_price, profit, reason)
+            self.db.record_sell(pos.id, current_price, profit, reason)
             notifier.notify_sell(pos.stock_name, profit, reason)
             del self.active_positions[stock_code]
 
@@ -151,5 +157,5 @@ class StockManager:
         now = datetime.now()
         if now.weekday() >= 5: return False
         
-        # 시작 시간(09:00 권장)과 종료 시간(exit_time) 사이인지 문자열로 안전하게 비교
+        # 시작 시간(09:00 권장)과 종료 시간(exit_time) 사이인지 비교
         return time(8, 30) <= now.time() <= self.exit_time_obj

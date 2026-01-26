@@ -158,12 +158,12 @@ class MultiTimeframeRSIMonitor:
                     for code in list(self.stock_mgr.active_positions.keys()):
                         pos = self.stock_mgr.active_positions[code]
                         log = self.status_log.get(code)
-                        current_price = log['price'] if log else pos['buy_price'] # 가격 정보 없으면 매수가 기준
+                        current_price = log['price'] if log else pos.buy_price # 가격 정보 없으면 매수가 기준
                         
                         # [개선] 판정 로직을 거치지 않고 직접 DB 기록 및 포지션 삭제
-                        profit = round((current_price / pos['buy_price'] - 1) * 100, 2)
-                        self.db.record_sell(pos['id'], current_price, profit, "KILL-SWITCH ACTIVATED")
-                        self.notifier.notify_sell(pos['stock_name'], profit, "KILL-SWITCH ACTIVATED")
+                        profit = round((current_price / pos.buy_price - 1) * 100, 2)
+                        self.db.record_sell(pos.id, current_price, profit, "KILL-SWITCH ACTIVATED")
+                        self.notifier.notify_sell(pos.stock_name, profit, "KILL-SWITCH ACTIVATED")
                         
                     break # 메인 루프 탈출
                 
