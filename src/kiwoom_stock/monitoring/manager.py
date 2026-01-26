@@ -25,6 +25,7 @@ class Position:
     profit_rate: Optional[float] = None
     sell_time: Optional[str] = None
     sell_reason: Optional[str] = None
+    current_score: Optional[float] = None
     
     @property
     def calc_profit_rate(self) -> float:
@@ -94,7 +95,7 @@ class StockManager:
             return True
         return False
 
-    def get_exit_reason(self, pos: Position, current_score: float, strong_threshold: float) -> Optional[str]:
+    def get_exit_reason(self, pos: Position, strong_threshold: float) -> Optional[str]:
         """
         설정된 익절/손절/시간/점수 조건을 검사하여 매도 사유를 반환합니다.
    
@@ -113,13 +114,13 @@ class StockManager:
         # 3. 지능형 익절 (Take Profit)
         # 수익률이 목표치 이상이지만, 점수가 여전히 강하면(strong_threshold 이상) 매도를 미룹니다.
         if profit_rate >= self.target_profit_rate:
-            if current_score >= strong_threshold:
+            if pos.current_score >= strong_threshold:
                 return None # 기세가 좋으므로 익절 보류 (Let the winner run)
             return f"Take Profit (+{profit_rate*100:.1f}%)"
 
         # 4. 상대적 점수 하락 (Score Decay)
         sell_threshold = pos.buy_score * (1 - self.decay_rate)
-        if current_score < sell_threshold:
+        if pos.current_score < sell_threshold:
             return f"Score Decay (-{self.decay_rate*100:.0f}%)"
 
         return None
@@ -152,9 +153,10 @@ class StockManager:
 
         pos = self.active_positions[stock_code]
         pos.sell_price = log['price']
+        pos.current_score = log['score']
         
         # [추상화 호출] 판정은 평가기에게 맡깁니다.
-        pos.sell_reason = self.get_exit_reason(pos, log['score'], strong_threshold)
+        pos.sell_reason = self.get_exit_reason(pos, strong_threshold)
         
         if pos.sell_reason:
             # 매도 기록 및 포지션 제거
