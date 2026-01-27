@@ -37,7 +37,7 @@ class MultiTimeframeRSIMonitor:
         self.db = TradeLogger()
         self.analyzer = MarketAnalyzer(client, self.trend_calc, market_config)
         self.strategy = TradingStrategy(strategy_config)
-        self.stock_mgr = StockManager(client, TradeLogger(), filter_config, strategy_config)
+        self.stock_mgr = StockManager(client, TradeLogger(), self.strategy, filter_config)
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
 
         # [최적화] 진입 마감 시간을 time 객체로 캐싱
@@ -114,13 +114,26 @@ class MultiTimeframeRSIMonitor:
         
         return all(entry_conditions)
 
+    def check_kill_switch(self):
+        """전체 계좌의 리스크를 확인합니다."""
+        realized_pnl = self.db.get_today_realized_pnl()
+        unrealized_pnl = sum(pos.calc_profit_rate for pos in self.stock_mgr.active_positions.values())
+        total_pnl = realized_pnl + unrealized_pnl
+
+        # 전략에게 킬스위치 가동 여부를 묻습니다.
+        if self.strategy.is_kill_switch_activated(total_pnl):
+            logger.critical(f"킬스위치 작동: {total_pnl}% 손실")
+            self.notifier.notify_critical(f"🚨 킬스위치 발동: {total_pnl}% 손실로 시스템을 종료합니다.")
+            return True
+        return False
+
     def run(self):
         """메인 실행 루프"""
         logger.info("Starting Monitoring Loop...")
         while True:
             try:
                 # [안전장치] 시장 마감 확인 및 가동 중단
-                if not self.stock_mgr.is_monitoring_time():
+                if not self.strategy.is_monitoring_time():
                     logger.info("Market is closed. Shutting down system.")
                     break
                 
@@ -150,7 +163,7 @@ class MultiTimeframeRSIMonitor:
                     if res: scan_results[stock] = res
                 
                 # 킬스위치 작동
-                if self.stock_mgr.check_kill_switch(self.status_log):
+                if self.check_kill_switch():
                     kill_switch_text = "블랙 스완 대응: 전 종목 시장가 매도 및 시스템 긴급 셧다운"
                     logger.critical(kill_switch_text)
                     
@@ -163,10 +176,7 @@ class MultiTimeframeRSIMonitor:
                         
                         # [개선] 판정 로직을 거치지 않고 직접 DB 기록 및 포지션 삭제
                         self.db.record_sell(pos)
-                        self.notifier.notify_sell(pos)
-
-                    self.notifier.notify_critical(kill_switch_text)
-                        
+                        self.notifier.notify_sell(pos)                        
                     break # 메인 루프 탈출
                 
                 # 모멘텀 기준 정렬 (status_log 참조)

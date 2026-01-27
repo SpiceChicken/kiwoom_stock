@@ -1,5 +1,8 @@
 import logging
-from typing import Dict, Tuple
+from datetime import datetime, time, timedelta
+from typing import Dict, Tuple, Optional
+
+from kiwoom_stock.monitoring.manager import Position
 from .analyzer import MarketRegime
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
@@ -11,9 +14,25 @@ class TradingStrategy:
         self.settings = strategy_config
         self.momentum_threshold = strategy_config.get("momentum_threshold", 10.0)
 
+        # [최적화] 문자열을 time 객체로 미리 변환 (루프 내 오버헤드 제거)
+        exit_str = strategy_config.get("day_trade_exit_time", "15:30")
+        self.exit_time_obj = time.fromisoformat(exit_str)
+        # [수정] 장 마감 3분 전 강제 청산 시간 계산 (오버헤드 방지를 위해 미리 계산)
+        # datetime.combine을 사용하여 안전하게 시간 연산 수행
+        dummy_dt = datetime.combine(datetime.today(), self.exit_time_obj)
+        self.forced_exit_time = (dummy_dt - timedelta(minutes=3)).time()
+
         # 캐싱을 위한 내부 상태 변수
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config = {}
+
+        # [신규] 익절/손절/감쇠 설정 로드
+        self.decay_rate = strategy_config.get("score_decay_rate", 0.15)
+        self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025) # 기본 2.5%
+        self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.015)
+
+        # [안전장치] 계좌 전체 손실 제한 (예: -5%)
+        self.total_loss_limit = strategy_config.get("total_loss_limit", -5)
 
     def update_context(self, regime: MarketRegime):
         """
@@ -50,6 +69,48 @@ class TradingStrategy:
         레짐별 설정 -> 공통 루트 설정 순으로 참조합니다.
         """
         return self._cached_config.get("min_thresholds", self.settings.get("min_thresholds", {}))
+    
+    def get_exit_reason(self, pos: Position, strong_threshold: float) -> Optional[str]:
+        """
+        설정된 익절/손절/시간/점수 조건을 검사하여 매도 사유를 반환합니다.
+   
+        """
+        # 현재 수익률 계산 (소수점 단위)
+        profit_rate = (pos.sell_price / pos.buy_price - 1)
+        
+        # 1. 시간 기반 당일 청산 (장 마감 3분 전부터 최우선 수행)
+        if datetime.now().time() >= self.forced_exit_time:
+            return "Day Trade Close (3m Early)"
+            
+        # 2. 하드 손절 (Stop Loss) - 설정값 이하로 하락 시 즉시 매도
+        if profit_rate <= self.stop_loss_rate:
+            return f"Stop Loss ({profit_rate*100:.1f}%)"
+            
+        # 3. 지능형 익절 (Take Profit)
+        # 수익률이 목표치 이상이지만, 점수가 여전히 강하면(strong_threshold 이상) 매도를 미룹니다.
+        if profit_rate >= self.target_profit_rate:
+            if pos.current_score >= strong_threshold:
+                return None # 기세가 좋으므로 익절 보류 (Let the winner run)
+            return f"Take Profit (+{profit_rate*100:.1f}%)"
+
+        # 4. 상대적 점수 하락 (Score Decay)
+        sell_threshold = pos.buy_score * (1 - self.decay_rate)
+        if pos.current_score < sell_threshold:
+            return f"Score Decay (-{self.decay_rate*100:.0f}%)"
+
+        return None
+
+    def is_kill_switch_activated(self, total_pnl: float) -> bool:
+        """[Strategy] 전체 손익이 허용치를 초과했는지 판단합니다."""
+        return total_pnl <= self.total_loss_limit
+
+    def is_monitoring_time(self) -> bool:
+        """장 운영 시간 체크 (에러 수정 버전)"""
+        now = datetime.now()
+        if now.weekday() >= 5: return False
+        
+        # 시작 시간(09:00 권장)과 종료 시간(exit_time) 사이인지 비교
+        return time(8, 30) <= now.time() <= self.exit_time_obj
 
     def calculate_conviction_score(self, metrics: Dict):
         """총점과 상세 지표 점수를 함께 반환합니다."""
