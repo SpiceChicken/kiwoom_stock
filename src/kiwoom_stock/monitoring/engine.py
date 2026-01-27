@@ -57,11 +57,11 @@ class MultiTimeframeRSIMonitor:
 
             curr_price = entry_data[0]['close']
             curr_vol = sum(d['volume'] for d in entry_data)
-            s_data = self.analyzer.supply_cache.get(stock_code, {'f': 0, 'i': 0})
+            s_data = self.analyzer.supply_cache.get(stock_code)
             
             metrics = {
                 "alpha": self.entry_calc.calculate([d['close'] for d in entry_data]) - self.analyzer.market_rsi,
-                "net_buy": s_data['f'] + s_data['i'], "f_buy": s_data['f'], "i_buy": s_data['i'],
+                "strength": s_data['strength'], "pgm_data": s_data['pgm_data'], "foreign_data": s_data['foreign_data'],
                 "price": curr_price, "volume": curr_vol,
                 "vwap": sum(d['close']*d['volume'] for d in entry_data)/curr_vol if curr_vol > 0 else curr_price,
                 "trend_rsi": self.trend_calc.calculate([d['close'] for d in trend_data])
@@ -75,7 +75,7 @@ class MultiTimeframeRSIMonitor:
             status = "🔥강력추천" if score >= th['strong'] else ("👀관심" if score >= th['interest'] else "관망")
             if momentum >= self.strategy.momentum_threshold: status = "🚀수급폭발"
 
-            self.status_log[stock_code] = {"price": curr_price, "score": score, "momentum": momentum, "reason": status}
+            self.status_log[stock_code] = {"price": curr_price, "score": score, **{f"{k}_score": v for k, v in score_details.items()}, "momentum": momentum, "reason": status}
             return {
                 **metrics, 
                 **{f"{k}_score": v for k, v in score_details.items()}, # alpha_score 등 추가
@@ -154,7 +154,7 @@ class MultiTimeframeRSIMonitor:
                 # 4. 외인/기관 수급 데이터 일괄 확보 (Batch Fetch)
                 # 현재 감시 중인 모든 종목에 대한 투자자별 매매동향 데이터를 한 번에 가져와 내부 캐시에 저장합니다.
                 # 이후 개별 종목 점수 계산 시 매번 API를 호출하지 않고 이 캐시를 참조하여 실행 속도를 2배 이상 높입니다.
-                self.analyzer.fetch_supply_data()
+                self.analyzer.update_priority_supply(self.stock_mgr.stocks)
                 
                 # [최적화] API 호출 중복 제거: 한 번의 루프에서 모든 데이터 수집 및 결과 저장
                 scan_results = {}

@@ -3,7 +3,7 @@ import logging
 from enum import Enum
 from datetime import datetime
 from collections import deque
-from typing import Dict
+from typing import List, Dict
 from ..api.parser import clean_numeric
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
@@ -60,41 +60,72 @@ class MarketAnalyzer:
         except Exception as e:
             logger.error(f"시장 분석 실패: {e}")
 
-    def fetch_supply_data(self):
+    def update_priority_supply(self, stock_codes: List[str]):
         """
-        외인/기관 수급 데이터를 분리하여 캐싱합니다. 
-        [개선] 실패 시 기존 데이터를 유지하고 성공 시에만 부분 업데이트(Atomic Update)합니다.
+        매수 후보 및 보유 종목에 대해 실시간 지표를 정밀 업데이트합니다.
+        체결강도(Base)와 외국계 창구(Bonus) 데이터를 확보합니다.
         """
-        
-        success_count = 0
-        for invsr, key in [("6", "f"), ("7", "i")]:
-            try:
-                items = self.client.market.get_investor_supply(market_tp="001", investor_tp=invsr)
-                
-                # 데이터가 정상 수신된 경우에만 업데이트 프로세스 진행
-                if items and len(items) > 0:
-                    for item in items:
-                        code = item.get("stk_cd", "").split('_')[0]
-                        if not code: continue
-                        
-                        qty = clean_numeric(item.get("netprps_qty", "0"))
-                        
-                        # 원자적 업데이트: 해당 종목-주체 데이터만 교체
-                        if code not in self.supply_cache:
-                            self.supply_cache[code] = {'f': 0, 'i': 0}
-                        self.supply_cache[code][key] = qty
-                    success_count += 1
-                else:
-                    logger.warning(f"수급 데이터({key}) 수신 결과가 비어있습니다. 이전 캐시를 유지합니다.")
-                    
-            except Exception as e:
-                # 에러 발생 시에도 self.supply_cache는 이전 루프의 상태를 유지함 (안전)
-                logger.error(f"수급 캐싱 중 예외 발생 (investor_tp={invsr}): {e}")
 
-        # 업데이트 시간 기록 및 신선도 체크
-        if success_count > 0:
-            self.last_supply_update = datetime.now()
-        
-        # [추가] 10분(600초) 이상 업데이트 실패 시 치명적 경고
-        if (datetime.now() - self.last_supply_update).total_seconds() > 600:
-            logger.critical("🚨 수급 데이터가 10분 이상 동결되었습니다. 키움 API 연결 상태를 확인하십시오.")
+        # 1. API로부터 리스트형 데이터 수집
+        program_trade_list = self.client.market.get_program_trade()
+        foreign_window_list = self.client.market.get_foreign_window_total()
+
+        # 2. 검색 최적화를 위해 {코드: 값} 형태의 딕셔너리로 사전 변환 (O(M))
+        pgm_map = {
+            item['stk_cd']: {
+                "netprps_prica": clean_numeric(item.get("netprps_prica", "0")),
+                "all_trde_rt": clean_numeric(item.get("all_trde_rt", "0")),
+                "buy_cntr_amt": clean_numeric(item.get("buy_cntr_amt", "0")),
+                "sel_cntr_amt": clean_numeric(item.get("sel_cntr_amt", "0"))
+            }
+            for item in program_trade_list if item.get("stk_cd")
+        }
+
+        foreign_map = {
+            item['stk_cd']: {
+                "netprps_prica": clean_numeric(item.get("netprps_prica", "0")),
+                "trde_prica": clean_numeric(item.get("trde_prica", "1")), # 분모(0) 방지
+                "net_qty": clean_numeric(item.get("netprps_trde_qty", "0"))
+            }
+            for item in foreign_window_list if item.get("stk_cd")
+        }
+
+        for code in stock_codes:
+            try:
+                if code not in self.supply_cache:
+                    self.supply_cache[code] = self._get_default_supply()
+
+                # 실시간 지표 수집 (체결강도 및 거래량 비율)
+                # ka10001(주식기본정보) 등에서 전일대비거래량비율(vol_rt_pre_day) 확보
+                basic_info = self.client.market.get_stock_basic_info(code)
+
+                # 1. 체결강도 (Base)
+                self.supply_cache[code]['strength'] = self.client.market.get_tick_strength(code)
+                self.supply_cache[code]['vol_ratio'] = clean_numeric(basic_info.get('trde_pre', 0.0))
+
+                # 2. 프로그램 매매
+                self.supply_cache[code]['pgm_data'] = pgm_map.get(code, {
+                    "netprps_prica": 0.0, "all_trde_rt": 0.0, "buy_amt": 0.0, "sel_amt": 0.0
+                })
+                
+                # 3. 외국계 창구 합계
+                self.supply_cache[code]['foreign_data'] = foreign_map.get(code, {
+                    "netprps_prica": 0.0, "trde_prica": 1.0, "net_qty": 0.0
+                })
+                
+                logger.debug(f"[{code}] 정밀 수급 업데이트 완료")
+            except Exception as e:
+                logger.error(f"[{code}] 우선순위 수급 업데이트 실패: {e}")
+
+    def _get_default_supply(self) -> Dict:
+        """수급 데이터 초기값 정의"""
+        return {
+            'strength': 100.0,    # 체결강도 중립,
+            'vol_ratio': 0.0,   # 전일 대비 거래량 비율 (%)
+            'pgm_data': {
+                "netprps_prica": 0.0, "all_trde_rt": 0.0, "buy_amt": 0.0, "sel_amt": 0.0
+                },  # 프로그램 순매수
+            'foreign_data': {
+                "netprps_prica": 0.0, "trde_prica": 1.0, "net_qty": 0.0
+                },  # 외국계 창구 순매수
+        }
