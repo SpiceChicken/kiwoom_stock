@@ -34,6 +34,7 @@ config/
 .env
 *.db
 logs/
+tests/
 
 # IDEs
 .vscode/
