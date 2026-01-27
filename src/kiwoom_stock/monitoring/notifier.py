@@ -79,8 +79,8 @@ class Notifier:
             # 2. CSV 포맷: 스냅샷시간,레짐,종목명,점수,모멘텀,상태
             # 분석 프로그램에서 읽기 쉽도록 공백과 패딩을 모두 제거합니다.
             log_line = (f"{snapshot_time},{regime},{item['name']},"
+                        f"{item['alpha_score']},{item['supply_score']},{item['vwap_score']},{item['trend_score']},"
                         f"{item['score']:.1f},{item['momentum']:.1f},{item['reason']}")
-            
             # status_logger를 통해 status.log에 한 줄씩 기록
             status_logger.info(log_line)
 

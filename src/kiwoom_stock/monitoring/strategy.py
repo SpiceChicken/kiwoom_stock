@@ -113,31 +113,16 @@ class TradingStrategy:
         return time(8, 30) <= now.time() <= self.exit_time_obj
 
     def calculate_conviction_score(self, metrics: Dict):
-        """총점과 상세 지표 점수를 함께 반환합니다."""
+        """[모듈화] 지표별 점수를 산출하고 가중 합산한 최종 점수를 반환합니다."""
+        
+        # 1. 각 지표별 독립 메서드 호출
+        alpha_raw = self._calculate_alpha_score(metrics)
+        supply_raw = self._calculate_supply_score(metrics)
+        vwap_raw = self._calculate_vwap_score(metrics)
+        trend_raw = self._calculate_trend_score(metrics)
+
+        # 2. 최종 가중치 합산
         w = self.weights
-        
-        # 1. Alpha 점수: 민감도 하향 (2.5 -> 1.5) 
-        # 시장 지수 대비 초과 수익률이 더 높아야 고득점이 가능하도록 변경
-        alpha_raw = max(0, min(100, 50 + (metrics['alpha'] * 1.5)))
-        
-        # 2. Supply 점수: 기존 로직 유지 (고정)
-        total_vol = max(1, metrics.get('volume', 1))
-        s_ratio = (metrics.get('net_buy', 0) / total_vol) * 100
-        synergy = 20 if (metrics['f_buy'] > 0 and metrics['i_buy'] > 0) else (-20 if (metrics['f_buy'] < 0 and metrics['i_buy'] < 0) else 0)
-        supply_raw = max(0, min(100, (s_ratio * 50) + synergy))
-        
-        # 3. VWAP 점수: 민감도 추가 하향 (10 -> 8)
-        # 이제 가격 이격도가 약 6.25% 이상일 때만 100점에 도달합니다. (기존 5%)
-        dev = (metrics['price'] / metrics['vwap'] - 1) * 100 if metrics['vwap'] > 0 else 0
-        vwap_raw = max(0, min(100, 50 + (dev * 8)))
-        
-        # 4. Trend 점수: 민감도 하향 (2.5 -> 1.5) 
-        # 단순히 RSI가 70을 넘는 것만으로는 부족하며, 80 이상의 강력한 과매수 구간에 
-        # 진입해야 100점에 근접하도록 문턱을 높임
-        t_rsi = metrics['trend_rsi']
-        trend_raw = max(0, min(100, 50 + ((t_rsi - 50) * 1.5) if t_rsi >= 50 else t_rsi))
-        
-        # 최종 가중치 합산
         total_score = round(
             (alpha_raw * w.get('alpha', 0.25)) + 
             (supply_raw * w.get('supply', 0.25)) + 
@@ -154,3 +139,105 @@ class TradingStrategy:
         }
         
         return total_score, details
+
+    def _calculate_alpha_score(self, metrics: Dict) -> float:
+        """Alpha 점수: 민감도 1.5 적용"""
+        alpha_val = metrics.get('alpha', 0)
+        return max(0, min(100, 50 + (alpha_val * 1.5)))
+
+    def _calculate_supply_score(self, metrics: Dict) -> float:
+        """
+        [최종] 실질 비중 직접 승수 모델 (상수 가산점 제거)
+        체결강도 Base에 프로그램/외국계의 실제 시장 점유 비중을 직접 곱합니다.
+        """
+        # 1. 기초 데이터 확보 (Analyzer에서 정제된 데이터 주입)
+        strength = metrics.get('strength', 100.0)
+        pgm = metrics.get('pgm_data', {})      # {'netprps_prica', 'all_trde_rt', 'buy_cntr_amt', 'sel_cntr_amt'}
+        frgn = metrics.get('foreign_data', {}) # {'netprps_prica', 'trde_prica'}
+
+        # 전일 대비 거래량 비율 (%) - Engine에서 주입
+        # 예: 전일 거래량 대비 5% 수준이면 5.0
+        vol_ratio = metrics.get('vol_ratio', 100.0)
+
+        # 2. Base Score: 체결강도 (200% -> 100점 매핑)
+        # 100%일 때 50점 기준, 기세가 없으면(0%) 0점
+        base_score = max(0, min(100, 50 + (strength - 100) * 0.5))
+
+        # 3. 프로그램 실질 참여 비중 계산 (Logic Value)
+        pgm_net = pgm.get('netprps_prica', 0)
+        pgm_total = pgm.get('buy_cntr_amt', 0) + pgm.get('sel_cntr_amt', 0)
+        pgm_ratio = pgm.get('all_trde_rt', 0) / 100
+        
+        # 프로그램 내 순매수 강도 * 시장 점유율
+        pgm_adj = (pgm_net / pgm_total * pgm_ratio) if pgm_total > 0 else 0
+
+        # 4. 외국계 실질 참여 비중 계산 (Logic Value)
+        frgn_net = frgn.get('netprps_prica', 0)
+        frgn_total = frgn.get('trde_prica', 1) # 분모 0 방지
+
+        # 5. 거래량 기반 안전핀 (Safety Pin) 적용
+        # 전일 거래량의 5%도 안 되는 시점에서는 수급 데이터의 신뢰도를 50%로 강제 감쇄
+        # 이는 장 초반 소액 매매로 인한 '가중치 튐' 현상을 방어함
+        trust_factor = 1.0
+        if vol_ratio < 5.0:
+            trust_factor = 0.5
+        
+        # 전체 거래대금 대비 외국계 순매수 비중
+        frgn_adj = (frgn_net / frgn_total)
+
+        # 6. 최종 점수 산출 (Multiplicative Model)
+        # Multiplier = 1.0 + (프로그램 비중 + 외국계 비중)
+        # 예: 체결강도 140%(70점) 종목에 프로그램 3%, 외국계 2% 순매수 비중 발생 시
+        # 70 * (1 + 0.03 + 0.02) = 70 * 1.05 = 73.5점
+        multiplier = 1.0 + (pgm_adj + frgn_adj) * trust_factor
+        final_score = base_score * multiplier
+
+        return round(max(0, min(100, final_score)), 2)
+
+    def _calculate_vwap_score(self, metrics: Dict) -> float:
+        """VWAP 점수: 민감도 8 적용 (이격도 6.25% 시 100점)"""
+        price = metrics.get('price', 0)
+        vwap = metrics.get('vwap', 0)
+        dev = (price / vwap - 1) * 100 if vwap > 0 else 0
+        return max(0, min(100, 50 + (dev * 8)))
+
+    def _calculate_trend_score(self, metrics: Dict) -> float:
+        """Trend 점수: 민감도 1.5 적용 (RSI 80 이상 시 100점 근접)"""
+        t_rsi = metrics.get('trend_rsi', 50)
+        if t_rsi >= 50:
+            val = 50 + ((t_rsi - 50) * 1.5)
+        else:
+            val = t_rsi  # 하락 구간은 RSI 값 그대로 유지 (보수적)
+        return max(0, min(100, val))
+
+    def calculate_buy_score(self, code: str, analyzer, metrics: Dict) -> float:
+        """
+        전체 지표 합산 로직 (시간별 가중치 적용)
+        """
+        now = datetime.now().time()
+        
+        # 실시간 수급 점수 계산
+        supply_score = self.calculate_supply_score(code, analyzer)
+        
+        # 기존 알파/가격 지표
+        alpha = metrics.get('alpha', 50)
+        vwap = metrics.get('vwap', 50)
+        trend = metrics.get('trend', 50)
+
+        # [핵심] 장 초반(09:30 이전) 수급 데이터 신뢰도 가중치 조절
+        # 데이터가 쌓이기 전인 장 초반에는 수급 비중을 낮추고 기세(Alpha)에 집중
+        w = self.weights.copy()
+        if now < time(9, 30):
+            w['supply'] *= 0.5  # 수급 가중치 50% 감소
+            # 감소된 만큼의 가중치를 alpha(기세)로 전이하여 장 초반 공격성 유지
+            w['alpha'] += (self.weights['supply'] * 0.5)
+
+        # 최종 가중치 합산 점수 산출
+        score = (
+            (alpha * w['alpha']) +
+            (supply_score * w['supply']) +
+            (vwap * w['vwap']) +
+            (trend * w['trend'])
+        )
+        
+        return round(score, 2)
