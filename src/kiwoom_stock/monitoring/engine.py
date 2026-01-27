@@ -61,7 +61,10 @@ class MultiTimeframeRSIMonitor:
             
             metrics = {
                 "alpha": self.entry_calc.calculate([d['close'] for d in entry_data]) - self.analyzer.market_rsi,
-                "strength": s_data['strength'], "pgm_data": s_data['pgm_data'], "foreign_data": s_data['foreign_data'],
+                "strength": s_data['strength'],
+                "pgm_data": s_data['pgm_data'],
+                "foreign_data": s_data['foreign_data'],
+                "vol_ratio": s_data['vol_ratio'],
                 "price": curr_price, "volume": curr_vol,
                 "vwap": sum(d['close']*d['volume'] for d in entry_data)/curr_vol if curr_vol > 0 else curr_price,
                 "trend_rsi": self.trend_calc.calculate([d['close'] for d in trend_data])
