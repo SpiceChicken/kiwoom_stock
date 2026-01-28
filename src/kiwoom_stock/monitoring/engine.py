@@ -14,7 +14,6 @@ from .strategy import TradingStrategy
 from .manager import StockManager, Position
 from .notifier import Notifier
 from kiwoom_stock.core.database import TradeLogger
-from ..core.indicators import Indicators
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
@@ -47,23 +46,7 @@ class MultiTimeframeRSIMonitor:
     def check_conditions(self, stock_code: str) -> Optional[Dict]:
         """종목 스캔 및 전략 실행"""
         try:
-            entry_data = self.client.market.get_minute_chart(stock_code, tic="5")
-            trend_data = self.client.market.get_minute_chart(stock_code, tic="60")
-            if not trend_data or len(entry_data) < 20: return None
-
-            s_data = self.analyzer.supply_cache.get(stock_code)
-            
-            metrics = {
-                "price_series": s_data['price_series'],
-                "volume_series": s_data['volume_series'],
-                "strength": s_data['strength'],
-                "pgm_data": s_data['pgm_data'],
-                "foreign_data": s_data['foreign_data'],
-                "vol_ratio": s_data['vol_ratio'],
-                "price": s_data['price'],
-                "vwap": s_data['vwap'],
-                "trend_rsi": s_data['trend_rsi']
-            }
+            metrics = self.analyzer.supply_cache.get(stock_code)
 
             score, score_details = self.strategy.calculate_conviction_score(metrics)
             momentum = round(score - self.score_history.get(stock_code, score), 1)

@@ -45,6 +45,8 @@ class MarketAnalyzer:
             'vwap': 0.0,            # 거래대금 가중평균가격
             'alpha_score': 0.0,     # 가격 가속도 점수
             'trend_rsi': 50.0,      # 장기 추세 RSI (중립값 50.0 설정)
+            'prev_vwap': 0.0,       # 기울기 계산용 이전 값
+            'vol_factor': 1.0,      # 수급 신뢰도 가중치
             'price_series': [],
             'volume_series': [],
 
@@ -155,13 +157,12 @@ class MarketAnalyzer:
             if code in pgm_map:
                 # 해당 종목의 프로그램 데이터가 존재하면 캐시 업데이트
                 self.supply_cache[code]['pgm_data'] = pgm_map[code]
-                logger.debug(f"[{code}] 프로그램 매매 데이터 업데이트 완료")
             else:
                 # 데이터가 없을 경우 이전 상태를 유지하거나 로그 기록
                 # (장 시작 직후나 거래가 없는 경우 발생 가능)
                 pass
-        except KeyError:
-            logger.error(f"[{code}] pgm_data 캐시 구조가 초기화되지 않았습니다.")
+        except Exception as e:
+            logger.error(f"[{code}] pgm_data 캐시 구조가 초기화 실패: {e}")
 
     def _update_foreign_data(self, code: str, frgn_map: Dict):
         """
@@ -173,45 +174,59 @@ class MarketAnalyzer:
             if code in frgn_map:
                 # 해당 종목의 외국계 데이터가 존재하면 캐시 업데이트
                 self.supply_cache[code]['foreign_data'] = frgn_map[code]
-                logger.debug(f"[{code}] 외국계 창구 데이터 업데이트 완료")
             else:
                 # 외국계 창구 발생 내역이 없는 경우
                 pass
-        except KeyError:
-            logger.error(f"[{code}] foreign_data 캐시 구조가 초기화되지 않았습니다.")
+        except Exception as e:
+            logger.error(f"[{code}] foreign_data 캐시 구조가 초기화 실패: {e}")
 
     def _update_alpha_data(self, code: str):
         """[Task] Alpha Score(가속도) 독립 업데이트"""
         # Alpha 연산에 필요한 1분봉 데이터 수집
-        chart_1m = self.collector.fetch_minute_chart(code, tic="1") # 1분봉 데이터
-        if len(chart_1m) < 6: return
-        
-        chart_1m.reverse() # 과거 -> 현재 순으로 정렬
-        prices = [d['cur_prc'] for d in chart_1m]
-        volumes = [d['trde_qty'] for d in chart_1m]
-        
-        self.supply_cache[code]['price_series'] = prices
-        self.supply_cache[code]['volume_series'] = volumes
+        try:
+            chart_1m = self.collector.fetch_minute_chart(code, tic="1") # 1분봉 데이터
+            if len(chart_1m) < 6: return
+            
+            chart_1m.reverse() # 과거 -> 현재 순으로 정렬
+            prices = [d['cur_prc'] for d in chart_1m]
+            volumes = [d['trde_qty'] for d in chart_1m]
+
+            # vol_factor 선계산 (VWAP Score에서도 참조 가능하도록)
+            avg_prev_vol = max(1.0, sum(volumes[-5:-1]) / 4)
+            curr_vol = volumes[-1]
+            vol_factor = min(2.0, curr_vol / avg_prev_vol)
+            
+            self.supply_cache[code]['price_series'] = prices
+            self.supply_cache[code]['volume_series'] = volumes
+            self.supply_cache[code]['vol_factor'] = vol_factor
+        except Exception as e:
+            logger.error(f"[{code}] 1분봉 데이터 업데이트 중 오류: {e}")
 
     def _update_vwap_data(self, code: str):
         """[Task] VWAP(거래대금가중평균) 및 현재가 독립 업데이트"""
         # VWAP 연산에 필요한 5분봉 데이터 수집
-        chart_5m = self.collector.fetch_minute_chart(code, tic="5")
-        if not chart_5m: return
+        try:
+            chart_5m = self.collector.fetch_minute_chart(code, tic="5")
+            if not chart_5m: return
 
-        chart_5m.reverse()
-        prices = [abs(float(d['cur_prc'])) for d in chart_5m]
-        vols = [float(d['trde_qty']) for d in chart_5m]
+            chart_5m.reverse()
+            prices = [abs(float(d['cur_prc'])) for d in chart_5m]
+            vols = [float(d['trde_qty']) for d in chart_5m]
 
-        # VWAP 산출: Sum(가격 * 거래량) / Sum(거래량)
-        total_val = sum(p * v for p, v in zip(prices, vols))
-        total_vol = sum(vols)
-        vwap = total_val / total_vol if total_vol > 0 else prices[-1]
+            # VWAP 산출: Sum(가격 * 거래량) / Sum(거래량)
+            total_val = sum(p * v for p, v in zip(prices, vols))
+            total_vol = sum(vols)
+            vwap = total_val / total_vol if total_vol > 0 else prices[-1]
 
-        # 캐시 반영 (현재가 포함)
-        self.supply_cache[code]['vwap'] = round(vwap, 2)
-        self.supply_cache[code]['price'] = prices[-1]
-        logger.debug(f"[{code}] VWAP 업데이트: {self.supply_cache[code]['vwap']}, 현재가: {self.supply_cache[code]['price']}")
+            # 캐시 반영 (현재가 포함)
+            if self.supply_cache[code]['vwap'] == 0:
+                self.supply_cache[code]['prev_vwap'] = round(vwap, 2)
+            else:
+                self.supply_cache[code]['prev_vwap'] = self.supply_cache[code]['vwap']    
+            self.supply_cache[code]['vwap'] = round(vwap, 2)
+            self.supply_cache[code]['price'] = prices[-1]
+        except Exception as e:
+            logger.error(f"[{code}] VWAP(거래대금가중평균) 업데이트 중 오류: {e}")
 
     def _update_trend_data(self, code: str):
         """[Atomic] 60분봉 기반 장기 추세(Trend RSI) 업데이트"""
@@ -234,3 +249,20 @@ class MarketAnalyzer:
                 
         except Exception as e:
             logger.error(f"[{code}] Trend RSI 업데이트 중 오류: {e}")
+
+    def _update_volatility_data(self, code: str):
+        try:
+            """종목별 동적 변동성(ATR%) 업데이트"""
+            chart = self.collector.fetch_minute_chart(code, tic="5")
+            if not chart: return
+
+            chart.reverse()
+            highs = [d['high_pric'] for d in chart]
+            lows = [d['low_pric'] for d in chart]
+            closes = [d['cur_prc'] for d in chart]
+
+            # atr_percent 계산 및 저장
+            atr_p = self.trend_calc.calculate_atr_percent(highs, lows, closes)
+            self.supply_cache[code]['atr_percent'] = atr_p
+        except Exception as e:
+            logger.error(f"[{code}] 동적 변동성(ATR%) 업데이트 중 오류: {e}")

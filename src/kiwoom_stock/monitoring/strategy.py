@@ -188,8 +188,9 @@ class TradingStrategy:
 
     def _calculate_supply_score(self, metrics: Dict) -> float:
         """
-        [최종] 실질 비중 직접 승수 모델 (상수 가산점 제거)
+        실질 비중 직접 승수 모델 (상수 가산점 제거)
         체결강도 Base에 프로그램/외국계의 실제 시장 점유 비중을 직접 곱합니다.
+
         """
         # 1. 기초 데이터 확보 (Analyzer에서 정제된 데이터 주입)
         strength = metrics.get('strength', 100.0)
@@ -236,11 +237,48 @@ class TradingStrategy:
         return round(max(0, min(100, final_score)), 2)
 
     def _calculate_vwap_score(self, metrics: Dict) -> float:
-        """VWAP 점수: 민감도 8 적용 (이격도 6.25% 시 100점)"""
-        price = metrics.get('price', 0)
+        """
+        수급 평단가 기반 위치 및 과열 평가
+
+        """
         vwap = metrics.get('vwap', 0)
-        dev = (price / vwap - 1) * 100 if vwap > 0 else 0
-        return max(0, min(100, 50 + (dev * 8)))
+        price = metrics.get('price', 0)
+        vol_factor = metrics.get('vol_factor', 1.0)
+        prev_vwap = metrics.get('prev_vwap', 0)
+        atr_p = metrics.get('atr_percent', 3.0)
+
+        if vwap <= 0: return 0.0
+
+        # 1. 기준 거리 설정 (상대적 잣대)
+        # 모든 계산의 분모가 되는 '단위 거리'를 종목 변동성(ATR)에 동기화
+        deviation = (price - vwap) / vwap * 100
+        overheat_limit = max(3.0, atr_p * 1.5) 
+        
+        # 2. 선형 감쇄 함수 (Linear Decay Function) 적용
+        if deviation >= 0:
+            # [정방향] VWAP(0%)일 때 100점, overheat_limit일 때 0점
+            # 공식: 100 * (1 - 현재이격/한계이격)
+            ratio = min(1.0, deviation / overheat_limit)
+            pos_score = 100 * (1 - ratio)
+        else:
+            # [역방향/돌파] VWAP에 가까워질수록 점수 상승
+            # 돌파 가용 범위를 ATR의 일정 비율(예: 0.2배)로 동적 설정
+            breakout_range = atr_p * 0.2 
+            ratio = max(-1.0, deviation / breakout_range)
+            # VWAP에 붙을수록 100점에 수렴하며, 거래량 가속도(vol_factor)를 가중치로 사용
+            pos_score = 100 * (1 + ratio) * vol_factor
+
+        # 3. 수급 추세(Slope) 반영: 기울기를 정규화하여 가중치로 변환
+        # 상수가 아닌 기울기의 강도에 따라 0.8 ~ 1.2 사이를 유동적으로 움직임
+        if prev_vwap > 0 and vwap != prev_vwap:
+            raw_slope = (vwap - prev_vwap) / vwap * 1000
+            # 기울기 강도를 -1 ~ 1 사이로 압축한 뒤 가중치화 (Sigmoid 형태 혹은 Clamp)
+            slope_intensity = max(-1.0, min(1.0, raw_slope)) 
+            slope_factor = 1.0 + (slope_intensity * 0.2) # 0.8 ~ 1.2
+        else:
+            slope_factor = 1.0
+
+        return round(max(0, min(100, pos_score * slope_factor)), 2)
 
     def _calculate_trend_score(self, metrics: Dict) -> float:
         """Trend 점수: 민감도 1.5 적용 (RSI 80 이상 시 100점 근접)"""
