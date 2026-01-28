@@ -114,9 +114,9 @@ class MultiTimeframeRSIMonitor:
         while True:
             try:
                 # [안전장치] 시장 마감 확인 및 가동 중단
-                # if not self.strategy.is_monitoring_time():
-                #     logger.info("Market is closed. Shutting down system.")
-                #     break
+                if not self.strategy.is_monitoring_time():
+                    logger.info("Market is closed. Shutting down system.")
+                    break
                 
                 # 1. 감시 대상 종목 갱신
                 # 거래대금 상위 종목 및 보유 종목을 합쳐 이번 루프에서 감시할 실시간 리스트를 생성합니다.
