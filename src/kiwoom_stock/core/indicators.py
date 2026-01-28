@@ -129,3 +129,23 @@ class Indicators:
         curr_price = close_series[-1]
         
         return round((atr / curr_price) * 100, 2)
+
+    def calculate_ema(self, series: List[float], period: int) -> float:
+        """
+        지수이동평균(EMA) 계산
+        공식: (현재가 * 가중치) + (이전 EMA * (1 - 가중치))
+        가중치: 2 / (period + 1)
+        """
+        if len(series) < period:
+            return series[-1] if series else 0.0
+
+        alpha = 2 / (period + 1)
+        
+        # 첫 번째 값은 단순 이동평균(SMA)으로 시작하거나 첫 종가로 시작
+        ema = sum(series[:period]) / period 
+        
+        # 이후 값들에 대해 지수 가중치 적용
+        for i in range(period, len(series)):
+            ema = (series[i] * alpha) + (ema * (1 - alpha))
+            
+        return round(ema, 2)
