@@ -173,7 +173,7 @@ class TradingStrategy:
 
         # 4. 외국계 실질 참여 비중 계산 (Logic Value)
         frgn_net = frgn.get('netprps_prica', 0)
-        frgn_total = frgn.get('trde_prica', 1) # 분모 0 방지
+        frgn_total = max(1, frgn.get('trde_prica', 1)) # 분모 0 방지
 
         # 5. 거래량 기반 안전핀 (Safety Pin) 적용
         # 전일 거래량의 5%도 안 되는 시점에서는 수급 데이터의 신뢰도를 50%로 강제 감쇄
