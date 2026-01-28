@@ -1,7 +1,6 @@
 # src/kiwoom_stock/api/services/market.py
 import datetime
 from typing import Dict, List, TypedDict, Optional
-from ..parser import parse_chart_item, clean_numeric
 
 class MarketService:
     def __init__(self, base):
@@ -27,7 +26,7 @@ class MarketService:
         })
         return data
 
-    def get_minute_chart(self, stock_code: str, tic: str = "5") -> List[Dict]:
+    def get_minute_chart(self, stock_code: str, tic: str) -> List[Dict]:
         """
         주식 분봉 차트 조회 (ka10080)
 
@@ -38,14 +37,11 @@ class MarketService:
             "upd_stkpc_tp": "1"      # 수정주가구분 (1: 적용)
         })
 
-        items = data.get("stk_min_pole_chart_qry", [])
-        
-        # parse_chart_item은 {'close': 1200.0, 'open': 1100.0, ...} 형태의 딕셔너리를 반환합니다.
-        return [parse_chart_item(item) for item in items]
+        return data.get('stk_min_pole_chart_qry', [])
 
     # --- [신규/개선] 실시간 수급 지표 (ka10063 대체) ---
 
-    def get_tick_strength(self, stock_code: str) -> float:
+    def get_tick_strength(self, stock_code: str) -> List[Dict]:
         """
         주식 체결강도 추이 조회 (ka10046)
         매수세의 실시간 공격성을 측정하는 Base 지표입니다. (100% 기준)
@@ -53,11 +49,7 @@ class MarketService:
         data = self.base.request("/api/dostk/mrkcond", "ka10046", {
             "stk_cd": stock_code
         })
-        items = data.get("cntr_str_tm", [])
-        if not items:
-            return 100.0
-        # 최신 틱의 체결강도 반환
-        return clean_numeric(items[0].get("cntr_str", "100.0"))
+        return data.get("cntr_str_tm", [])
 
     def get_program_trade(self) -> Dict[str, float]:
         """
@@ -76,7 +68,7 @@ class MarketService:
 
         return data.get("stk_prm_trde_prst", [])
 
-    def get_foreign_window_total(self, market_tp: str = "001") -> float:
+    def get_foreign_window_total(self, market_tp: str = "001") -> List[Dict]:
         """
         외국계 창구 매매 상위 조회 (ka10037)
         외국계 증권사 합계 순매수량을 반환하여 수급의 질을 판정합니다.

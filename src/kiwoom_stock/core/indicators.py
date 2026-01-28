@@ -109,3 +109,43 @@ class Indicators:
         # 와일더의 이동평균 방식 적용
         atr = statistics.mean(tr_list[-period:])
         return round(atr, 2)
+
+    def calculate_atr_percent(self, high_series: List[float], low_series: List[float], close_series: List[float]) -> float:
+        """ATR % (변동성 비율) 계산"""
+        if len(close_series) < self.period + 1:
+            return 3.0  # 데이터 부족 시 기본 과열 기준값(3%) 반환
+
+        tr_list = []
+        for i in range(1, len(close_series)):
+            tr = max(
+                high_series[i] - low_series[i],
+                abs(high_series[i] - close_series[i-1]),
+                abs(low_series[i] - close_series[i-1])
+            )
+            tr_list.append(tr)
+
+        # TR의 이동평균 (ATR)
+        atr = sum(tr_list[-self.period:]) / self.period
+        curr_price = close_series[-1]
+        
+        return round((atr / curr_price) * 100, 2)
+
+    def calculate_ema(self, series: List[float], period: int) -> float:
+        """
+        지수이동평균(EMA) 계산
+        공식: (현재가 * 가중치) + (이전 EMA * (1 - 가중치))
+        가중치: 2 / (period + 1)
+        """
+        if len(series) < period:
+            return series[-1] if series else 0.0
+
+        alpha = 2 / (period + 1)
+        
+        # 첫 번째 값은 단순 이동평균(SMA)으로 시작하거나 첫 종가로 시작
+        ema = sum(series[:period]) / period 
+        
+        # 이후 값들에 대해 지수 가중치 적용
+        for i in range(period, len(series)):
+            ema = (series[i] * alpha) + (ema * (1 - alpha))
+            
+        return round(ema, 2)

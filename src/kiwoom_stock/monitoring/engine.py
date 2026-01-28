@@ -14,7 +14,6 @@ from .strategy import TradingStrategy
 from .manager import StockManager, Position
 from .notifier import Notifier
 from kiwoom_stock.core.database import TradeLogger
-from ..core.indicators import Indicators
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
@@ -28,14 +27,10 @@ class MultiTimeframeRSIMonitor:
         market_config = config.get("market", {})
         filter_config = config.get("filters", {})
         strategy_config = config.get("strategy", {})
-
-        # 지표 계산기 초기화
-        self.trend_calc = Indicators(period=config.get("trend_timeframe", {}).get("rsi_period", 14))
-        self.entry_calc = Indicators(period=config.get("entry_timeframe", {}).get("rsi_period", 9))
         
         # 모듈 초기화 (Config 분배)
         self.db = TradeLogger()
-        self.analyzer = MarketAnalyzer(client, self.trend_calc, market_config)
+        self.analyzer = MarketAnalyzer(client, market_config)
         self.strategy = TradingStrategy(strategy_config)
         self.stock_mgr = StockManager(client, TradeLogger(), self.strategy, filter_config)
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
@@ -51,24 +46,7 @@ class MultiTimeframeRSIMonitor:
     def check_conditions(self, stock_code: str) -> Optional[Dict]:
         """종목 스캔 및 전략 실행"""
         try:
-            entry_data = self.client.market.get_minute_chart(stock_code, tic="5")
-            trend_data = self.client.market.get_minute_chart(stock_code, tic="60")
-            if not trend_data or len(entry_data) < 20: return None
-
-            curr_price = entry_data[0]['close']
-            curr_vol = sum(d['volume'] for d in entry_data)
-            s_data = self.analyzer.supply_cache.get(stock_code)
-            
-            metrics = {
-                "alpha": self.entry_calc.calculate([d['close'] for d in entry_data]) - self.analyzer.market_rsi,
-                "strength": s_data['strength'],
-                "pgm_data": s_data['pgm_data'],
-                "foreign_data": s_data['foreign_data'],
-                "vol_ratio": s_data['vol_ratio'],
-                "price": curr_price, "volume": curr_vol,
-                "vwap": sum(d['close']*d['volume'] for d in entry_data)/curr_vol if curr_vol > 0 else curr_price,
-                "trend_rsi": self.trend_calc.calculate([d['close'] for d in trend_data])
-            }
+            metrics = self.analyzer.supply_cache.get(stock_code)
 
             score, score_details = self.strategy.calculate_conviction_score(metrics)
             momentum = round(score - self.score_history.get(stock_code, score), 1)
@@ -78,7 +56,7 @@ class MultiTimeframeRSIMonitor:
             status = "🔥강력추천" if score >= th['strong'] else ("👀관심" if score >= th['interest'] else "관망")
             if momentum >= self.strategy.momentum_threshold: status = "🚀수급폭발"
 
-            self.status_log[stock_code] = {"price": curr_price, "score": score, **{f"{k}_score": v for k, v in score_details.items()}, "momentum": momentum, "reason": status}
+            self.status_log[stock_code] = {"price": metrics["price"], "score": score, **{f"{k}_score": v for k, v in score_details.items()}, "momentum": momentum, "reason": status}
             return {
                 **metrics, 
                 **{f"{k}_score": v for k, v in score_details.items()}, # alpha_score 등 추가
