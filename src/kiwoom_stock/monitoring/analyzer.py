@@ -153,7 +153,7 @@ class MarketAnalyzer:
     def _update_strength_data(self, code: str):
         """체결강도 데이터 업데이트"""
         strength_history = self.collector.fetch_tick_strength(code)
-        strength = strength_history[0].get("cntr_str", "100.0")
+        strength = strength_history[0].get("cntr_str", 100.0)
         self.supply_cache[code]['strength'] = strength
 
     def _update_chart_data(self, code: str, tic: str):
