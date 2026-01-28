@@ -28,14 +28,10 @@ class MultiTimeframeRSIMonitor:
         market_config = config.get("market", {})
         filter_config = config.get("filters", {})
         strategy_config = config.get("strategy", {})
-
-        # 지표 계산기 초기화
-        self.trend_calc = Indicators(period=config.get("trend_timeframe", {}).get("rsi_period", 14))
-        self.entry_calc = Indicators(period=config.get("entry_timeframe", {}).get("rsi_period", 9))
         
         # 모듈 초기화 (Config 분배)
         self.db = TradeLogger()
-        self.analyzer = MarketAnalyzer(client, self.trend_calc, market_config)
+        self.analyzer = MarketAnalyzer(client, market_config)
         self.strategy = TradingStrategy(strategy_config)
         self.stock_mgr = StockManager(client, TradeLogger(), self.strategy, filter_config)
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
@@ -55,19 +51,18 @@ class MultiTimeframeRSIMonitor:
             trend_data = self.client.market.get_minute_chart(stock_code, tic="60")
             if not trend_data or len(entry_data) < 20: return None
 
-            curr_price = entry_data[0]['close']
-            curr_vol = sum(d['volume'] for d in entry_data)
             s_data = self.analyzer.supply_cache.get(stock_code)
             
             metrics = {
-                "alpha": self.entry_calc.calculate([d['close'] for d in entry_data]) - self.analyzer.market_rsi,
+                "price_series": s_data['price_series'],
+                "volume_series": s_data['volume_series'],
                 "strength": s_data['strength'],
                 "pgm_data": s_data['pgm_data'],
                 "foreign_data": s_data['foreign_data'],
                 "vol_ratio": s_data['vol_ratio'],
-                "price": curr_price, "volume": curr_vol,
-                "vwap": sum(d['close']*d['volume'] for d in entry_data)/curr_vol if curr_vol > 0 else curr_price,
-                "trend_rsi": self.trend_calc.calculate([d['close'] for d in trend_data])
+                "price": s_data['price'],
+                "vwap": s_data['vwap'],
+                "trend_rsi": s_data['trend_rsi']
             }
 
             score, score_details = self.strategy.calculate_conviction_score(metrics)
@@ -78,7 +73,7 @@ class MultiTimeframeRSIMonitor:
             status = "🔥강력추천" if score >= th['strong'] else ("👀관심" if score >= th['interest'] else "관망")
             if momentum >= self.strategy.momentum_threshold: status = "🚀수급폭발"
 
-            self.status_log[stock_code] = {"price": curr_price, "score": score, **{f"{k}_score": v for k, v in score_details.items()}, "momentum": momentum, "reason": status}
+            self.status_log[stock_code] = {"price": metrics["price"], "score": score, **{f"{k}_score": v for k, v in score_details.items()}, "momentum": momentum, "reason": status}
             return {
                 **metrics, 
                 **{f"{k}_score": v for k, v in score_details.items()}, # alpha_score 등 추가
@@ -136,9 +131,9 @@ class MultiTimeframeRSIMonitor:
         while True:
             try:
                 # [안전장치] 시장 마감 확인 및 가동 중단
-                if not self.strategy.is_monitoring_time():
-                    logger.info("Market is closed. Shutting down system.")
-                    break
+                # if not self.strategy.is_monitoring_time():
+                #     logger.info("Market is closed. Shutting down system.")
+                #     break
                 
                 # 1. 감시 대상 종목 갱신
                 # 거래대금 상위 종목 및 보유 종목을 합쳐 이번 루프에서 감시할 실시간 리스트를 생성합니다.

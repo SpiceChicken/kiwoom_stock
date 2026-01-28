@@ -140,10 +140,51 @@ class TradingStrategy:
         
         return total_score, details
 
-    def _calculate_alpha_score(self, metrics: Dict) -> float:
-        """Alpha 점수: 민감도 1.5 적용"""
-        alpha_val = metrics.get('alpha', 0)
-        return max(0, min(100, 50 + (alpha_val * 1.5)))
+    def _calculate_alpha_score(self, metrics) -> float:
+        """
+        [Alpha Score] 가격 가속도 및 탄력성 평가
+        - 가속도: 최근 1분 수익률 - (지난 5분 평균 수익률)
+        - 신뢰도: 최근 1분 거래량 / (직전 4분 평균 거래량)
+        """
+
+        price_series = metrics.get('price_series')
+        volume_series = metrics.get('volume_series')
+
+        # 최소 6개의 데이터 포인트가 필요함 (현재 포함 5분전까지 비교)
+        if len(price_series) < 6 or len(volume_series) < 6:
+            return 0.0
+
+        try:
+            # 데이터 인덱싱 (리스트 끝이 현재 데이터)
+            # [-1]: 현재, [-2]: 1분전, [-6]: 5분전
+            curr_p = price_series[-1]
+            p_1m_ago = price_series[-2]
+            p_5m_ago = price_series[-6]
+
+            if p_1m_ago <= 0 or p_5m_ago <= 0: return 0.0
+
+            # 1. 가속도(Acceleration) 산출
+            roc_1m = (curr_p - p_1m_ago) / p_1m_ago * 100
+            roc_5m = (curr_p - p_5m_ago) / p_5m_ago * 100
+            
+            # 현재 기세가 평균 기세보다 얼마나 높은지 (Momentum Acceleration)
+            acceleration = roc_1m - (roc_5m / 5)
+
+            # 2. 거래량 신뢰도(Volume Surge)
+            # 최근 1분 거래량 vs 직전 4분 평균 거래량 ([-5]부터 [-2]까지)
+            avg_prev_vol = max(1.0, sum(volume_series[-5:-1]) / 4)
+            curr_vol = volume_series[-1]
+            vol_factor = min(2.0, curr_vol / avg_prev_vol)
+
+            # 3. 최종 Alpha 점수화 (0~100점)
+            # 가속도 1%당 100점 기준 가중치 부여 및 거래량 증폭
+            raw_alpha = acceleration * 100 * vol_factor
+            
+            return round(max(0, min(100, raw_alpha)), 2)
+
+        except (ZeroDivisionError, ValueError) as e:
+            logger.error(f"Alpha Score 연산 오류: {e}")
+            return 0.0
 
     def _calculate_supply_score(self, metrics: Dict) -> float:
         """
