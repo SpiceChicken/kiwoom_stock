@@ -6,12 +6,11 @@
 import sys
 import logging
 import time as time_mod
-from datetime import datetime, time
 from typing import Dict, Optional
 
 from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
-from .manager import StockManager, Position
+from .manager import StockManager
 from .notifier import Notifier
 from kiwoom_stock.core.database import TradeLogger
 
@@ -34,79 +33,137 @@ class MultiTimeframeRSIMonitor:
         self.strategy = TradingStrategy(strategy_config)
         self.stock_mgr = StockManager(client, TradeLogger(), self.strategy, filter_config)
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
-
-        # [최적화] 진입 마감 시간을 time 객체로 캐싱
-        entry_str = config['strategy'].get("entry_deadline", "14:30")
-        self.entry_deadline_obj = time.fromisoformat(entry_str)
         self.status_log = {}
-        self.score_history = {}
 
         logger.info("Monitoring Engine Initialized.")
 
-    def check_conditions(self, stock_code: str) -> Optional[Dict]:
-        """종목 스캔 및 전략 실행"""
-        try:
-            metrics = self.analyzer.supply_cache.get(stock_code)
+    def _sync_stock_state(self, stock_code: str):
+        """
+        [책임 1] 데이터 동기화 전담
+        신호 여부와 상관없이 무조건 최신 지표와 점수를 로그/객체에 기록합니다.
+        """
+        metrics = self.analyzer.supply_cache.get(stock_code)
+        if not metrics: return None
 
-            score, score_details = self.strategy.calculate_conviction_score(metrics)
-            momentum = round(score - self.score_history.get(stock_code, score), 1)
-            self.score_history[stock_code] = score
-            
-            th = self.strategy.entry_thresholds
-            status = "🔥강력추천" if score >= th['strong'] else ("👀관심" if score >= th['interest'] else "관망")
-            if momentum >= self.strategy.momentum_threshold: status = "🚀수급폭발"
+        # 전략가에게 단순 '점수 계산'만 요청 (판단이 아님)
+        verdict = self.strategy.evaluate(metrics, self.analyzer.market_regime)
+        
+        if stock_code in self.stock_mgr.active_positions:
+            self.stock_mgr.active_positions[stock_code].sell_price = metrics['price']
+        
+        # 시스템 내부 상태(로그 등)만 업데이트하고 끝
+        self.status_log[stock_code] = {
+            "name": self.stock_mgr.stock_names[stock_code],
+            "price": metrics["price"],
+            "score": verdict['score'], **{f"{k}_score": v for k, v in verdict['score_detail'].items()},
+            "momentum": verdict['momentum'],
+            "reason": verdict['status']}
+        
+        return {**metrics, **verdict}
 
-            self.status_log[stock_code] = {"price": metrics["price"], "score": score, **{f"{k}_score": v for k, v in score_details.items()}, "momentum": momentum, "reason": status}
-            return {
-                **metrics, 
-                **{f"{k}_score": v for k, v in score_details.items()}, # alpha_score 등 추가
-                "stock_code": stock_code, 
-                "score": score, 
-                "momentum": momentum
-            } if score >= th['alert'] else None
-        except Exception as e:
-            logger.error(f"Condition check failed for {stock_code}: {e}", exc_info=True)
-            return None
-
-    def evaluate_entry_signal(self, stock_code, res, thresholds, min_th, current_time: time) -> bool:
+    def evaluate_entry_signal(self) -> bool:
         """
         시간 제한을 포함한 모든 진입 조건을 한곳에서 판정합니다.
     
         """
-        # 1. 시간 제한 체크 (내부로 이동)
-        is_time_allowed = current_time < self.entry_deadline_obj
-        
-        # 2. 4대 지표 하한선(Conjunction) 체크
-        # .get()을 활용해 설정 누락 방지 및 가독성 확보
-        is_qualified = all([
-            res['alpha_score'] >= min_th.get('alpha', 0),
-            res['supply_score'] >= min_th.get('supply', 0),
-            res['vwap_score'] >= min_th.get('vwap', 0),
-            res['trend_score'] >= min_th.get('trend', 0)
-        ])
+        # 1. 시간 제한 체크
+        if not self.strategy.is_monitoring_time():
+            return False
 
-        # 3. 최종 진입 조건 리스트 (Pythonic all 활용)
-        entry_conditions = [
-            is_time_allowed,                                     # 장 후반 진입 금지
-            stock_code not in self.stock_mgr.active_positions,   # 중복 진입 방지
-            res['score'] >= thresholds.get('strong', 80.0),      # 총점 임계값 통과
-            is_qualified                                         # 개별 지표 하한선 통과
-        ]
-        
-        return all(entry_conditions)
+        # 2. 진입 가능 시간 확인
+        if not self.strategy.is_trading_window():
+            return False
+
+        return True
 
     def check_kill_switch(self):
-        """전체 계좌의 리스크를 확인합니다."""
+        """[Engine] 전체 계좌의 리스크를 확인하고 시스템 중단 여부를 결정합니다."""
+        # 1. DB에서 오늘 확정된 실현 손익 가져오기
         realized_pnl = self.db.get_today_realized_pnl()
-        unrealized_pnl = sum(pos.calc_profit_rate for pos in self.stock_mgr.active_positions.values())
-        total_pnl = realized_pnl + unrealized_pnl
+        
+        # 2. 매니저에게 실현+미실현 손익을 합산해달라고 요청 (계산 위임)
+        total_pnl = self.stock_mgr.get_total_pnl_status(realized_pnl)
 
-        # 전략에게 킬스위치 가동 여부를 묻습니다.
+        # 3. 전략에게 이 정도 손실이면 멈춰야 하는지 물어보기 (판단 위임)
         if self.strategy.is_kill_switch_activated(total_pnl):
-            logger.critical(f"킬스위치 작동: {total_pnl}% 손실")
+            logger.critical(f"🚨 [KILL SWITCH] 누적 손실 {total_pnl}% 도달. 시스템을 종료합니다.")
             self.notifier.notify_critical(f"🚨 킬스위치 발동: {total_pnl}% 손실로 시스템을 종료합니다.")
             return True
+            
         return False
+
+    def force_liquidate_all(self):
+        """[Engine] 킬스위치 발동 시 모든 보유 종목을 즉시 정리합니다."""
+        # 보유 중인 종목 코드를 복사 (순회 중 딕셔너리 변경 에러 방지)
+        holding_codes = list(self.stock_mgr.active_positions.keys())
+        
+        if not holding_codes:
+            logger.info("보유 중인 종목이 없습니다.")
+            return
+
+        for stock_code in holding_codes:
+            try:
+                verdict = self._sync_stock_state(stock_code)
+                self.execute_sell(verdict, "KILL-SWITCH ACTIVATED")
+            except Exception as e:
+                logger.error(f"Failed to liquidate {stock_code} during kill-switch: {e}")
+
+
+    def execute_buy(self, verdict: dict):
+        """
+        [Engine] 최종 매수 집행 조율
+        - Manager에게 주문 및 기록 위임
+        - 성공 시 Notifier에게 알림 요청
+        """
+        stock_code = verdict['stock_code']
+        
+        # 1. 매니저에게 주문 및 사후 처리(DB/잔고) 요청
+        # 이 한 줄로 주문 + DB기록 + 내부 포지션 등록이 끝납니다.
+        success, buy_data = self.stock_mgr.process_buy_order(verdict)
+        
+        if success:
+            # 2. 주문 성공 시 알림 전송
+            # buy_data에는 DB에 저장된 실제 체결 정보가 들어있습니다.
+            self.notifier.notify_buy(buy_data)
+            
+        else:
+            logger.error(f"❌ [ORDER_FAILED] {stock_code} 주문 집행에 실패했습니다.")
+
+    def execute_sell(self, verdict: dict, reason: str):
+        """
+        [Engine] 최종 매도 집행 조율
+        - Manager에게 매도 주문 및 포지션 정리 위임
+        - 성공 시 Notifier에게 수익률 정보와 함께 알림 요청
+        """
+        stock_code = verdict['stock_code']
+
+        # 1. 매니저에게 매도 집행 및 사후 처리 요청
+        success, sell_data = self.stock_mgr.process_sell_order(verdict, reason)
+        # success: 성공 여부, sell_data: 최종 수익률 등이 포함된 결과 데이터
+        
+        if success:
+            # 2. 매도 성공 시 알림 전송 (수익률 포함)
+            self.notifier.notify_sell(sell_data)
+
+        else:
+            logger.error(f"❌ [SELL_FAILED] {stock_code} 매도 집행에 실패했습니다.")
+
+    def _prepare_cycle(self):
+        """
+        [Engine] 매 루프 시작 전, 시장 상황과 타겟 종목을 동기화합니다.
+        이 함수는 '시장의 판을 짜는' 역할을 합니다.
+        """
+        # 1. 시황 파악 (전략 임계값의 기준)
+        self.analyzer.update_regime()
+        
+        # 2. 감시 대상 확정 (매니저가 종목 리스트 갱신)
+        self.stock_mgr.update_target_stocks()
+        
+        # 3. 데이터 준비 (확정된 종목들의 수급 데이터 로드)
+        self.analyzer.update_priority_supply(self.stock_mgr.stocks)
+
+        # 4. 루프 시작 시 데이터 저장소 초기화
+        self.notifier.start_status_session()
 
     def run(self):
         """메인 실행 루프"""
@@ -118,99 +175,36 @@ class MultiTimeframeRSIMonitor:
                     logger.info("Market is closed. Shutting down system.")
                     break
                 
-                # 1. 감시 대상 종목 갱신
-                # 거래대금 상위 종목 및 보유 종목을 합쳐 이번 루프에서 감시할 실시간 리스트를 생성합니다.
-                self.stock_mgr.update_target_stocks() 
+                self._prepare_cycle()
 
-                # 2. 시장 레짐(Regime) 분석
-                # 시장 지수(KODEX 200 등)의 RSI와 ATR을 계산하여 현재가 강세장인지, 패닉 하락장인지 진단합니다.
-                # 이 진단 결과에 따라 시스템 전체의 공격성과 방어 모드가 결정됩니다.
-                self.analyzer.update_regime()
-
-                # 3. 전략 컨텍스트 동기화 및 캐싱
-                # 분석된 시장 레짐에 맞춰 지표별 가중치(Weights)와 진입/청산 임계값(Thresholds)을 동적으로 변경합니다.
-                # 루프 내 중복 연산을 막기 위해 레짐이 바뀔 때만 딱 한 번 설정을 로드하여 성능을 최적화합니다.
-                self.strategy.update_context(self.analyzer.market_regime)
-
-                # 4. 외인/기관 수급 데이터 일괄 확보 (Batch Fetch)
-                # 현재 감시 중인 모든 종목에 대한 투자자별 매매동향 데이터를 한 번에 가져와 내부 캐시에 저장합니다.
-                # 이후 개별 종목 점수 계산 시 매번 API를 호출하지 않고 이 캐시를 참조하여 실행 속도를 2배 이상 높입니다.
-                self.analyzer.update_priority_supply(self.stock_mgr.stocks)
+                # 비상 정지 체크
+                if self.check_kill_switch():
+                    self.force_liquidate_all()
+                    break
                 
                 # [최적화] API 호출 중복 제거: 한 번의 루프에서 모든 데이터 수집 및 결과 저장
-                scan_results = {}
-                for stock in self.stock_mgr.stocks:
-                    res = self.check_conditions(stock)
-                    if res: scan_results[stock] = res
-                
-                # 킬스위치 작동
-                if self.check_kill_switch():
-                    kill_switch_text = "블랙 스완 대응: 전 종목 시장가 매도 및 시스템 긴급 셧다운"
-                    logger.critical(kill_switch_text)
-                    
-                    for code in list(self.stock_mgr.active_positions.keys()):
-                        pos = self.stock_mgr.active_positions[code]
-                        log = self.status_log.get(code)
+                for stock_code in self.stock_mgr.stocks:
+                    # 1. 일단 모든 종목의 정보를 최신화 (SRP: 데이터 동기화)
+                    # 이 과정에서 킬스위치에 필요한 모든 가격 정보가 status_log에 채워집니다.
+                    verdict = self._sync_stock_state(stock_code)
+                    log = self.status_log[stock_code]
+                    if not verdict: continue
 
-                        pos.sell_price = log['price'] if log else pos.buy_price
-                        pos.sell_reason = "KILL-SWITCH ACTIVATED"
-                        
-                        # [개선] 판정 로직을 거치지 않고 직접 DB 기록 및 포지션 삭제
-                        self.db.record_sell(pos)
-                        self.notifier.notify_sell(pos)                        
-                    break # 메인 루프 탈출
-                
-                # 모멘텀 기준 정렬 (status_log 참조)
-                sorted_stocks = sorted(self.stock_mgr.stocks, 
-                                       key=lambda x: self.status_log.get(x, {}).get('momentum', 0), 
-                                       reverse=True)
-
-                self.notifier.start_status_session()
-
-                for stock in sorted_stocks:
-                    res = scan_results.get(stock)
-                    log = self.status_log.get(stock)
-                    if not log or "price" not in log: continue
-
-                    # 보유 종목 매도 감시 위임
-                    strong_thresholds = self.strategy.entry_thresholds.get('strong', 85.0)
-                    self.stock_mgr.monitor_active_signals(stock, log, strong_thresholds, self.notifier)
-                    
-                    # 화면 출력 및 알림
-
-                    # log 딕셔너리에 분석에 필요한 종목명(name)을 추가
-                    log['name'] = self.stock_mgr.stock_names.get(stock, stock)
                     self.notifier.collect_status(log)
-                    
-                    if res:                        
-                        # [추상화 적용] 진입 판정 호출
-                        # [Pythonic] 메서드 괄호()와 인자 전달이 사라져 가독성이 극대화됨
-                        if self.evaluate_entry_signal(
-                            stock, res, 
-                            self.strategy.entry_thresholds, # Property 접근
-                            self.strategy.min_thresholds,   # Property 접근
-                            datetime.now().time()
-                        ):
-                            if stock not in self.stock_mgr.active_positions:
-                                # 매수 실행 및 DB 기록
-                                buy_data = {
-                                    "stock_code": stock, "stock_name": self.stock_mgr.stock_names.get(stock, stock),
-                                    "buy_price": log['price'], "buy_score": log['score'],
-                                    "alpha_score": res['alpha_score'], "supply_score": res['supply_score'],
-                                    "vwap_score": res['vwap_score'], "trend_score": res['trend_score'],
-                                    "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    "buy_regime": self.analyzer.market_regime.value
-                                }
-                                buy_data['id'] = self.db.record_buy(buy_data)
-                                self.stock_mgr.active_positions[stock] = Position(**buy_data)
-                                self.notifier.notify_buy(buy_data)
 
-                        if log['momentum'] >= self.strategy.momentum_threshold:
-                            self.notifier.notify_momentum(res)
+                    # 2. 보유 종목 매도 감시 위임
+                    strong_thresholds = self.strategy.entry_thresholds.get('strong', 85.0)
+                    sell_reason = self.stock_mgr.evaluate_position(verdict, strong_thresholds)
+                    if sell_reason:
+                        self.execute_sell(verdict, sell_reason)
+                        continue
 
-                # 모든 종목 처리가 끝나면 한 번에 전송
+                    # 3. 매수 기회 탐색 (SRP: 판단)
+                    if verdict.get('is_buy_signal') and self.evaluate_entry_signal():
+                        self.execute_buy(verdict)
+                # ---------------------------------------------
+
                 self.notifier.flush_status(self.analyzer.market_regime.value)
-
                 time_mod.sleep(self.config.get("check_interval", 60))
             except KeyboardInterrupt:
                 logger.warning("System interrupted by user.")
