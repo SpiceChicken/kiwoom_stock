@@ -50,6 +50,7 @@ class MarketAnalyzer:
             'volume_series': [],
             'trde_qty': 0,
             'cur_prc': 0,
+            'market_total_amount': 1,
 
             # 2. 프로그램 매매 데이터 (Program Trade)
             'pgm_data': {
@@ -149,6 +150,7 @@ class MarketAnalyzer:
         self.supply_cache[code]['vol_ratio'] = basic.get('trde_pre', 0.0)
         self.supply_cache[code]['trde_qty'] = basic.get('trde_qty', 0)
         self.supply_cache[code]['cur_prc'] = basic.get('cur_prc', 0)
+        self.supply_cache[code]['market_total_amount'] = max(1, basic.get('trde_qty', 0) * basic.get('cur_prc', 0))
 
     def _update_strength_data(self, code: str):
         """체결강도 데이터 업데이트"""

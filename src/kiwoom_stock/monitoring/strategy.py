@@ -136,45 +136,34 @@ class TradingStrategy:
         
         return round(total, 1), details
 
-    def _calculate_alpha_score(self, metrics) -> float:
+    def _calculate_alpha_score(self, metrics: Dict) -> float:
         """
         [Alpha Score] 가격 가속도 및 탄력성 평가
         - 가속도: 최근 1분 수익률 - (지난 5분 평균 수익률)
-        - 신뢰도: 최근 1분 거래량 / (직전 4분 평균 거래량)
+        - 신뢰도: 최근 1분 거래량 / (직전 4분 평균 거래량)\
+
         """
+        price_series = metrics.get('price_series', [])
+        vol_series = metrics.get('volume_series', [])
 
-        price_series = metrics.get('price_series')
-        volume_series = metrics.get('volume_series')
-
-        # 최소 6개의 데이터 포인트가 필요함 (현재 포함 5분전까지 비교)
-        if len(price_series) < 6 or len(volume_series) < 6:
+        if len(price_series) < 6:
             return 0.0
-        # 데이터 인덱싱 (리스트 끝이 현재 데이터)
-        # [-1]: 현재, [-2]: 1분전, [-6]: 5분전
-        curr_p = price_series[-1]
-        p_1m_ago = price_series[-2]
-        p_5m_ago = price_series[-6]
 
-        if p_1m_ago <= 0 or p_5m_ago <= 0: return 0.0
+        # 1. 가속도 계산 (5분 평균 감산을 /10으로 완화하여 완만한 상승도 포착)
+        roc_1m = (price_series[0] - price_series[1]) / price_series[1] * 100
+        roc_5m = (price_series[0] - price_series[5]) / price_series[5] * 100
+        acceleration = roc_1m - (roc_5m / 10)
 
-        # 1. 가속도(Acceleration) 산출
-        roc_1m = (curr_p - p_1m_ago) / p_1m_ago * 100
-        roc_5m = (curr_p - p_5m_ago) / p_5m_ago * 100
-            
-        # 현재 기세가 평균 기세보다 얼마나 높은지 (Momentum Acceleration)
-        acceleration = roc_1m - (roc_5m / 5)
+        # 2. 거래량 동반 확인
+        v_1m = vol_series[0]
+        v_5m_avg = sum(vol_series[1:6]) / 5
+        vol_factor = min(2.0, v_1m / v_5m_avg) if v_5m_avg > 0 else 1.0
 
-        # 2. 거래량 신뢰도(Volume Surge)
-        # 최근 1분 거래량 vs 직전 4분 평균 거래량 ([-5]부터 [-2]까지)
-        avg_prev_vol = max(1.0, sum(volume_series[-5:-1]) / 4)
-        curr_vol = volume_series[-1]
-        vol_factor = min(2.0, curr_vol / avg_prev_vol)
-
-        # 3. 최종 Alpha 점수화 (0~100점)
-        # 가속도 1%당 100점 기준 가중치 부여 및 거래량 증폭
-        raw_alpha = acceleration * 100 * vol_factor
-            
-        return round(max(0, min(100, raw_alpha)), 2)
+        # 3. [핵심 수정] 민감도 상수를 100에서 500으로 상향
+        # 이제 0.2%의 가속도만 발생해도 100점에 도달하여 기세를 즉각 반영함
+        raw_alpha = max(0, min(100, acceleration * 500 * vol_factor))
+        
+        return float(raw_alpha)
 
     def _calculate_supply_score(self, metrics: Dict) -> float:
         """
@@ -182,53 +171,29 @@ class TradingStrategy:
         체결강도 Base에 프로그램/외국계의 실제 시장 점유 비중을 직접 곱합니다.
 
         """
-        # 1. 기초 데이터 확보 (Analyzer에서 정제된 데이터 주입)
         strength = metrics.get('strength', 100.0)
-        pgm = metrics.get('pgm_data', {})      # {'netprps_prica', 'all_trde_rt', 'buy_cntr_amt', 'sel_cntr_amt'}
-        frgn = metrics.get('foreign_data', {}) # {'netprps_prica', 'trde_prica'}
-        trde_qty = metrics.get('trde_qty', 0)
-        cur_prc = metrics.get('cur_prc', 0)
+        pgm_net = metrics.get('pgm_net', 0)
+        frgn_net = metrics.get('frgn_net', 0)
+        market_total = metrics.get('market_total_amount', 1)
+        vol_ratio = metrics.get('vol_ratio', 0)
 
-        # 실시간 누적 거래대금 산출 (단위: 100만 원)
-        market_total_amount = max(1, trde_qty * cur_prc) / 1000000
-
-        # 전일 대비 거래량 비율 (%) - Engine에서 주입
-        # 예: 전일 거래량 대비 5% 수준이면 5.0
-        vol_ratio = metrics.get('vol_ratio', 100.0)
-
-        # 2. Base Score: 체결강도 (200% -> 100점 매핑)
-        # 100%일 때 50점 기준, 기세가 없으면(0%) 0점
+        # 1. Base Score: 체결강도 기반 (100% -> 50점)
         base_score = max(0, min(100, 50 + (strength - 100) * 0.5))
 
-        # 3. 프로그램/외국인 실질 참여 비중 계산 (Logic Value)
-        pgm_net = pgm.get('netprps_prica', 0)
-        frgn_net = frgn.get('netprps_prica', 0)
-        
-        if market_total_amount < 10.0:  # 누적 거래대금이 1,000만 원 미만일 때
-            pgm_adj = 0
-            frgn_adj = 0
+        # 2. 실질 지배력(Market Dominance) 및 안전 게이트
+        market_total_million = market_total / 1000000
+        if market_total_million < 10.0: # 1,000만원 미만 거래 시 수급 노이즈 차단
+            pgm_adj, frgn_adj = 0, 0
         else:
-            # 0.5(50%)를 상한선으로 두어 데이터 오염 방어
-            # 전체 거래대금 대비 프로그램 순매수 비중
-            pgm_adj = max(-0.5, min(0.5, pgm_net / market_total_amount))
-            # 전체 거래대금 대비 외국계 순매수 비중
-            frgn_adj = max(-0.5, min(0.5, frgn_net / market_total_amount))
-        
-        # 5. 거래량 기반 안전핀 (Safety Pin) 적용
-        # 전일 거래량의 5%도 안 되는 시점에서는 수급 데이터의 신뢰도를 50%로 강제 감쇄
-        # 이는 장 초반 소액 매매로 인한 '가중치 튐' 현상을 방어함
-        trust_factor = 1.0
-        if vol_ratio < 5.0:
-            trust_factor = 0.5
-        
-        # 6. 최종 점수 산출 (Multiplicative Model)
-        # Multiplier = 1.0 + (프로그램 비중 + 외국계 비중)
-        # 예: 체결강도 140%(70점) 종목에 프로그램 3%, 외국계 2% 순매수 비중 발생 시
-        # 70 * (1 + 0.03 + 0.02) = 70 * 1.05 = 73.5점
-        multiplier = 1.0 + (pgm_adj + frgn_adj) * trust_factor
-        final_score = base_score * multiplier
+            pgm_adj = max(-0.5, min(0.5, pgm_net / market_total_million))
+            frgn_adj = max(-0.5, min(0.5, frgn_net / market_total_million))
 
-        return round(max(0, min(100, final_score)), 2)
+        # 3. [핵심] 수급 영향력 5배 증폭 및 장 초반 신뢰도(trust_factor) 적용
+        trust_factor = 1.0 if vol_ratio >= 5.0 else 0.5
+        supply_impact = (pgm_adj + frgn_adj) * 5.0
+        multiplier = 1.0 + (supply_impact * trust_factor)
+
+        return float(round(min(150, base_score * multiplier), 2))
 
     def _calculate_vwap_score(self, metrics: Dict) -> float:
         """
@@ -252,8 +217,8 @@ class TradingStrategy:
         if deviation >= 0:
             # [정방향] VWAP(0%)일 때 100점, overheat_limit일 때 0점
             # 공식: 100 * (1 - 현재이격/한계이격)
-            ratio = min(1.0, deviation / overheat_limit)
-            pos_score = 100 * (1 - ratio)
+            ratio = max(0, (deviation - atr_p) / overheat_limit)
+            pos_score = 100 * (1 - min(1.0, ratio))
         else:
             # [역방향/돌파] VWAP에 가까워질수록 점수 상승
             # 돌파 가용 범위를 ATR의 일정 비율(예: 0.2배)로 동적 설정
@@ -310,7 +275,7 @@ class TradingStrategy:
         
         # [핵심] 이격 비율이 커질수록(보통 2배~3배 이상) 점수를 선형적으로 깎음
         # 특정 임계치 상수가 아닌, 분모(atr_p)에 비례하는 감쇄 로직
-        overheat_factor = max(0.0, dispersal_ratio - 1.0) # 1배(ATR)까지는 정상 추세로 인정
+        overheat_factor = max(0.0, dispersal_ratio - 2.0) # 이격 비율이 ATR의 2배 이상일 때만 패널티 시작
         penalty = min(1.0, overheat_factor / 2.0) # ATR의 3배 지점에서 최대 페널티(0점) 도달
         
         alignment_score = base_score * (1 - penalty)
