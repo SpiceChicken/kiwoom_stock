@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
@@ -31,6 +30,7 @@ class Position:
     def calc_profit_rate(self) -> float:
         """
         매수가 대비 수익률을 계산합니다.
+
         """
         # 0으로 나누기 방지 및 가격 미지정 시 0.0 반환
         if not self.buy_price or not self.sell_price:
@@ -40,7 +40,10 @@ class Position:
         return round((self.sell_price / self.buy_price - 1) * 100, 2)
 
 class StockManager:
-    """[Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리"""
+    """
+    [Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리
+    
+    """
     def __init__(self, client, db, strategy, filter_config: Dict):
         self.client = client
         self.db = db
@@ -58,7 +61,10 @@ class StockManager:
         }
 
     def update_target_stocks(self):
-        """보유 종목을 최우선으로 포함하여 감시 리스트를 갱신합니다."""
+        """
+        [Manager] 보유 종목을 최우선으로 포함하여 감시 리스트를 갱신합니다.
+        
+        """
         try:
             new_stocks = list(self.active_positions.keys())
             seen_codes = set(new_stocks) # [최적화] 중복 체크용 Set
@@ -78,24 +84,93 @@ class StockManager:
         except Exception as e:
             logger.error(f"종목 갱신 실패: {e}")
 
-    def monitor_active_signals(self, stock_code, log: Dict, strong_threshold, notifier):
-        """보유 종목의 매도 조건을 감시하고 DB에 기록합니다."""
+    def evaluate_position(self, verdict: Dict, strong_threshold):
+        """
+        [Manager] 보유 종목의 상태를 최신화하고 매도 사유(Exit Reason)가 있는지 평가합니다.
+        
+        """
+        stock_code = verdict['stock_code']
+
         if stock_code not in self.active_positions:
-            return
+            return None
 
         pos = self.active_positions[stock_code]
-        pos.sell_price = log['price']
-        pos.current_score = log['score']
+
+        pos.sell_price = verdict['price']
+        pos.current_score = verdict['score']
         
         # [추상화 호출] 판정은 평가기에게 맡깁니다.
-        pos.sell_reason = self.strategy.get_exit_reason(pos, strong_threshold)
-        
-        if pos.sell_reason:
-            self._execute_sell(pos, notifier)
+        sell_reason = self.strategy.get_exit_reason(pos, strong_threshold)
 
-    def _execute_sell(self, pos: Position, notifier):
-        """매도 프로세스 집중화"""
-        pos.sell_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.db.record_sell(pos)
-        notifier.notify_sell(pos)
-        del self.active_positions[pos.stock_code]
+        return sell_reason
+
+    def get_total_pnl_status(self, realized_pnl: float) -> float:
+        """
+        [Manager] 실현 손익과 미실현 손익을 합산하여 현재 총 손익률을 반환합니다.
+        
+        """
+        # 미실현 손익 합산 (pos.calc_profit_rate 활용)
+        unrealized_pnl = sum(pos.calc_profit_rate for pos in self.active_positions.values())
+        return realized_pnl + unrealized_pnl
+
+    def process_buy_order(self, verdict: Dict) -> tuple[bool, Optional[Dict]]:
+        """
+        [Manager] 실제 매수 주문 집행 및 데이터 처리 전담
+
+        """
+        stock_code = verdict['stock_code']
+        
+        try:
+            # 1. 실제 키움증권/API 주문 전송 (TBD)
+
+            # 2. DB 기록용 데이터 생성
+            score_detail = verdict.get('score_detail', {})
+            processed_details = {f"{k}_score": v for k, v in score_detail.items()}
+
+            # 2. 최종 buy_data 구성
+            buy_data = {
+                "stock_code": stock_code,
+                "stock_name": verdict.get('stock_name'),
+                "buy_price": verdict.get('price'),
+                "buy_score": verdict.get('score'),
+                
+                # 상세 점수들(alpha_score, supply_score, vwap_score, trend_score) 자동 병합
+                **processed_details, 
+                
+                "buy_regime": verdict.get('regime')
+            }
+            
+            # 3. DB 기록 및 내부 포지션 업데이트
+            buy_data['id'] = self.db.record_buy(buy_data)
+            self.active_positions[stock_code] = Position(**buy_data)
+            
+            return True, buy_data
+
+        except Exception as e:
+            logger.error(f"Manager order processing error: {e}")
+            return False, None
+
+    def process_sell_order(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Dict]]:
+        """
+        [Manager] 실제 매도 주문 집행 및 데이터 처리 전담
+        """
+        stock_code = verdict['stock_code']
+        
+        try:
+            # 1. 실제 키움증권/API 주문 전송 (TBD)
+
+            # 2. DB 기록용 데이터 생성
+            pos = self.active_positions[stock_code]
+            pos.sell_price = verdict['price']
+            pos.current_score = verdict['score']
+            pos.sell_reason = reason
+
+            # 3. DB 기록 및 내부 포지션 업데이트
+            self.db.record_sell(pos)
+            del self.active_positions[pos.stock_code]
+            
+            return True, pos
+
+        except Exception as e:
+            logger.error(f"Manager order processing error: {e}")
+            return False, None

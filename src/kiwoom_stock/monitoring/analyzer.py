@@ -38,6 +38,7 @@ class MarketAnalyzer:
         """
         return {
             # 1. 실시간 기술적 지표 (Indicators)
+            'stock_code': '',
             'strength': 100.0,      # 체결강도 (100 미만 매도우위, 100 초과 매수우위)
             'vol_ratio': 0.0,       # 전일 대비 거래량 비중 (Safety Pin)
             'price': 0.0,           # 현재가 (최신 종가)
@@ -50,6 +51,7 @@ class MarketAnalyzer:
             'volume_series': [],
             'trde_qty': 0,
             'cur_prc': 0,
+            'market_total_amount': 1,
 
             # 2. 프로그램 매매 데이터 (Program Trade)
             'pgm_data': {
@@ -116,28 +118,29 @@ class MarketAnalyzer:
             frgn_map = self.collector.fetch_foreign_window_trade()
 
             # 2. 개별 종목별 원자적 업데이트 실행
-            for code in stock_codes:
-                if code not in self.supply_cache:
-                    self.supply_cache[code] = self._get_default_supply()
+            for stock_code in stock_codes:
+                if stock_code not in self.supply_cache:
+                    self.supply_cache[stock_code] = self._get_default_supply()
 
-                chart_60m = self.collector.fetch_minute_chart(code, tic="60") # 60분봉 데이터
-                chart_5m = self.collector.fetch_minute_chart(code, tic="5") # 5분봉 데이터
-                chart_1m = self.collector.fetch_minute_chart(code, tic="1") # 1분봉 데이터
+                chart_60m = self.collector.fetch_minute_chart(stock_code, tic="60") # 60분봉 데이터
+                chart_5m = self.collector.fetch_minute_chart(stock_code, tic="5") # 5분봉 데이터
+                chart_1m = self.collector.fetch_minute_chart(stock_code, tic="1") # 1분봉 데이터
 
                 chart_60m.reverse()
                 chart_5m.reverse()
                 chart_1m.reverse()
 
                 # 각 데이터 파트별 독립적 업데이트
-                self._update_program_data(code, pgm_map)
-                self._update_foreign_data(code, frgn_map)
-                self._update_basic_data(code) 
-                self._update_strength_data(code)
-                self._update_alpha_data(code, chart_1m)
-                self._update_vwap_data(code, chart_5m)
-                self._update_trend_rsi(code, chart_60m)
-                self._update_volatility_data(code, chart_5m)
-                self._update_trend_data(code, chart_5m)
+                self.supply_cache[stock_code]['stock_code'] = stock_code
+                self._update_program_data(stock_code, pgm_map)
+                self._update_foreign_data(stock_code, frgn_map)
+                self._update_basic_data(stock_code) 
+                self._update_strength_data(stock_code)
+                self._update_alpha_data(stock_code, chart_1m)
+                self._update_vwap_data(stock_code, chart_5m)
+                self._update_trend_rsi(stock_code, chart_60m)
+                self._update_volatility_data(stock_code, chart_5m)
+                self._update_trend_data(stock_code, chart_5m)
 
             self.last_supply_update = datetime.now()
         except Exception as e:
@@ -149,6 +152,7 @@ class MarketAnalyzer:
         self.supply_cache[code]['vol_ratio'] = basic.get('trde_pre', 0.0)
         self.supply_cache[code]['trde_qty'] = basic.get('trde_qty', 0)
         self.supply_cache[code]['cur_prc'] = basic.get('cur_prc', 0)
+        self.supply_cache[code]['market_total_amount'] = max(1, basic.get('trde_qty', 0) * basic.get('cur_prc', 0))
 
     def _update_strength_data(self, code: str):
         """체결강도 데이터 업데이트"""
