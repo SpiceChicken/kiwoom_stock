@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, List, Optional
+from datetime import datetime
 from dataclasses import dataclass
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
@@ -130,13 +131,13 @@ class StockManager:
             # 2. 최종 buy_data 구성
             buy_data = {
                 "stock_code": stock_code,
-                "stock_name": verdict.get('stock_name'),
+                "stock_name": self.stock_names[stock_code],
                 "buy_price": verdict.get('price'),
                 "buy_score": verdict.get('score'),
                 
                 # 상세 점수들(alpha_score, supply_score, vwap_score, trend_score) 자동 병합
                 **processed_details, 
-                
+                "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 "buy_regime": verdict.get('regime')
             }
             

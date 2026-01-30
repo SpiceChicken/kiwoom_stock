@@ -490,6 +490,6 @@ class TradingStrategy:
             "momentum": momentum,
             "status": status,
             'score_detail': score_detail,
-            "regiem": self._current_regime,
+            "regime": self._current_regime,
             "is_buy_signal": is_buy_signal
         }

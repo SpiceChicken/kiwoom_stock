@@ -61,7 +61,7 @@ class TradeLogger:
         params = (
             data['stock_code'], data['stock_name'], data['buy_price'], data['buy_score'],
             data['alpha_score'], data['supply_score'], data['vwap_score'], data['trend_score'],
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), data['buy_regime']
+            data['buy_time'], data['buy_regime']
         )
         cursor = self.conn.execute(query, params)
         self.conn.commit()
