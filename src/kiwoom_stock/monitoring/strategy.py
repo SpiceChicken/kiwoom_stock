@@ -402,21 +402,39 @@ class TradingStrategy:
         deviation = abs(price - vwap) / vwap * 100 if vwap > 0 else 0
         imp_vwap = 1.5 / (1 + (deviation / max(0.1, atr_p))) # ATR 대비 이격 비례
 
-        # 3. 추세 지표 중요도 (Trend - e20 활용)
+        # 3. 추세 지표 중요도 (데이터 비례 및 과열 감쇄 모델)
         e5 = metrics.get('ema5', 0)
         e20 = metrics.get('ema20', 0)
         e60 = metrics.get('ema60', 0)
 
-        # [핵심] 정렬 품질(Alignment Quality) 산출
-        # e5 > e20 > e60 (정배열) 혹은 e5 < e20 < e60 (역배열) 처럼 '순서'가 맞아야 신뢰도 상승
-        is_ordered = 1.2 if (e5 > e20 > e60) or (e5 < e20 < e60) else 0.7
-        
-        # 추세의 확장성 (ATR 대비 전체 폭)
-        total_gap = abs(e5 - e60) / e60 * 100 if e60 > 0 else 0
-        expansion_factor = min(0.5, total_gap / atr_p)
-        
-        # 최종 Trend 중요도: 질서정연하게(is_ordered) 터지고 있을 때(expansion) 신뢰
-        imp_trend = 1.0 * is_ordered * (1 + expansion_factor)
+        # 1) 정렬 품질(Alignment Quality) - 데이터 비례 산출
+        # 이평선이 꼬인 정도에 따라 0.6~1.0 사이를 유동적으로 움직임
+        gap1 = e5 - e20
+        gap2 = e20 - e60
+        denom = (abs(gap1) + abs(gap2))
+        alignment_ratio = abs(gap1 + gap2) / denom if denom > 0 else 0.5
+        is_ordered = 0.6 + (0.4 * alignment_ratio)
+
+        # 2) 확장성(Expansion) - ATR 비례 과열 감쇄 모델
+        # 퍼센트 상수가 아닌, "평소 변동성 대비 몇 배나 벌어졌나"를 잣대로 사용
+        raw_gap = abs(e5 - e60) / e60 * 100 if e60 > 0 else 0
+        vol_multiple = raw_gap / atr_p if atr_p > 0 else 0
+
+        # [핵심] 구간별 동적 가중치 (상수 제거)
+        if vol_multiple <= 1.5:
+            # 추세 형성기: 이격이 벌어질수록 신뢰도 상승 (가중치 1.0 ~ 1.15)
+            expansion_factor = 1.0 + (vol_multiple * 0.1)
+        elif vol_multiple <= 2.5:
+            # 추세 안정기: 최적의 확산 상태 유지 (가중치 1.15)
+            expansion_factor = 1.15
+        else:
+            # 과열 경계기: ATR의 2.5배를 넘어서면 "이미 늦었다"고 판단하여 가중치 급격히 삭감
+            # 이 로직이 작동하면 Buy Score가 80점을 넘기 힘들어져서 고점 매수를 방지함
+            expansion_factor = 1.15 - ((vol_multiple - 2.5) * 0.4)
+            expansion_factor = max(0.4, expansion_factor) # 최소 방어선
+
+        # 3) 최종 Trend 중요도 결합
+        imp_trend = is_ordered * expansion_factor
 
         # 4. 가중치 정규화 (Normalization)
         total_imp = imp_alpha + imp_supply + imp_vwap + imp_trend
