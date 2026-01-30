@@ -324,7 +324,7 @@ class TradingStrategy:
         if prev_vwap > 0 and vwap != prev_vwap:
             raw_slope = (vwap - prev_vwap) / vwap * 1000
             slope_intensity = max(-1.0, min(1.0, raw_slope)) 
-            slope_factor = 1.0 + (slope_intensity * 0.2) # 0.8 ~ 1.2
+            slope_factor = 1.0 + (slope_intensity * 0.4) # 0.8 ~ 1.2
         else:
             slope_factor = 1.0
 
