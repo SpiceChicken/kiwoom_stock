@@ -61,7 +61,7 @@ class MultiTimeframeRSIMonitor:
         
         return {**metrics, **verdict}
 
-    def evaluate_entry_signal(self) -> bool:
+    def evaluate_entry_signal(self, verdict: Dict) -> bool:
         """
         시간 제한을 포함한 모든 진입 조건을 한곳에서 판정합니다.
     
@@ -72,6 +72,14 @@ class MultiTimeframeRSIMonitor:
 
         # 2. 진입 가능 시간 확인
         if not self.strategy.is_trading_window():
+            return False
+
+        # 3. Buy Signal 확인
+        if not verdict.get('is_buy_signal'):
+            return False
+            
+        # 4. 보유 종목 확인
+        if verdict['stock_code'] in self.stock_mgr.active_positions:
             return False
 
         return True
@@ -200,7 +208,7 @@ class MultiTimeframeRSIMonitor:
                         continue
 
                     # 3. 매수 기회 탐색 (SRP: 판단)
-                    if verdict.get('is_buy_signal') and self.evaluate_entry_signal():
+                    if self.evaluate_entry_signal(verdict):
                         self.execute_buy(verdict)
                 # ---------------------------------------------
 

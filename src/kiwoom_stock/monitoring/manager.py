@@ -79,6 +79,9 @@ class StockManager:
                     new_stocks.append(code)
                     seen_codes.add(code)
                 self.stock_names[code] = name
+
+            for stock_code, pos in self.active_positions.items():
+                self.stock_names[stock_code] = pos.stock_name
             
             self.stocks = new_stocks[:self.max_stocks]
             logger.info(f"감시 종목 갱신 (총 {len(self.stocks)}개 | 보유: {len(self.active_positions)}개)")
