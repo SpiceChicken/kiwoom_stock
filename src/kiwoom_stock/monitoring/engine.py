@@ -66,6 +66,8 @@ class MultiTimeframeRSIMonitor:
         시간 제한을 포함한 모든 진입 조건을 한곳에서 판정합니다.
     
         """
+        stock_code = verdict['stock_code']
+
         # 1. 시간 제한 체크
         if not self.strategy.is_monitoring_time():
             return False
@@ -79,8 +81,12 @@ class MultiTimeframeRSIMonitor:
             return False
             
         # 4. 보유 종목 확인
-        if verdict['stock_code'] in self.stock_mgr.active_positions:
+        if stock_code in self.stock_mgr.active_positions:
             return False
+
+        # 5. 최근 매도 종목 냉각기 체크
+        if not self.stock_mgr.is_not_recent_exit(stock_code):
+            return False # 판지 얼마 안 된 놈은 점수가 좋아도 일단 참는다.
 
         return True
 

@@ -1,6 +1,6 @@
 import sqlite3
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from kiwoom_stock.monitoring.manager import Position
 
@@ -103,3 +103,21 @@ class TradeLogger:
             # 로깅 시스템이 설정되어 있다면 활용 (예: logger.error)
             print(f"오늘 수익률 조회 실패: {e}")
             return 0.0
+
+    def get_last_sell_time(self, stock_code: str) -> Optional[datetime]:
+        """해당 종목의 가장 최근 매도(CLOSED) 기록 시간을 반환합니다."""
+        query = """
+            SELECT sell_time 
+            FROM trades 
+            WHERE stock_code = ? AND status = 'CLOSED' 
+            ORDER BY sell_time DESC 
+            LIMIT 1
+        """
+        result = self.execute_query(query, (stock_code,))
+        if result and result[0]['sell_time']:
+            # DB 저장 형식에 따라 파싱 (예: 문자열 -> datetime)
+            try:
+                return datetime.strptime(result[0]['sell_time'], '%Y-%m-%d %H:%M:%S')
+            except:
+                return None
+        return None

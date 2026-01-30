@@ -51,6 +51,7 @@ class StockManager:
         self.strategy = strategy
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
         self.max_stocks = filter_config.get("max_stocks", 50)
+        self.cooldown_minutes = filter_config.get("cooldown_minutes", 10)
         
         self.stocks: List[str] = []
         self.stock_names: Dict[str, str] = {}
@@ -178,3 +179,26 @@ class StockManager:
         except Exception as e:
             logger.error(f"Manager order processing error: {e}")
             return False, None
+
+    def is_not_recent_exit(self, stock_code: str) -> bool:
+        """
+        [Manager] DB의 sell_time을 조회하여 냉각기 경과 여부를 판정합니다.
+        프로그램이 재시작되어도 DB 기록을 바탕으로 정확히 판정합니다.
+        
+        """
+        # DB에서 직접 마지막 매도 시간 조회
+        last_sell_time = self.db.get_last_sell_time(stock_code)
+        
+        if not last_sell_time:
+            return True # 매도 기록이 없으면 진입 가능
+            
+        # 현재 시간과의 차이 계산
+        elapsed_seconds = (datetime.now() - last_sell_time).total_seconds()
+        cooldown_seconds = self.cooldown_minutes * 60
+        
+        if elapsed_seconds < cooldown_seconds:
+            remaining_min = int((cooldown_seconds - elapsed_seconds) // 60)
+            logger.info(f"[{stock_code}] DB 기록 기준 냉각기 진행 중 ({remaining_min}분 남음)")
+            return False
+            
+        return True

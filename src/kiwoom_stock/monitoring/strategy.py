@@ -100,7 +100,11 @@ class TradingStrategy:
 
         # 4. 점수 하락 (Score Decay)
         # 상대적 점수 하락 (Score Decay)
-        relative_threshold = pos.buy_score * (1 - self.decay_rate)
+        # 수익률이 1% 이상일 경우, 추세를 더 즐길 수 있도록 감쇄 허용치를 1.5배 늘려줌
+        current_decay = self.decay_rate
+        if profit_rate >= 0.01:
+            current_decay *= 1.5
+        relative_threshold = pos.buy_score * (1 - current_decay)
         # 절대적 지지선 (Score Floor)
         absolute_threshold = self.settings.get("thresholds", {}).get("alert", 70.0)
 
@@ -108,7 +112,7 @@ class TradingStrategy:
         final_sell_threshold = min(relative_threshold, absolute_threshold)
 
         if pos.current_score < final_sell_threshold:
-            return f"Score Decay (-{self.decay_rate*100:.0f}%)"
+            return f"Score Decay (-{current_decay*100:.0f}%)"
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
         """
@@ -163,12 +167,12 @@ class TradingStrategy:
         score_list = [a_score, s_score, v_score, t_score]
         min_val = min(score_list)
         
-        # 과락 페널티: 가장 낮은 지표가 20점 미만이면 불량 종목으로 간주
+        # 과락 페널티: 가장 낮은 지표가 35점 미만이면 불량 종목으로 간주
         # 시너지 배수 산출 로직: 최저점이 높을수록 1.0에 수렴, 낮을수록 급격히 하락
-        if min_val < 20.0:
+        if min_val < 35.0:
             # 하나라도 과락이면 전체 점수를 50% 이상 감점 (강제 관망)
-            synergy_multiplier = 0.5 * (min_val / 20.0) 
-        elif min_val < 40.0:
+            synergy_multiplier = 0.5 * (min_val / 35.0) 
+        elif min_val < 45.0:
             # 밸런스가 약간 부족하면 20% 감점
             synergy_multiplier = 0.8
         else:
@@ -480,7 +484,7 @@ class TradingStrategy:
             # [전략 포착] 점수가 부족해도 기세가 폭발하면 진입 (주도주 포착)
             if momentum >= self.momentum_threshold:
                 status = "🚀수급폭발"
-                is_buy_signal = True
+                is_buy_signal = False
             else:
                 status = "👀관심"
                 is_buy_signal = False
