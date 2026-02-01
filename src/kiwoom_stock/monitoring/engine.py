@@ -6,7 +6,9 @@
 import sys
 import logging
 import time as time_mod
-from typing import Dict, Optional
+from typing import Dict, List
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
@@ -33,33 +35,51 @@ class MultiTimeframeRSIMonitor:
         self.strategy = TradingStrategy(strategy_config)
         self.stock_mgr = StockManager(client, TradeLogger(), self.strategy, filter_config)
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
-        self.status_log = {}
 
         logger.info("Monitoring Engine Initialized.")
 
-    def _sync_stock_state(self, stock_code: str):
-        """
-        [책임 1] 데이터 동기화 전담
-        신호 여부와 상관없이 무조건 최신 지표와 점수를 로그/객체에 기록합니다.
-        """
-        metrics = self.analyzer.supply_cache.get(stock_code)
-        if not metrics: return None
+    def _parallel_worker(self, stock_code: str):
+        """[Worker] 데이터를 하나로 합쳐서 반환 ({**metrics, **verdict})"""
+        try:
+            metrics = self.analyzer.supply_cache.get(stock_code)
+            if not metrics: return None
+            
+            # 1. 전략 평가
+            verdict = self.strategy.evaluate(metrics)
+            if not verdict: return None
+            
+            return {**metrics, **verdict}
+        except Exception as e:
+            logger.error(f"Worker Error [{stock_code}]: {e}")
+            return None
 
-        # 전략가에게 단순 '점수 계산'만 요청 (판단이 아님)
-        verdict = self.strategy.evaluate(metrics, self.analyzer.market_regime)
-        
-        if stock_code in self.stock_mgr.active_positions:
-            self.stock_mgr.active_positions[stock_code].sell_price = metrics['price']
-        
-        # 시스템 내부 상태(로그 등)만 업데이트하고 끝
-        self.status_log[stock_code] = {
-            "name": self.stock_mgr.stock_names[stock_code],
-            "price": metrics["price"],
-            "score": verdict['score'], **{f"{k}_score": v for k, v in verdict['score_detail'].items()},
-            "momentum": verdict['momentum'],
-            "reason": verdict['status']}
-        
-        return {**metrics, **verdict}
+    def _run_parallel_evaluate(self, stock_list: List[str]) -> list:
+        """
+        [Engine] 모든 감시 종목에 대해 병렬로 전략 평가를 수행하고 결과를 수집합니다.
+        """
+        results = []
+        # 설정에서 max_workers를 가져오거나 기본값 8 사용
+        max_workers = self.config.get("max_workers", 8)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 1. 각 종목별로 워커 스레드에 작업 할당
+            futures = {
+                executor.submit(self._parallel_worker, stock_code): stock_code 
+                for stock_code in stock_list
+            }
+            
+            # 2. 완료된 순서대로 결과 수집
+            for f in as_completed(futures):
+                try:
+                    res = f.result()
+                    if res:
+                        results.append(res)
+                except Exception as e:
+                    # 특정 종목 연산 중 에러 발생 시 해당 종목만 기록하고 계속 진행
+                    stock_code = futures[f]
+                    logger.error(f"Parallel evaluate failed for {stock_code}: {e}")
+                    
+        return results
 
     def evaluate_entry_signal(self, verdict: Dict) -> bool:
         """
@@ -75,16 +95,12 @@ class MultiTimeframeRSIMonitor:
         # 2. 진입 가능 시간 확인
         if not self.strategy.is_trading_window():
             return False
-
-        # 3. Buy Signal 확인
-        if not verdict.get('is_buy_signal'):
-            return False
             
-        # 4. 보유 종목 확인
+        # 3. 보유 종목 확인
         if stock_code in self.stock_mgr.active_positions:
             return False
 
-        # 5. 최근 매도 종목 냉각기 체크
+        # 4. 최근 매도 종목 냉각기 체크
         if not self.stock_mgr.is_not_recent_exit(stock_code):
             return False # 판지 얼마 안 된 놈은 점수가 좋아도 일단 참는다.
 
@@ -115,13 +131,13 @@ class MultiTimeframeRSIMonitor:
             logger.info("보유 중인 종목이 없습니다.")
             return
 
-        for stock_code in holding_codes:
+        results = self._run_parallel_evaluate(holding_codes)
+
+        for verdict in results:
             try:
-                verdict = self._sync_stock_state(stock_code)
                 self.execute_sell(verdict, "KILL-SWITCH ACTIVATED")
             except Exception as e:
-                logger.error(f"Failed to liquidate {stock_code} during kill-switch: {e}")
-
+                logger.error(f"Failed to liquidate {verdict['stock_code']} during kill-switch: {e}")
 
     def execute_buy(self, verdict: dict):
         """
@@ -164,19 +180,16 @@ class MultiTimeframeRSIMonitor:
 
     def _prepare_cycle(self):
         """
-        [Engine] 매 루프 시작 전, 시장 상황과 타겟 종목을 동기화합니다.
-        이 함수는 '시장의 판을 짜는' 역할을 합니다.
+        [Engine] 루프 시작 전 전처리. 여기서 전략 문맥을 1회만 업데이트함
+        
         """
-        # 1. 시황 파악 (전략 임계값의 기준)
+        # 1. 시황 파악 및 전략 컨텍스트 업데이트 (핵심 개선 지점)
         self.analyzer.update_regime()
+        self.strategy.update_context(self.analyzer.market_regime)
         
-        # 2. 감시 대상 확정 (매니저가 종목 리스트 갱신)
+        # 2. 감시 대상 및 데이터 준비 (기존 로직)
         self.stock_mgr.update_target_stocks()
-        
-        # 3. 데이터 준비 (확정된 종목들의 수급 데이터 로드)
         self.analyzer.update_priority_supply(self.stock_mgr.stocks)
-
-        # 4. 루프 시작 시 데이터 저장소 초기화
         self.notifier.start_status_session()
 
     def run(self):
@@ -184,10 +197,10 @@ class MultiTimeframeRSIMonitor:
         logger.info("Starting Monitoring Loop...")
         while True:
             try:
-                # [안전장치] 시장 마감 확인 및 가동 중단
-                if not self.strategy.is_monitoring_time():
-                    logger.info("Market is closed. Shutting down system.")
-                    break
+                # # [안전장치] 시장 마감 확인 및 가동 중단
+                # if not self.strategy.is_monitoring_time():
+                #     logger.info("Market is closed. Shutting down system.")
+                #     break
                 
                 self._prepare_cycle()
 
@@ -195,26 +208,25 @@ class MultiTimeframeRSIMonitor:
                 if self.check_kill_switch():
                     self.force_liquidate_all()
                     break
-                
-                # [최적화] API 호출 중복 제거: 한 번의 루프에서 모든 데이터 수집 및 결과 저장
-                for stock_code in self.stock_mgr.stocks:
-                    # 1. 일단 모든 종목의 정보를 최신화 (SRP: 데이터 동기화)
-                    # 이 과정에서 킬스위치에 필요한 모든 가격 정보가 status_log에 채워집니다.
-                    verdict = self._sync_stock_state(stock_code)
-                    log = self.status_log[stock_code]
-                    if not verdict: continue
 
-                    self.notifier.collect_status(log)
+                # 병렬 분석 시작
+                results = self._run_parallel_evaluate(self.stock_mgr.stocks)
 
-                    # 2. 보유 종목 매도 감시 위임
-                    strong_thresholds = self.strategy.entry_thresholds.get('strong', 85.0)
-                    sell_reason = self.stock_mgr.evaluate_position(verdict, strong_thresholds)
+                # 결과 순차 처리 (주문 집행)
+                for verdict in results:
+                    # 로그 전송
+                    self.notifier.collect_status({
+                        "name": self.stock_mgr.stock_names[verdict['stock_code']],
+                        "price": verdict["price"],
+                        "score": verdict['score'], **{f"{k}_score": v for k, v in verdict['score_detail'].items()},
+                        "momentum": verdict['momentum'],
+                        "reason": verdict['status']})
+                    
+                    # 매도 감시 및 매수 판단 (res를 통째로 전달)
+                    sell_reason = self.stock_mgr.evaluate_position(verdict, self.strategy.curr_strong_th)
                     if sell_reason:
                         self.execute_sell(verdict, sell_reason)
-                        continue
-
-                    # 3. 매수 기회 탐색 (SRP: 판단)
-                    if self.evaluate_entry_signal(verdict):
+                    elif self.evaluate_entry_signal(verdict):
                         self.execute_buy(verdict)
                 # ---------------------------------------------
 

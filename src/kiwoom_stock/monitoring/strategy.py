@@ -29,6 +29,8 @@ class TradingStrategy:
         # 캐싱을 위한 내부 상태 변수
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config = {}
+        self.curr_strong_th = 80.0  # 기본값
+        self.curr_alert_th = 70.0   # 기본값
 
         # [신규] 익절/손절/감쇠 설정 로드
         self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
@@ -53,17 +55,23 @@ class TradingStrategy:
 
     def update_context(self, regime: MarketRegime):
         """
-        [Strategy] 레짐이 변경될 때만 설정을 내부 캐싱하여 오버헤드를 줄입니다.
-        
+        [Strategy] 루프 시작 시 1회 호출. 설정을 멤버 변수에 캐싱하여 오버헤드 제거
+
         """
         regime_val = regime.value if hasattr(regime, 'value') else str(regime)
-        if self._current_regime == regime_val and self._cached_config:
-            return
-
-        self._current_regime = regime_val
-        regimes = self.settings.get("regimes", {})
-        self._cached_config = regimes.get(regime_val, regimes.get("default", {}))
-        logger.info(f"Strategy context updated to: {regime_val}")
+        
+        # 레짐이 변경될 때만 캐시 갱신
+        if self._current_regime != regime_val:
+            self._current_regime = regime_val
+            regimes = self.settings.get("regimes", {})
+            self._cached_config = regimes.get(regime_val, regimes.get("default", {}))
+            
+            # 임계값 및 주요 설정 멤버 변수화 (evaluate에서의 딕셔너리 조회 비용 제거)
+            th = self._cached_config.get("thresholds", {"strong": 80.0, "alert": 70.0})
+            self.curr_strong_th = th['strong']
+            self.curr_alert_th = th['alert']
+            
+            logger.info(f"Strategy context updated: {regime_val} (Strong: {self.curr_strong_th})")
 
     @property
     def entry_thresholds(self) -> Dict[str, float]:
@@ -142,47 +150,33 @@ class TradingStrategy:
         
     def _calculate_conviction_score(self, metrics: Dict) -> float:
         """
-        [Strategy] 밸런스 시너지 모델 기반 최종 점수 산출
-        - 4개 지표의 상호작용(Synergy)을 검증하여 '껍데기 상승' 차단
-        - 모든 점수 체계를 100점 만점으로 표준화
+        [Strategy] 승산형(Multiplicative) 시너지 모델 기반 최종 점수 산출
+        - 가중 기하평균(Weighted Geometric Mean) 모델 적용
+        - 지표 간 균형을 엄격히 평가하여 '구멍이 있는 상승'을 원천 차단
 
         """
-        # 1. 개정된 4대 지표 산출 (모두 0~100점 사이 반환)
-        a_score = self._calculate_alpha_score(metrics)
-        s_score = self._calculate_supply_score(metrics)
-        v_score = self._calculate_vwap_score(metrics)
-        t_score = self._calculate_trend_score(metrics)
+        # 1. 4대 지표 산출 (각 0~100점)
+        # math.pow 연산을 위해 최소값 1.0 보정 (0점 방지)
+        a_score = max(1.0, self._calculate_alpha_score(metrics))
+        s_score = max(1.0, self._calculate_supply_score(metrics))
+        v_score = max(1.0, self._calculate_vwap_score(metrics))
+        t_score = max(1.0, self._calculate_trend_score(metrics))
 
         # 2. 실시간 동적 가중치 적용 (사용자님 기존 로직 유지)
         # weights['alpha'] + weights['supply'] + ... = 1.0 이 되도록 설정 권장
         w = self._calculate_dynamic_weights(metrics)
-        
-        # 가중 평균 점수 계산 (0~100점 사이)
-        weighted_total = (a_score * w.get('alpha', 0.25)) + \
-                        (s_score * w.get('supply', 0.25)) + \
-                        (v_score * w.get('vwap', 0.25)) + \
-                        (t_score * w.get('trend', 0.25))
 
-        # 3. [핵심] 시너지 및 밸런스 체크
-        score_list = [a_score, s_score, v_score, t_score]
-        min_val = min(score_list)
-        
-        # 과락 페널티: 가장 낮은 지표가 35점 미만이면 불량 종목으로 간주
-        # 시너지 배수 산출 로직: 최저점이 높을수록 1.0에 수렴, 낮을수록 급격히 하락
-        if min_val < 35.0:
-            # 하나라도 과락이면 전체 점수를 50% 이상 감점 (강제 관망)
-            synergy_multiplier = 0.5 * (min_val / 35.0) 
-        elif min_val < 45.0:
-            # 밸런스가 약간 부족하면 20% 감점
-            synergy_multiplier = 0.8
-        else:
-            # 모든 지표가 40점 이상으로 준수하면 시너지 100% 인정
-            synergy_multiplier = 1.0
+        # 3. [핵심] 승산형 시너지 모델 적용
+        # 공식: Total Score = (Alpha^w1 * Supply^w2 * VWAP^w3 * Trend^w4)
+        # 가중치의 합(w1+w2+w3+w4)이 1.0이므로 결과값은 0~100 사이로 자동 표준화됩니다.
+        final_score = (
+            math.pow(a_score, w.get('alpha', 0.25)) *
+            math.pow(s_score, w.get('supply', 0.25)) *
+            math.pow(v_score, w.get('vwap', 0.25)) *
+            math.pow(t_score, w.get('trend', 0.25))
+        )
 
-        # 4. 최종 점수 확정
-        final_score = weighted_total * synergy_multiplier
-
-        # 로그 기록을 위한 상세 데이터
+        # 로그 및 분석을 위한 상세 데이터 저장
         details = {
             "alpha": round(a_score, 1),
             "supply": round(s_score, 1),
@@ -409,8 +403,7 @@ class TradingStrategy:
 
         # 1) 정렬 품질(Alignment Quality) - 데이터 비례 산출
         # 이평선이 꼬인 정도에 따라 0.6~1.0 사이를 유동적으로 움직임
-        gap1 = e5 - e20
-        gap2 = e20 - e60
+        gap1, gap2 = e5 - e20, e20 - e60
         denom = (abs(gap1) + abs(gap2))
         alignment_ratio = abs(gap1 + gap2) / denom if denom > 0 else 0.5
         is_ordered = 0.6 + (0.4 * alignment_ratio)
@@ -469,27 +462,24 @@ class TradingStrategy:
         
         return momentum
         
-    def evaluate(self, metrics: Dict, regime) -> Dict:
+    def evaluate(self, metrics: Dict) -> Dict:
         """
         [Strategy] 3단계 통합 평가: 컨텍스트 -> 계산/이력관리 -> 전략적 판정
         
         """
-        # 1. 컨텍스트 업데이트 (레짐별 설정 로드)
-        self.update_context(regime)
         stock_code = metrics['stock_code']
         
-        # 2. 종합 점수 산출 (기존 로직)
+        # 1. 종합 점수 산출 (기존 로직)
         score, score_detail = self._calculate_conviction_score(metrics)
         
-        # 3. 내부 이력 활용 모멘텀 산출
+        # 2. 내부 이력 활용 모멘텀 산출
         momentum = self._get_momentum(stock_code, score)
         
-        # 4. 전략적 판정 (모멘텀 필터 적용)
-        th = self._cached_config.get("thresholds", {"strong": 80.0, "alert": 70.0})
+        # 3. 전략적 판정 (모멘텀 필터 적용)
         status = "관망"
         is_buy_signal = False
 
-        if score >= th['strong']:
+        if score >= self.curr_strong_th:
             # [전략 필터] 점수는 높으나 기세가 꺾였다면 진입 차단 (설거지 방지)
             if momentum >= 0:
                 status = "🔥강력추천"
@@ -498,7 +488,7 @@ class TradingStrategy:
                 status = "⚠️고점경계"
                 is_buy_signal = False
                 
-        elif score >= th['alert']:
+        elif score >= self.curr_alert_th:
             # [전략 포착] 점수가 부족해도 기세가 폭발하면 진입 (주도주 포착)
             if momentum >= self.momentum_threshold:
                 status = "🚀수급폭발"
@@ -507,11 +497,13 @@ class TradingStrategy:
                 status = "👀관심"
                 is_buy_signal = False
 
-        return {
-            "score": score,
-            "momentum": momentum,
-            "status": status,
-            'score_detail': score_detail,
-            "regime": self._current_regime,
-            "is_buy_signal": is_buy_signal
-        }
+        if is_buy_signal:
+            return {
+                "score": score,
+                "momentum": momentum,
+                "status": status,
+                'score_detail': score_detail,
+                "regime": self._current_regime,
+            }
+        else:
+            return None
