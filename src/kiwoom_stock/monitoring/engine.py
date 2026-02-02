@@ -197,10 +197,10 @@ class MultiTimeframeRSIMonitor:
         logger.info("Starting Monitoring Loop...")
         while True:
             try:
-                # # [안전장치] 시장 마감 확인 및 가동 중단
-                # if not self.strategy.is_monitoring_time():
-                #     logger.info("Market is closed. Shutting down system.")
-                #     break
+                # [안전장치] 시장 마감 확인 및 가동 중단
+                if not self.strategy.is_monitoring_time():
+                    logger.info("Market is closed. Shutting down system.")
+                    break
                 
                 self._prepare_cycle()
 
@@ -236,7 +236,14 @@ class MultiTimeframeRSIMonitor:
                 logger.warning("System interrupted by user.")
                 break
             except Exception as e:
+                # 1. 상세 로그 기록 (파일/콘솔)
                 logger.critical(f"Critical error in main loop: {e}", exc_info=True)
-                time_mod.sleep(10) # 치명적 에러 시 잠시 대기 후 재시도
+                
+                # 2. [추가] Slack 알림 전송
+                # 에러 메시지의 핵심 내용을 Slack으로 전송합니다.
+                self.notifier.notify_error(str(e))
+                
+                # 3. 일시 대기 후 루프 재시도 (시스템 안정성 확보)
+                time_mod.sleep(10)
         
         sys.exit(0)

@@ -138,6 +138,20 @@ class Notifier:
         # trading.log 적재
         logger.info(log_line)
 
+    def notify_error(self, message: str):
+        """메인 루프 내 일반 에러 알림"""
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn", 
+                    "text": f"⚠️ *[RUNTIME ERROR]*\n*발생 시간:* {datetime.now().strftime('%H:%M:%S')}\n*내용:* {message}"
+                }
+            }
+        ]
+        self._send_slack_blocks(blocks)
+        logger.error(f"SLACK_ERROR_NOTIFIED: {message}")
+
     def notify_critical(self, message: str):
         """시스템 장애(킬스위치): 강력한 경고 디자인"""
         blocks = [
@@ -148,3 +162,4 @@ class Notifier:
         ]
         self._send_slack_blocks(blocks)
         logger.error(f"CRITICAL_ERROR: {message}")
+
