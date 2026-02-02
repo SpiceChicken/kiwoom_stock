@@ -113,7 +113,7 @@ class TradeLogger:
             ORDER BY sell_time DESC 
             LIMIT 1
         """
-        result = self.conn.execute(query, (stock_code))
+        result = self.conn.execute(query, (stock_code,))
         if result and result[0]['sell_time']:
             # DB 저장 형식에 따라 파싱 (예: 문자열 -> datetime)
             try:
