@@ -113,11 +113,13 @@ class TradeLogger:
             ORDER BY sell_time DESC 
             LIMIT 1
         """
-        result = self.conn.execute(query, (stock_code,))
-        if result and result[0]['sell_time']:
-            # DB 저장 형식에 따라 파싱 (예: 문자열 -> datetime)
-            try:
-                return datetime.strptime(result[0]['sell_time'], '%Y-%m-%d %H:%M:%S')
-            except:
-                return None
+        cursor = self.conn.execute(query, (stock_code,))
+        
+        # 1. fetchone()으로 데이터 한 행을 가져옴
+        row = cursor.fetchone()
+        
+        # 2. 데이터가 존재하고 컬럼값이 있는지 확인
+        if row and row['sell_time']:
+            return datetime.strptime(row['sell_time'], '%Y-%m-%d %H:%M:%S')
+            
         return None
