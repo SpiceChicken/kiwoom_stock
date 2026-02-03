@@ -68,24 +68,35 @@ class StockManager:
         
         """
         try:
-            new_stocks = list(self.active_positions.keys())
-            seen_codes = set(new_stocks) # [최적화] 중복 체크용 Set
-            upper_list = self.client.market.get_top_trading_value(market_tp="001")
+            new_stocks = []
+            seen_codes = set() # 중복 체크용
             
+            # 1. 실시간 거래대금 상위 종목 먼저 추가
+            upper_list = self.client.market.get_top_trading_value(market_tp="001")
             for item in upper_list:
                 if len(new_stocks) >= self.max_stocks: break
                 code, name = item['stk_cd'], item['stk_nm']
+                
+                # ETF 제외 필터
                 if any(kw in name for kw in self.etf_keywords): continue
+                
                 if code not in seen_codes:
                     new_stocks.append(code)
                     seen_codes.add(code)
-                self.stock_names[code] = name
+                    self.stock_names[code] = name
 
-            for stock_code, pos in self.active_positions.items():
-                self.stock_names[stock_code] = pos.stock_name
-            
-            self.stocks = new_stocks[:self.max_stocks]
-            logger.info(f"감시 종목 갱신 (총 {len(self.stocks)}개 | 보유: {len(self.active_positions)}개)")
+            # 2. [핵심] 보유 종목을 리스트 끝에 추가 (단, max_stocks 여유가 있을 때)
+            # 보유 종목은 반드시 감시해야 하므로, 슬라이싱 전에 추가하는 것이 안전합니다.
+            for code, pos in self.active_positions.items():
+                if code not in seen_codes:
+                    new_stocks.append(code)
+                    seen_codes.add(code)
+                    self.stock_names[code] = pos.stock_name
+
+            # 3. 최종 감시 종목 설정 (보유 종목을 포함한 리스트)
+            # 주의: 여기서 [:self.max_stocks]로 자르면 뒤에 붙인 보유 종목이 잘릴 수 있습니다.
+            self.stocks = new_stocks
+            logger.info(f"감시 종목 갱신 (총 {len(self.stocks)}개 | 보유: {len(self.active_positions)}개 포함)")
         except Exception as e:
             logger.error(f"종목 갱신 실패: {e}")
 

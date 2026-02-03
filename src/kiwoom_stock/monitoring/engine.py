@@ -87,6 +87,7 @@ class MultiTimeframeRSIMonitor:
     
         """
         stock_code = verdict['stock_code']
+        buy_signal = verdict['is_buy_signal']
 
         # 1. 시간 제한 체크
         if not self.strategy.is_monitoring_time():
@@ -103,6 +104,9 @@ class MultiTimeframeRSIMonitor:
         # 4. 최근 매도 종목 냉각기 체크
         if not self.stock_mgr.is_not_recent_exit(stock_code):
             return False # 판지 얼마 안 된 놈은 점수가 좋아도 일단 참는다.
+
+        if not buy_signal:
+            return False
 
         return True
 

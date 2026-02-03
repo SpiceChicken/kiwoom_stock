@@ -497,13 +497,11 @@ class TradingStrategy:
                 status = "👀관심"
                 is_buy_signal = False
 
-        if is_buy_signal:
-            return {
+        return {
                 "score": score,
                 "momentum": momentum,
                 "status": status,
                 'score_detail': score_detail,
                 "regime": self._current_regime,
+                "is_buy_signal": is_buy_signal
             }
-        else:
-            return None
