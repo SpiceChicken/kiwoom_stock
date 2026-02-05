@@ -15,6 +15,7 @@ from .strategy import TradingStrategy
 from .manager import StockManager
 from .notifier import Notifier
 from kiwoom_stock.core.database import TradeLogger
+from kiwoom_stock.core.schema import SupplyData
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +111,16 @@ class TradingEngine:
 
     def _worker_task(self, code: str) -> Optional[Dict]:
         """[Worker] 단위 작업: 데이터 조회 + 전략 계산"""
-        metrics = self.analyzer.supply_cache.get(code)
+        # metrics는 이제 SupplyData 객체임
+        metrics: SupplyData = self.analyzer.supply_cache.get(code)
         if not metrics: return None
         
+        # Strategy.evaluate는 이제 SupplyData 객체를 받음
         if verdict := self.strategy.evaluate(metrics):
-            return {**metrics, **verdict}
+            # verdict(Dict)에 metrics(SupplyData) 내용을 합칠 필요가 있는지 확인
+            # 기존에는 {**metrics, **verdict}로 합쳤으나, metrics가 객체이므로 
+            # 필요한 데이터만 verdict에 담겨 나오도록 strategy.evaluate를 수정했음 (price, stock_code)
+            return verdict
         return None
 
     def _process_decisions(self, verdicts: List[Dict]):

@@ -1,92 +1,41 @@
 import statistics
 import logging
-from enum import Enum
 from datetime import datetime
 from collections import deque
 from typing import List, Dict
 
 from .collector import MarketDataCollector
-from kiwoom_stock.core import indicators as ind  # [Refactor] 순수 함수형 지표 모듈 사용
+from kiwoom_stock.core import indicators as ind
+from kiwoom_stock.core.schema import SupplyData, PgmData, ForeignData
+from kiwoom_stock.core.types import MarketRegime
 
-# utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
 
-class MarketRegime(Enum):
-    STABLE_BULL = "안정적 강세장"
-    VOLATILE_BULL = "변동성 강세장"
-    QUIET_BEAR = "조용한 하락장"
-    PANIC_BEAR = "패닉 하락장"
-    NEUTRAL = "평온 구간"
-    UNKNOWN = "Unknown"
-
 class MarketAnalyzer:
-    """[Helper] 시장 환경 분석기: 레짐 진단 및 수급 캐싱 담당"""
+    """[Helper] 시장 환경 분석기 (Refactored to use SupplyData)"""
     def __init__(self, client, market_config: Dict):
-        self.collector = MarketDataCollector(client) # 수집기 주입
+        self.collector = MarketDataCollector(client)
         self.market_proxy_code = market_config.get("proxy_code", "069500")
         self.market_rsi = 50.0
         self.market_regime = MarketRegime.UNKNOWN
         self.market_atr_history = deque(maxlen=20)
-        self.supply_cache: Dict[str, Dict] = {}
-        self.last_supply_update = datetime.now() # 마지막 업데이트 시간 추적
-        self.supply_cache[self.market_proxy_code] = self._get_default_supply()
-
-    def _get_default_supply(self) -> Dict:
-        """
-        [Helper] 종목 캐시(supply_cache)의 초기 구조 및 기본값을 정의합니다.
-        데이터 수집 전 엔진이 참조하더라도 에러가 발생하지 않도록 설계되었습니다.
-        """
-        return {
-            # 1. 실시간 기술적 지표 (Indicators)
-            'stock_code': '',
-            'strength': 100.0,      # 체결강도 (100 미만 매도우위, 100 초과 매수우위)
-            'vol_ratio': 0.0,       # 전일 대비 거래량 비중 (Safety Pin)
-            'price': 0.0,           # 현재가 (최신 종가)
-            'vwap': 0.0,            # 거래대금 가중평균가격
-            'alpha_score': 0.0,     # 가격 가속도 점수
-            'trend_rsi': 50.0,      # 장기 추세 RSI (중립값 50.0 설정)
-            'prev_vwap': 0.0,       # 기울기 계산용 이전 값
-            'vol_factor': 1.0,      # 수급 신뢰도 가중치
-            'price_series': [],
-            'volume_series': [],
-            'trde_qty': 0,
-            'cur_prc': 0,
-            'market_total_amount': 1,
-
-            # 2. 프로그램 매매 데이터 (Program Trade)
-            'pgm_data': {
-                'net_amt': 0.0,     # 프로그램 순매수 금액
-                'ratio': 0.0,       # 프로그램 참여율
-                'buy_amt': 0.0,     # 프로그램 매수 금액
-                'sel_amt': 0.0      # 프로그램 매도 금액
-            },
-
-            # 3. 외국계 창구 데이터 (Foreign Window)
-            'foreign_data': {
-                'netprps_prica': 0.0, # 외국계 순매수 금액
-                'trde_prica': 1.0     # 외국계 전체 거래금액 (ZeroDivision 방어를 위해 1.0 초기화)
-            }
-        }
+        
+        # [Refactor] Dict[str, Dict] -> Dict[str, SupplyData]
+        self.supply_cache: Dict[str, SupplyData] = {}
+        self.last_supply_update = datetime.now()
+        self.supply_cache[self.market_proxy_code] = SupplyData(stock_code=self.market_proxy_code)
 
     def update_regime(self):
-        """RSI와 ATR 분석을 통한 시장 성격 정의
-        수집된 데이터를 바탕으로 시장 성격만 정의
-        """
+        """시장 성격 정의"""
         try:
-            # 1. 수집 위임
             self._update_chart_data(self.market_proxy_code, "60")
-            chart_data = self.supply_cache[self.market_proxy_code]['chart_data']
+            # SupplyData 객체에서 chart_data 접근
+            chart_data = self.supply_cache[self.market_proxy_code].chart_data
             if not chart_data: return
 
-            # 2. 데이터 정제 및 지표 계산 (I/O 없음)
-            # [Refactor] indicators 모듈은 [과거 -> 최신] 순서를 기대하므로 역순 정렬
-            # API에서 받은 chart_data는 보통 [최신, ..., 과거] 순서임
             closes = [abs(float(item['cur_prc'])) for item in chart_data][::-1]
-            
-            # [Refactor] 함수형 RSI 호출
             self.market_rsi = ind.calculate_rsi(closes, period=14)
             
-            # ATR 계산 로직 (수치 계산에만 집중)
             tr_list = []
             for i in range(1, len(chart_data)):
                 h = abs(float(chart_data[i]['high_pric']))
@@ -114,165 +63,113 @@ class MarketAnalyzer:
             logger.error(f"시장 분석 실패: {e}")
 
     def update_priority_supply(self, stock_codes: List[str]):
-        """[Orchestrator] 모든 데이터를 카테고리별로 독립 업데이트 수행"""
         try:
-            # 1. 벌크 데이터 수집 (루프 밖에서 1회 실행)
             pgm_map = self.collector.fetch_program_trade()
             frgn_map = self.collector.fetch_foreign_window_trade()
 
-            # 2. 개별 종목별 원자적 업데이트 실행
             for stock_code in stock_codes:
                 if stock_code not in self.supply_cache:
-                    self.supply_cache[stock_code] = self._get_default_supply()
+                    self.supply_cache[stock_code] = SupplyData(stock_code=stock_code)
 
-                chart_60m = self.collector.fetch_minute_chart(stock_code, tic="60") # 60분봉 데이터
-                chart_5m = self.collector.fetch_minute_chart(stock_code, tic="5") # 5분봉 데이터
-                chart_1m = self.collector.fetch_minute_chart(stock_code, tic="1") # 1분봉 데이터
+                chart_60m = self.collector.fetch_minute_chart(stock_code, tic="60")
+                chart_5m = self.collector.fetch_minute_chart(stock_code, tic="5")
+                chart_1m = self.collector.fetch_minute_chart(stock_code, tic="1")
 
-                # [Refactor] indicators 모듈 사용을 위해 [과거 -> 최신] 순으로 정렬
                 chart_60m.reverse()
                 chart_5m.reverse()
                 chart_1m.reverse()
 
-                # 각 데이터 파트별 독립적 업데이트
-                self.supply_cache[stock_code]['stock_code'] = stock_code
-                self._update_program_data(stock_code, pgm_map)
-                self._update_foreign_data(stock_code, frgn_map)
-                self._update_basic_data(stock_code) 
-                self._update_strength_data(stock_code)
-                self._update_alpha_data(stock_code, chart_1m)
-                self._update_vwap_data(stock_code, chart_5m)
-                self._update_trend_rsi(stock_code, chart_60m)
-                self._update_volatility_data(stock_code, chart_5m)
-                self._update_trend_data(stock_code, chart_5m)
+                # SupplyData 객체 필드 업데이트 (직관적 접근)
+                data = self.supply_cache[stock_code]
+                
+                self._update_program_data(data, pgm_map)
+                self._update_foreign_data(data, frgn_map)
+                self._update_basic_data(data, stock_code)
+                self._update_strength_data(data, stock_code)
+                self._update_alpha_data(data, chart_1m)
+                self._update_vwap_data(data, chart_5m)
+                self._update_trend_rsi(data, chart_60m)
+                self._update_volatility_data(data, chart_5m)
+                self._update_trend_data(data, chart_5m)
 
             self.last_supply_update = datetime.now()
         except Exception as e:
             logger.error(f"전체 수급 데이터 통합 중 오류: {e}")
 
-    def _update_basic_data(self, code: str):
-        """안전핀(vol_ratio) 데이터 업데이트"""
+    # Helper 메서드들이 이제 SupplyData 객체를 직접 조작
+    def _update_basic_data(self, data: SupplyData, code: str):
         basic = self.collector.fetch_stock_basic(code)
-        self.supply_cache[code]['vol_ratio'] = basic.get('trde_pre', 0.0)
-        self.supply_cache[code]['trde_qty'] = basic.get('trde_qty', 0)
-        self.supply_cache[code]['cur_prc'] = basic.get('cur_prc', 0)
-        self.supply_cache[code]['market_total_amount'] = max(1, basic.get('trde_qty', 0) * basic.get('cur_prc', 0))
+        data.vol_ratio = float(basic.get('trde_pre', 0.0))
+        data.trde_qty = int(basic.get('trde_qty', 0))
+        data.cur_prc = float(basic.get('cur_prc', 0))
+        data.market_total_amount = max(1.0, float(data.trde_qty) * float(data.cur_prc))
 
-    def _update_strength_data(self, code: str):
-        """체결강도 데이터 업데이트"""
+    def _update_strength_data(self, data: SupplyData, code: str):
         strength_history = self.collector.fetch_tick_strength(code)
-        strength = strength_history[0].get("cntr_str", 100.0)
-        self.supply_cache[code]['strength'] = strength
+        data.strength = float(strength_history[0].get("cntr_str", 100.0)) if strength_history else 100.0
 
     def _update_chart_data(self, code: str, tic: str):
-        """차트 데이터 업데이트"""
         chart = self.collector.fetch_minute_chart(code, tic)
-        self.supply_cache[code]['chart_data'] = chart
+        self.supply_cache[code].chart_data = chart
 
-    def _update_program_data(self, code: str, pgm_map: Dict):
-        """[Atomic Update] 프로그램 매매 데이터"""
-        try:
-            if code in pgm_map:
-                self.supply_cache[code]['pgm_data'] = pgm_map[code]
-        except Exception as e:
-            logger.error(f"[{code}] pgm_data 캐시 구조가 초기화 실패: {e}")
+    def _update_program_data(self, data: SupplyData, pgm_map: Dict):
+        if data.stock_code in pgm_map:
+            p_info = pgm_map[data.stock_code]
+            # 딕셔너리를 PgmData 객체로 변환
+            data.pgm_data = PgmData(
+                net_amt=float(p_info.get('net_amt', 0)),
+                ratio=float(p_info.get('ratio', 0)),
+                buy_amt=float(p_info.get('buy_amt', 0)),
+                sel_amt=float(p_info.get('sel_amt', 0))
+            )
 
-    def _update_foreign_data(self, code: str, frgn_map: Dict):
-        """[Atomic Update] 외국계 창구 데이터"""
-        try:
-            if code in frgn_map:
-                self.supply_cache[code]['foreign_data'] = frgn_map[code]
-        except Exception as e:
-            logger.error(f"[{code}] foreign_data 캐시 구조가 초기화 실패: {e}")
+    def _update_foreign_data(self, data: SupplyData, frgn_map: Dict):
+        if data.stock_code in frgn_map:
+            f_info = frgn_map[data.stock_code]
+            data.foreign_data = ForeignData(
+                netprps_prica=float(f_info.get('netprps_prica', 0)),
+                trde_prica=float(f_info.get('trde_prica', 1.0))
+            )
 
-    def _update_alpha_data(self, code: str, chart_1m: List[Dict]):
-        """Alpha Score(가속도) 독립 업데이트"""
-        try:
-            if len(chart_1m) < 6: return
-            
-            prices = [d['cur_prc'] for d in chart_1m]
-            volumes = [d['trde_qty'] for d in chart_1m]
-
-            avg_prev_vol = max(1.0, sum(volumes[-5:-1]) / 4)
-            curr_vol = volumes[-1]
-            vol_factor = min(2.0, curr_vol / avg_prev_vol)
-            
-            self.supply_cache[code]['price_series'] = prices
-            self.supply_cache[code]['volume_series'] = volumes
-            self.supply_cache[code]['vol_factor'] = vol_factor
-        except Exception as e:
-            logger.error(f"[{code}] 1분봉 데이터 업데이트 중 오류: {e}")
-
-    def _update_vwap_data(self, code: str, chart_5m: List[Dict]):
-        """VWAP(거래대금가중평균) 및 현재가 독립 업데이트"""
-        try:
-            if not chart_5m: return
-
-            prices = [abs(float(d['cur_prc'])) for d in chart_5m]
-            vols = [float(d['trde_qty']) for d in chart_5m]
-
-            total_val = sum(p * v for p, v in zip(prices, vols))
-            total_vol = sum(vols)
-            vwap = total_val / total_vol if total_vol > 0 else prices[-1]
-
-            self.supply_cache[code]['prev_vwap'] = self.supply_cache[code]['vwap']
-            self.supply_cache[code]['vwap'] = round(vwap, 2)
-            self.supply_cache[code]['price'] = prices[-1]
-
-            if self.supply_cache[code]['prev_vwap'] == 0:
-                self.supply_cache[code]['prev_vwap'] = self.supply_cache[code]['vwap']
-        except Exception as e:
-            logger.error(f"[{code}] VWAP(거래대금가중평균) 업데이트 중 오류: {e}")
-
-    def _update_trend_rsi(self, code: str, chart_60m: List[Dict]):
-        """[Atomic] 60분봉 기반 장기 추세(Trend RSI) 업데이트"""
-        try:
-            if not chart_60m:
-                return
-
-            # chart_60m은 이미 reverse() 되어 [과거 -> 최신] 상태임
-            prices = [d['cur_prc'] for d in chart_60m]
-
-            # [Refactor] indicators 모듈 사용
-            # RSI 계산에 필요한 최소 데이터(15개 이상 권장) 확보 여부 확인
-            if len(prices) > 14:
-                rsi_val = ind.calculate_rsi(prices, period=14)
-                self.supply_cache[code]['trend_rsi'] = round(rsi_val, 2)
-                
-        except Exception as e:
-            logger.error(f"[{code}] Trend RSI 업데이트 중 오류: {e}")
-
-    def _update_volatility_data(self, code: str, chart_5m: List[Dict]):
-        try:
-            """종목별 동적 변동성(ATR%) 업데이트"""
-            if not chart_5m: return
-
-            # chart_5m은 [과거 -> 최신] 상태
-            highs = [d['high_pric'] for d in chart_5m]
-            lows = [d['low_pric'] for d in chart_5m]
-            closes = [d['cur_prc'] for d in chart_5m]
-
-            # [Refactor] indicators 모듈 사용
-            atr_p = ind.calculate_atr_percent(highs, lows, closes, period=14)
-            self.supply_cache[code]['atr_percent'] = atr_p
-        except Exception as e:
-            logger.error(f"[{code}] 동적 변동성(ATR%) 업데이트 중 오류: {e}")
-
-    def _update_trend_data(self, code: str, chart_5m: List[Dict]):
-        """이동평균선(EMA) 업데이트"""
-        # 60분봉 혹은 5분봉 데이터를 충분히 가져옴 (예: 60개 이상)
-        if len(chart_5m) < 60: return
-
-        prices = [d['cur_prc'] for d in chart_5m]
-       
-        # 1. 이전 EMA 60 보존 (기울기 계산용)
-        self.supply_cache[code]['prev_ema60'] = self.supply_cache[code].get('ema60', 0)
-
-        # 2. [Refactor] indicators 모듈을 통해 EMA 계산
-        self.supply_cache[code]['ema5'] = ind.calculate_ema(prices, 5)
-        self.supply_cache[code]['ema20'] = ind.calculate_ema(prices, 20)
-        self.supply_cache[code]['ema60'] = ind.calculate_ema(prices, 60)
+    def _update_alpha_data(self, data: SupplyData, chart_1m: List[Dict]):
+        if len(chart_1m) < 6: return
+        data.price_series = [float(d['cur_prc']) for d in chart_1m]
+        data.volume_series = [float(d['trde_qty']) for d in chart_1m]
         
-        # 3. [방어] 첫 실행 시 slope 노이즈 방지
-        if self.supply_cache[code]['prev_ema60'] == 0:
-            self.supply_cache[code]['prev_ema60'] = self.supply_cache[code]['ema60']
+        avg_prev_vol = max(1.0, sum(data.volume_series[-5:-1]) / 4)
+        data.vol_factor = min(2.0, data.volume_series[-1] / avg_prev_vol)
+
+    def _update_vwap_data(self, data: SupplyData, chart_5m: List[Dict]):
+        if not chart_5m: return
+        prices = [abs(float(d['cur_prc'])) for d in chart_5m]
+        vols = [float(d['trde_qty']) for d in chart_5m]
+
+        total_val = sum(p * v for p, v in zip(prices, vols))
+        total_vol = sum(vols)
+        vwap = total_val / total_vol if total_vol > 0 else prices[-1]
+
+        data.prev_vwap = data.vwap if data.vwap > 0 else vwap
+        data.vwap = round(vwap, 2)
+        data.price = prices[-1]
+
+    def _update_trend_rsi(self, data: SupplyData, chart_60m: List[Dict]):
+        if not chart_60m: return
+        prices = [float(d['cur_prc']) for d in chart_60m]
+        if len(prices) > 14:
+            data.trend_rsi = round(ind.calculate_rsi(prices, period=14), 2)
+
+    def _update_volatility_data(self, data: SupplyData, chart_5m: List[Dict]):
+        if not chart_5m: return
+        highs = [float(d['high_pric']) for d in chart_5m]
+        lows = [float(d['low_pric']) for d in chart_5m]
+        closes = [float(d['cur_prc']) for d in chart_5m]
+        data.atr_percent = ind.calculate_atr_percent(highs, lows, closes, period=14)
+
+    def _update_trend_data(self, data: SupplyData, chart_5m: List[Dict]):
+        if len(chart_5m) < 60: return
+        prices = [float(d['cur_prc']) for d in chart_5m]
+        
+        data.prev_ema60 = data.ema60 if data.ema60 > 0 else ind.calculate_ema(prices, 60)
+        data.ema5 = ind.calculate_ema(prices, 5)
+        data.ema20 = ind.calculate_ema(prices, 20)
+        data.ema60 = ind.calculate_ema(prices, 60)
