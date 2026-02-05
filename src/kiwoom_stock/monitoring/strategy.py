@@ -4,171 +4,196 @@ from datetime import datetime, time, timedelta
 from typing import Dict, Tuple, Optional
 
 from kiwoom_stock.monitoring.manager import Position
+from kiwoom_stock.core import indicators as ind # [Refactor] 계산 로직 모듈 임포트
 from .analyzer import MarketRegime
 
-# utils에서 설정한 핸들러를 상속받기 위해 로거 선언
+# utils에서 설정한 로깅 핸들러 사용
 logger = logging.getLogger(__name__)
 
 class TradingStrategy:
     """
-    [Strategy] 트레이딩 전략 및 점수 산출: 하드코딩된 가중치/임계값 제거
+    [Strategy] 트레이딩 전략 및 점수 산출 엔진 (v2.3 Refactored)
     
+    [개선 사항]
+    1. SoC 적용: 수학적 지표 계산을 core.indicators 모듈로 위임
+    2. 차등 진입 전략: Primary Driver에 따라 진입 임계값 이원화 (Supply 우대)
+    3. 과열 방지: Trend Score 90점 이상 시 진입 차단 (수익률 역상관 반영)
+    4. Config 기반: 하드코딩 제거 및 설정 파일 동적 로드
     """
+    
     def __init__(self, strategy_config: Dict):
+        """전략 객체 초기화 및 기본 설정 로드"""
         self.settings = strategy_config
+
+        # [Test Support] 디버그 모드 설정 로드 (기본값 False)
+        self.debug_mode = strategy_config.get("debug_mode", False)
+        
+        if self.debug_mode:
+            logger.warning("🚨 [DEBUG MODE] TIME CHECKS ARE BYPASSED! (장외 시간 테스트 모드 작동)")
+
         self.momentum_threshold = strategy_config.get("momentum_threshold", 10.0)
 
-        # [최적화] 문자열을 time 객체로 미리 변환 (루프 내 오버헤드 제거)
+        # [최적화] 시간 문자열 파싱 캐싱
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
         self.exit_time_obj = time.fromisoformat(exit_str)
-        # [수정] 장 마감 3분 전 강제 청산 시간 계산 (오버헤드 방지를 위해 미리 계산)
-        # datetime.combine을 사용하여 안전하게 시간 연산 수행
+        
+        # [Rule] 장 마감 3분 전 강제 청산 시간 설정
         dummy_dt = datetime.combine(datetime.today(), self.exit_time_obj)
         self.forced_exit_time = (dummy_dt - timedelta(minutes=3)).time()
 
-        # 캐싱을 위한 내부 상태 변수
+        # 내부 상태 변수
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config = {}
-        self.curr_strong_th = 80.0  # 기본값
-        self.curr_alert_th = 70.0   # 기본값
+        
+        # [Thresholds] 초기 안전장치 (Config 로드 전 Default 값)
+        # 분석 결과에 따라 Strict(87.0)와 Supply(82.0)로 이원화
+        self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 엄격 기준
+        self.curr_supply_th = 82.0  # Supply 주도 시 완화 기준
+        self.curr_alert_th = 75.0   # 모니터링 시작 기준
 
-        # [신규] 익절/손절/감쇠 설정 로드
+        # 매매 규칙 로드 (익절, 손절, 감쇠율)
         self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
-        self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025) # 기본 2.5%
+        self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025)
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.015)
 
-        # [캡슐화] 종목별 점수 이력을 관리합니다.
-        self.history = {} # { "종목코드": [점수1, 점수2, 점수3, 점수4, 점수5] }
+        # 모멘텀 계산용 이력 저장소
+        self.history = {} 
 
-        # [안전장치] 계좌 전체 손실 제한 (예: -5%)
+        # 리스크 관리 (Kill Switch & Deadline)
         self.total_loss_limit = strategy_config.get("total_loss_limit", -5)
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
 
-        # [추가] 종목별 Alpha 점수 잔상 저장소
+        # [Memory] 지표 잔상 효과 저장소 (호가 공백 보정)
         self._alpha_memory: Dict[str, float] = {}
-        self.alpha_decay = strategy_config.get("alpha_decay", 0.8) # 매 분 20%씩 감쇄
-
-        # [추가] 종목별 Supply 점수 잔상 저장소
+        self.alpha_decay = strategy_config.get("alpha_decay", 0.8)
         self._supply_memory: Dict[str, float] = {}
         self.supply_decay = strategy_config.get("supply_decay", 0.8)
 
     def update_context(self, regime: MarketRegime):
         """
-        [Strategy] 루프 시작 시 1회 호출. 설정을 멤버 변수에 캐싱하여 오버헤드 제거
-
+        [Context] 시장 레짐 변경에 따라 임계값 설정을 동적으로 업데이트
         """
+
+        # [Test Support] 디버그 모드일 경우: 시장 레짐을 무시하고 테스트용 임계값 강제 적용
+        if self.debug_mode:
+            # 중복 로깅 방지: 이미 디버그 모드로 설정되어 있다면 패스
+            if self._current_regime != "DEBUG_MODE":
+                self._current_regime = "DEBUG_MODE"
+                
+                # 설정 파일에서 debug_thresholds 로드 (없으면 기본값 50.0)
+                debug_th = self.settings.get("debug_thresholds", {})
+                self.curr_strict_th = debug_th.get("strong", 50.0)
+                self.curr_supply_th = debug_th.get("strong_supply", 50.0)
+                self.curr_alert_th = debug_th.get("alert", 40.0)
+                
+                logger.warning(f"🚨 [DEBUG MODE] Thresholds Fixed for TEST: Strict={self.curr_strict_th} / Supply={self.curr_supply_th}")
+            return # 이후 로직(레짐별 설정 로드) 수행 안 함
+
         regime_val = regime.value if hasattr(regime, 'value') else str(regime)
         
-        # 레짐이 변경될 때만 캐시 갱신
         if self._current_regime != regime_val:
             self._current_regime = regime_val
             regimes = self.settings.get("regimes", {})
             self._cached_config = regimes.get(regime_val, regimes.get("default", {}))
             
-            # 임계값 및 주요 설정 멤버 변수화 (evaluate에서의 딕셔너리 조회 비용 제거)
-            th = self._cached_config.get("thresholds", {"strong": 80.0, "alert": 70.0})
-            self.curr_strong_th = th['strong']
-            self.curr_alert_th = th['alert']
+            # [Config Load] 설정 파일에서 임계값 로드 (하드코딩 방지)
+            config_th = self._cached_config.get("thresholds", {})
             
-            logger.info(f"Strategy context updated: {regime_val} (Strong: {self.curr_strong_th})")
+            # 설정값 우선 적용, 없으면 __init__의 기본값(Safe Default) 유지
+            self.curr_strict_th = config_th.get('strong', 87.0)
+            self.curr_supply_th = config_th.get('strong_supply', 82.0)
+            self.curr_alert_th = config_th.get('alert', 75.0)
+            
+            logger.info(f"Strategy Context Updated: {regime_val} | Strict: {self.curr_strict_th}, Supply: {self.curr_supply_th}")
 
     @property
     def entry_thresholds(self) -> Dict[str, float]:
-        """
-        [Strategy] 현재 레짐의 진입 임계값을 반환합니다. (누락 시 보수적 기준)
-        
-        """
-        return self._cached_config.get("thresholds", {
-            "strong": 85.0, "interest": 75.0, "alert": 70.0
-        })
+        """현재 적용 중인 임계값 정보 반환"""
+        return {
+            "strong": self.curr_strict_th,
+            "strong_supply": self.curr_supply_th,
+            "alert": self.curr_alert_th
+        }
     
     def get_exit_reason(self, pos: Position, strong_threshold: float) -> Optional[str]:
         """
-        [Strategy] 설정된 익절/손절/시간/점수 조건을 검사하여 매도 사유를 반환합니다.
-   
+        [Exit Logic] 청산 조건 판별
+        1. Time Cut: 15:27 강제 청산
+        2. Stop Loss: 손절선 도달
+        3. Take Profit: 목표가 도달 (단, 점수 유지 시 홀딩)
+        4. Score Decay: 점수 급락 시 이탈 (수익권에선 더 민감하게 반응)
         """
-        # 현재 수익률 계산 (소수점 단위)
         profit_rate = (pos.sell_price / pos.buy_price - 1)
         
-        # 1. 시간 기반 당일 청산 (장 마감 3분 전부터 최우선 수행)
+        # 1. 시간 청산
         if datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
             
-        # 2. 하드 손절 (Stop Loss) - 설정값 이하로 하락 시 즉시 매도
+        # 2. 손절매
         if profit_rate <= self.stop_loss_rate:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
             
-        # 3. 지능형 익절 (Take Profit)
-        # 수익률이 목표치 이상이지만, 점수가 여전히 강하면(strong_threshold 이상) 매도를 미룹니다.
+        # 3. 익절매 (Trailing Logic)
         if profit_rate >= self.target_profit_rate:
+            # 점수가 여전히 높다면(현재 기준) 홀딩하여 수익 극대화
             if pos.current_score >= strong_threshold:
-                return None # 기세가 좋으므로 익절 보류 (Let the winner run)
+                return None 
             return f"Take Profit (+{profit_rate*100:.1f}%)"
 
-        # 4. 점수 하락 (Score Decay)
-        # 상대적 점수 하락 (Score Decay)
-        # 수익률이 1% 이상일 경우, 추세를 더 즐길 수 있도록 감쇄 허용치를 1.5배 늘려줌
+        # 4. 점수 하락 감지 (Score Decay)
         current_decay = self.decay_rate
+        # 수익 중일 때는 이익 보전을 위해 민감도 1.5배 증가
         if profit_rate >= 0.01:
             current_decay *= 1.5
+            
         relative_threshold = pos.buy_score * (1 - current_decay)
-        # 절대적 지지선 (Score Floor)
-        absolute_threshold = self.settings.get("thresholds", {}).get("alert", 70.0)
+        absolute_threshold = self.curr_alert_th
 
-        # 두 값 중 더 낮은(관대한) 값을 기준으로 삼아 노이즈를 견디게 합니다.
         final_sell_threshold = min(relative_threshold, absolute_threshold)
 
         if pos.current_score < final_sell_threshold:
             return f"Score Decay (-{current_decay*100:.0f}%)"
+        
+        return None
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
-        """
-        [Strategy] 전체 손익이 허용치를 초과했는지 판단합니다.
-        
-        """
+        """계좌 전체 손실 한도 체크"""
         return total_pnl <= self.total_loss_limit
 
     def is_monitoring_time(self) -> bool:
-        """
-        [Strategy] 장 운영 시간 체크 (에러 수정 버전)
-        
-        """
+        """장 운영 시간 체크 (주말 제외)"""
+        # [Test Support] 디버그 모드면 무조건 True 반환
+        if self.debug_mode:
+            return True
+
         now = datetime.now()
         if now.weekday() >= 5: return False
-        
-        # 시작 시간(09:00 권장)과 종료 시간(exit_time) 사이인지 비교
         return time(8, 30) <= now.time() <= self.exit_time_obj
 
     def is_trading_window(self) -> bool:
-        """
-        [Strategy] 현재 시간이 진입 가능한 시간대(entry_deadline)인지 확인
-        
-        """
+        """신규 진입 가능 시간 체크 (15:00 마감)"""
+        # [Test Support] 디버그 모드면 무조건 True 반환
+        if self.debug_mode:
+            return True
+            
         now = datetime.now().time()
         return now < self.deadline_time
         
-    def _calculate_conviction_score(self, metrics: Dict) -> float:
+    def _calculate_conviction_score(self, metrics: Dict) -> Tuple[float, Dict]:
         """
-        [Strategy] 승산형(Multiplicative) 시너지 모델 기반 최종 점수 산출
-        - 가중 기하평균(Weighted Geometric Mean) 모델 적용
-        - 지표 간 균형을 엄격히 평가하여 '구멍이 있는 상승'을 원천 차단
-
+        [Scoring Engine] 승산형(Multiplicative) 모델 점수 산출
         """
-        # 1. 4대 지표 산출 (각 0~100점)
-        # math.pow 연산을 위해 최소값 1.0 보정 (0점 방지)
+        # 1. 4대 지표 산출 (indicators 모듈 활용)
         a_score = max(1.0, self._calculate_alpha_score(metrics))
         s_score = max(1.0, self._calculate_supply_score(metrics))
         v_score = max(1.0, self._calculate_vwap_score(metrics))
         t_score = max(1.0, self._calculate_trend_score(metrics))
 
-        # 2. 실시간 동적 가중치 적용 (사용자님 기존 로직 유지)
-        # weights['alpha'] + weights['supply'] + ... = 1.0 이 되도록 설정 권장
+        # 2. 동적 가중치 계산
         w = self._calculate_dynamic_weights(metrics)
 
-        # 3. [핵심] 승산형 시너지 모델 적용
-        # 공식: Total Score = (Alpha^w1 * Supply^w2 * VWAP^w3 * Trend^w4)
-        # 가중치의 합(w1+w2+w3+w4)이 1.0이므로 결과값은 0~100 사이로 자동 표준화됩니다.
+        # 3. 가중 기하평균 적용 (하나라도 0점에 가까우면 총점 급락)
         final_score = (
             math.pow(a_score, w.get('alpha', 0.25)) *
             math.pow(s_score, w.get('supply', 0.25)) *
@@ -176,7 +201,6 @@ class TradingStrategy:
             math.pow(t_score, w.get('trend', 0.25))
         )
 
-        # 로그 및 분석을 위한 상세 데이터 저장
         details = {
             "alpha": round(a_score, 1),
             "supply": round(s_score, 1),
@@ -187,13 +211,7 @@ class TradingStrategy:
         return round(final_score, 1), details
 
     def _calculate_alpha_score(self, metrics: Dict) -> float:
-        """
-        [Alpha Score] 가격 가속도 및 탄력성 평가
-        - 가속도: 최근 1분 수익률 - (지난 5분 평균 수익률)
-        - 신뢰도: 최근 1분 거래량 / (직전 4분 평균 거래량)
-        - 기세가 꺾여도 이전의 강력했던 에너지를 메모리에서 불러와 유지함
-
-        """
+        """[Alpha] 가격 가속도 및 거래량 파워 (indicators 활용)"""
         stock_code = metrics['stock_code']
         price_series = metrics.get('price_series', [])
         vol_series = metrics.get('volume_series', [])
@@ -201,45 +219,34 @@ class TradingStrategy:
         if len(price_series) < 6:
             return 0.0
 
-        # 1. 가속도 계산 (사용자님 제공 로직)
-        roc_1m = (price_series[0] - price_series[1]) / price_series[1] * 100
-        roc_5m = (price_series[0] - price_series[5]) / price_series[5] * 100
+        # [Refactor] indicators 모듈을 사용하여 변화율 계산
+        roc_1m = ind.calculate_roc(price_series[0], price_series[1])
+        roc_5m = ind.calculate_roc(price_series[0], price_series[5])
+        
+        # 가속도: 최근 1분 상승분이 5분 추세 대비 얼마나 강력한가
         acceleration = roc_1m - (roc_5m / 10)
 
-        # 2. 거래량 신뢰도
-        v_1m = vol_series[0]
-        v_5m_avg = sum(vol_series[1:6]) / 5
-        vol_factor = min(2.0, v_1m / v_5m_avg) if v_5m_avg > 0 else 1.0
+        # [Refactor] indicators 모듈을 사용하여 거래량 비율 계산
+        # 현재 거래량이 5분 평균 대비 2배 이상이면 최대 가점
+        vol_factor = min(2.0, ind.calculate_volume_ratio(vol_series[0], vol_series[1:6]))
 
-        # 3. [개정] 시그모이드 점수 생성
-        # k=25: 0.2% 가속도 시 만점 부근, 0% 시 50점
+        # 점수화 (Sigmoid)
         k = 25
         combined_input = acceleration * vol_factor
-        
         try:
             current_alpha = 100 / (1 + math.exp(-combined_input * k))
         except OverflowError:
             current_alpha = 100.0 if combined_input > 0 else 0.0
 
-        # 4. [핵심] 잔상(Memory) 로직 적용
-        # 이전에 저장된 이 종목의 Alpha 점수를 가져옴
+        # 잔상 효과 (Memory) 적용
         prev_alpha = self._alpha_memory.get(stock_code, 0.0)
-        
-        # "현재 점수"와 "이전 점수의 80%(감쇄)" 중 큰 값을 최종 점수로 선택
-        # 이를 통해 점수가 0점으로 수직 낙하하는 것을 방지함
         final_alpha = max(current_alpha, prev_alpha * self.alpha_decay)
-        
-        # 다음 사이클을 위해 현재의 최종 점수를 메모리에 저장
         self._alpha_memory[stock_code] = final_alpha
 
         return float(round(final_alpha, 2))
 
     def _calculate_supply_score(self, metrics: Dict) -> float:
-        """
-        [supply_score] 실질 비중 직접 승수 모델 (상수 가산점 제거)
-        체결강도 Base에 프로그램/외국계의 실제 시장 점유 비중을 직접 곱합니다.
-
-        """
+        """[Supply] 수급 주체 개입 강도 (기존 로직 유지 + Memory)"""
         stock_code = metrics['stock_code']
         strength = metrics.get('strength', 100.0)
         pgm_net = metrics.get('pgm_net', 0)
@@ -247,44 +254,33 @@ class TradingStrategy:
         market_total = metrics.get('market_total_amount', 1)
         vol_ratio = metrics.get('vol_ratio', 0)
 
-        # 1. Base Score: 체결강도 기반 (100% -> 50점)
+        # 체결강도 기반 베이스 점수
         base_score = max(0, min(100, 50 + (strength - 100) * 0.5))
 
-        # 2. 실질 지배력(Market Dominance) 및 안전 게이트
+        # 대형주 수급 보정
         market_total_million = market_total / 1000000
-        if market_total_million < 10.0: # 1,000만원 미만 거래 시 수급 노이즈 차단
+        if market_total_million < 10.0:
             pgm_adj, frgn_adj = 0, 0
         else:
             pgm_adj = max(-0.5, min(0.5, pgm_net / market_total_million))
             frgn_adj = max(-0.5, min(0.5, frgn_net / market_total_million))
 
-        # 3. [핵심] 수급 영향력 5배 증폭 및 장 초반 신뢰도(trust_factor) 적용
+        # 거래량 신뢰도 가중
         trust_factor = 1.0 if vol_ratio >= 5.0 else 0.5
         supply_impact = (pgm_adj + frgn_adj) * 5.0
         multiplier = 1.0 + (supply_impact * trust_factor)
 
-        # 현재 시점의 실시간 점수 (100점 상한선 적용)
         current_supply_score = min(100.0, base_score * multiplier)
 
-        # 4. [핵심] 잔상(Memory) 로직 적용
+        # 잔상 효과 적용
         prev_supply = self._supply_memory.get(stock_code, 0.0)
-        
-        # 현재 점수와 이전 점수의 85% 중 큰 값 선택
         final_supply = max(current_supply_score, prev_supply * 0.85)
-        
-        # 메모리 업데이트
         self._supply_memory[stock_code] = final_supply
 
         return float(round(final_supply, 2))
 
     def _calculate_vwap_score(self, metrics: Dict) -> float:
-        """
-        [vwap_score]수급 평단가 기반 위치 및 과열 평가
-        지수 감쇄 모델 및 Floor Score 적용
-        - 0점 속출 방지: 과열 구간에서도 최소 30점을 유지하여 밸런스 붕괴 방지
-        - 표준화: 100점 만점 체계 준수
-
-        """
+        """[VWAP] 가격 위치 및 기울기 (indicators 활용)"""
         vwap = metrics.get('vwap', 0)
         price = metrics.get('price', 0)
         vol_factor = metrics.get('vol_factor', 1.0)
@@ -293,48 +289,32 @@ class TradingStrategy:
 
         if vwap <= 0: return 0.0
 
-        # 1. 기준 거리 설정 (상대적 잣대 유지)
-        deviation = (price - vwap) / vwap * 100
-        # overheat_limit: 이격도가 이 수치만큼 벌어지면 '주의' 구간
+        # [Refactor] 이격도 계산 위임
+        deviation = ind.calculate_disparity(price, vwap)
         overheat_limit = max(3.0, atr_p * 1.5) 
         
-        # 2. [로직 개조] 지수적 감쇄 함수 (Exponential Decay)
         if deviation >= 0:
-            # [정방향] VWAP 위에 있을 때
-            # 기존: Linear (1 - ratio) -> 개정: Exponential (e^-ratio)
+            # 상단 과열 체크
             ratio = deviation / overheat_limit
-            
-            # 이격이 overheat_limit과 같을 때 약 36.7점 산출
-            # [핵심] 아무리 멀어져도 최소 30점은 유지하여 밸런스 확보
             pos_score = max(30.0, 100 * math.exp(-ratio))
         else:
-            # [역방향/돌파] VWAP 아래에서 올라올 때 (기존 사용자님 로직 유지 및 보정)
+            # 하단 돌파 체크
             breakout_range = atr_p * 0.2 
             ratio = max(-1.0, deviation / breakout_range)
-            # 돌파 기세 점수 (최대 100점)
             pos_score = 100 * (1 + ratio) * vol_factor
 
-        # 3. 수급 추세(Slope) 가중치 반영 (사용자님 로직 유지)
+        # [Refactor] 기울기 계산 위임
         if prev_vwap > 0 and vwap != prev_vwap:
-            raw_slope = (vwap - prev_vwap) / vwap * 1000
-            slope_intensity = max(-1.0, min(1.0, raw_slope)) 
-            slope_factor = 1.0 + (slope_intensity * 0.4) # 0.8 ~ 1.2
+            slope_intensity = max(-1.0, min(1.0, ind.calculate_slope(vwap, prev_vwap)))
+            slope_factor = 1.0 + (slope_intensity * 0.4)
         else:
             slope_factor = 1.0
 
-        # 최종 점수 산출 및 100점 캡핑
         final_vwap_score = pos_score * slope_factor
-        
         return float(round(max(0, min(100, final_vwap_score)), 2))
 
     def _calculate_trend_score(self, metrics: Dict) -> float:
-        """
-        [trend_score] 완전 비례 및 동적 감쇄 모델 (상수 배제)
-        모든 기준점은 ATR%(종목 변동성)를 '단위 잣대'로 사용하여 동적으로 결정됩니다.
-        - 0점 속출 방지: 과열 시에도 최소 30점(Floor)을 유지하여 밸런스 붕괴 차단
-        - 표준화: 100점 만점 체계 준수
-
-        """
+        """[Trend] 이평선 정렬 및 과열 감지 (indicators 활용)"""
         e5 = metrics.get('ema5', 0)
         e20 = metrics.get('ema20', 0)
         e60 = metrics.get('ema60', 0)
@@ -343,32 +323,27 @@ class TradingStrategy:
 
         if e60 <= 0: return 0.0
 
-        # 1. 추세 에너지 산출 (사용자님 로직 유지)
-        gap_short = (e5 - e20) / e20 * 100
-        gap_long = (e20 - e60) / e60 * 100
-        energy_density = (gap_short + gap_long) / atr_p 
+        # [Refactor] 이평선 간 이격도 계산 위임
+        gap_short = ind.calculate_disparity(e5, e20)
+        gap_long = ind.calculate_disparity(e20, e60)
         
-        # 2. [개정] 정배열 점수화 (Smooth Sigmoid)
-        # 횡보(0)일 때 50점, 발산할수록 100점에 부드럽게 수렴
-        trend_ratio = math.tanh(energy_density) # -1 ~ 1 사이로 부드럽게 압축
+        # 에너지 밀도 (정배열 강도)
+        energy_density = (gap_short + gap_long) / atr_p 
+        trend_ratio = math.tanh(energy_density)
         base_score = 50 + (trend_ratio * 50)
 
-        # 3. [개정] 동적 이격 감쇄 (Exponential Penalty)
-        total_dispersal = (e5 - e60) / e60 * 100
+        # [Refactor] 과열 필터링을 위한 총 이격도
+        total_dispersal = ind.calculate_disparity(e5, e60)
         dispersal_ratio = total_dispersal / atr_p 
         
-        # 이격 비율이 ATR의 2배 이상일 때 패널티 시작
+        # 감쇄 로직: 이격이 너무 벌어지면 점수 삭감
         overheat_factor = max(0.0, dispersal_ratio - 2.0)
-        
-        # [핵심] 선형 penalty = overheat_factor / 2.0 대신 지수 감쇄 적용
-        # 이격이 심해져도 최소 30점(Floor)은 보존하여 밸런스 파괴 방지
         decay_penalty = math.exp(-overheat_factor * 0.5) 
         alignment_score = max(30.0, base_score * decay_penalty)
 
-        # 4. 장기 추세 수렴 가중치 (기울기 반영 로직 유지)
+        # [Refactor] 장기 이평선 기울기 계산 위임
         if e60 > 0:
-            slope_60 = (e60 - prev_e60) / e60 * 1000
-            slope_intensity = max(-1.0, min(1.0, slope_60))
+            slope_intensity = max(-1.0, min(1.0, ind.calculate_slope(e60, prev_e60)))
             slope_factor = 1.0 + (slope_intensity * 0.2)
         else:
             slope_factor = 1.0
@@ -376,60 +351,44 @@ class TradingStrategy:
         return float(round(max(0, min(100, alignment_score * slope_factor)), 2))
 
     def _calculate_dynamic_weights(self, metrics: Dict) -> Dict[str, float]:
-        """
-        [strategy] 지표 신뢰도 기반 동적 가중치
-        각 지표의 현재 상태가 '얼마나 믿을만한가'를 계산하여 비중을 조절합니다.
-
-        """
+        """[Weights] 시장 상황에 따른 지표별 가중치 조절"""
         vol_f = metrics.get('vol_factor', 1.0)
         atr_p = metrics.get('atr_percent', 3.0)
         price = metrics.get('price', 0)
         vwap = metrics.get('vwap', 0)
         
-        # 1. 공격 지표 중요도 (Alpha & Supply)
-        # 거래량이 터질수록(vol_f > 1) 공격 지표에 더 큰 확신을 가짐
         imp_alpha = 1.0 * vol_f
         imp_supply = 1.0 * vol_f
         
-        # 2. 방어 지표 중요도 (VWAP)
-        # 평단가에 바짝 붙어 있을수록(deviation -> 0) VWAP 지표의 결정권 강화
-        deviation = abs(price - vwap) / vwap * 100 if vwap > 0 else 0
-        imp_vwap = 1.5 / (1 + (deviation / max(0.1, atr_p))) # ATR 대비 이격 비례
+        # [Refactor] VWAP 이격도 활용
+        deviation = abs(ind.calculate_disparity(price, vwap)) if vwap > 0 else 0
+        imp_vwap = 1.5 / (1 + (deviation / max(0.1, atr_p)))
 
-        # 3. 추세 지표 중요도 (데이터 비례 및 과열 감쇄 모델)
         e5 = metrics.get('ema5', 0)
         e20 = metrics.get('ema20', 0)
         e60 = metrics.get('ema60', 0)
 
-        # 1) 정렬 품질(Alignment Quality) - 데이터 비례 산출
-        # 이평선이 꼬인 정도에 따라 0.6~1.0 사이를 유동적으로 움직임
-        gap1, gap2 = e5 - e20, e20 - e60
+        gap1 = e5 - e20
+        gap2 = e20 - e60
         denom = (abs(gap1) + abs(gap2))
         alignment_ratio = abs(gap1 + gap2) / denom if denom > 0 else 0.5
         is_ordered = 0.6 + (0.4 * alignment_ratio)
 
-        # 2) 확장성(Expansion) - ATR 비례 과열 감쇄 모델
-        # 퍼센트 상수가 아닌, "평소 변동성 대비 몇 배나 벌어졌나"를 잣대로 사용
-        raw_gap = abs(e5 - e60) / e60 * 100 if e60 > 0 else 0
-        vol_multiple = raw_gap / atr_p if atr_p > 0 else 0
+        # 이평선 확장 국면 평가
+        raw_gap = abs(ind.calculate_disparity(e5, e60)) if e60 > 0 else 0
+        vol_multiple = calculate_volatility_ratio(raw_gap, atr_p) if atr_p > 0 else 0
 
-        # [핵심] 구간별 동적 가중치 (상수 제거)
+        # [Logic] 과열 구간 진입 시 Trend 가중치 축소
         if vol_multiple <= 1.5:
-            # 추세 형성기: 이격이 벌어질수록 신뢰도 상승 (가중치 1.0 ~ 1.15)
             expansion_factor = 1.0 + (vol_multiple * 0.1)
         elif vol_multiple <= 2.5:
-            # 추세 안정기: 최적의 확산 상태 유지 (가중치 1.15)
             expansion_factor = 1.15
         else:
-            # 과열 경계기: ATR의 2.5배를 넘어서면 "이미 늦었다"고 판단하여 가중치 급격히 삭감
-            # 이 로직이 작동하면 Buy Score가 80점을 넘기 힘들어져서 고점 매수를 방지함
             expansion_factor = 1.15 - ((vol_multiple - 2.5) * 0.4)
-            expansion_factor = max(0.4, expansion_factor) # 최소 방어선
+            expansion_factor = max(0.4, expansion_factor)
 
-        # 3) 최종 Trend 중요도 결합
         imp_trend = is_ordered * expansion_factor
 
-        # 4. 가중치 정규화 (Normalization)
         total_imp = imp_alpha + imp_supply + imp_vwap + imp_trend
         
         return {
@@ -440,56 +399,66 @@ class TradingStrategy:
         }
     
     def _get_momentum(self, stock_code: str, current_score: float) -> float:
-        """
-        [strategy] 내부 이력을 바탕으로 평균값 대비 모멘텀을 산출합니다.
-        
-        """
-        # 1. 해당 종목의 이전 이력 가져오기
+        """[Momentum] 점수의 변화량(미분값) 측정"""
         scores = self.history.get(stock_code, [])
         
         if not scores:
-            # 첫 데이터인 경우 이력에 추가만 하고 모멘텀 0 반환
             self.history[stock_code] = [current_score]
             return 0.0
         
-        # 2. 평균 대비 모멘텀 계산 (사용자 제안 로직)
         avg_prev_score = sum(scores) / len(scores)
         momentum = round(current_score - avg_prev_score, 1)
         
-        # 3. 이력 갱신 (최근 5개만 유지하여 메모리 효율화)
         scores.append(current_score)
-        self.history[stock_code] = scores[-5:]
+        self.history[stock_code] = scores[-5:] # 최근 5개만 유지
         
         return momentum
         
     def evaluate(self, metrics: Dict) -> Dict:
         """
-        [Strategy] 3단계 통합 평가: 컨텍스트 -> 계산/이력관리 -> 전략적 판정
-        
+        [Final Evaluation] 통합 평가 프로세스 (v2.3)
+        1. 점수 계산 (Indicators & Multiplicative Model)
+        2. 모멘텀 확인
+        3. 전략적 판정 (차등 진입 & 과열 필터 적용)
         """
         stock_code = metrics['stock_code']
         
-        # 1. 종합 점수 산출 (기존 로직)
+        # 1. 점수 산출
         score, score_detail = self._calculate_conviction_score(metrics)
         
-        # 2. 내부 이력 활용 모멘텀 산출
+        # 2. 모멘텀 산출
         momentum = self._get_momentum(stock_code, score)
         
-        # 3. 전략적 판정 (모멘텀 필터 적용)
+        # 3. 전략적 판정
         status = "관망"
         is_buy_signal = False
 
-        if score >= self.curr_strong_th:
-            # [전략 필터] 점수는 높으나 기세가 꺾였다면 진입 차단 (설거지 방지)
-            if momentum >= 0:
-                status = "🔥강력추천"
-                is_buy_signal = True
-            else:
+        # [Analysis Logic] 주 동인 식별
+        primary_driver = max(score_detail, key=score_detail.get)
+
+        # [Analysis Logic] 차등 진입 기준 적용
+        # Supply(수급)가 주도하는 경우 -> 기준 완화 (기회 포착)
+        # Trend/Alpha가 주도하는 경우 -> 기준 강화 (보합 방지)
+        if primary_driver == 'supply':
+            effective_threshold = self.curr_supply_th
+        else:
+            effective_threshold = self.curr_strict_th
+
+        if score >= effective_threshold:
+            # [Filter 1] 기세 확인 (꺾인 놈은 안 산다)
+            if momentum < 0:
                 status = "⚠️고점경계"
                 is_buy_signal = False
+            # [Filter 2] Trend 과열 방지 (분석 결과: Trend 점수 너무 높으면 수익률 하락)
+            elif score_detail['trend'] >= 90.0:
+                status = "⚠️추세과열"
+                is_buy_signal = False
+            else:
+                status = "🔥강력추천"
+                is_buy_signal = True
                 
         elif score >= self.curr_alert_th:
-            # [전략 포착] 점수가 부족해도 기세가 폭발하면 진입 (주도주 포착)
+            # 점수는 부족하지만 기세가 폭발적일 때
             if momentum >= self.momentum_threshold:
                 status = "🚀수급폭발"
                 is_buy_signal = False
@@ -503,5 +472,10 @@ class TradingStrategy:
                 "status": status,
                 'score_detail': score_detail,
                 "regime": self._current_regime,
-                "is_buy_signal": is_buy_signal
+                "is_buy_signal": is_buy_signal,
+                "primary_driver": primary_driver
             }
+
+# Helper function for calculate_dynamic_weights context
+def calculate_volatility_ratio(val, atr):
+    return ind.calculate_volatility_ratio(val, atr)

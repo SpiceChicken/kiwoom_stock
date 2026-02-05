@@ -4,8 +4,9 @@ from enum import Enum
 from datetime import datetime
 from collections import deque
 from typing import List, Dict
+
 from .collector import MarketDataCollector
-from ..core.indicators import Indicators
+from kiwoom_stock.core import indicators as ind  # [Refactor] 순수 함수형 지표 모듈 사용
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
@@ -22,13 +23,12 @@ class MarketAnalyzer:
     """[Helper] 시장 환경 분석기: 레짐 진단 및 수급 캐싱 담당"""
     def __init__(self, client, market_config: Dict):
         self.collector = MarketDataCollector(client) # 수집기 주입
-        self.trend_calc = Indicators(14)
         self.market_proxy_code = market_config.get("proxy_code", "069500")
         self.market_rsi = 50.0
         self.market_regime = MarketRegime.UNKNOWN
         self.market_atr_history = deque(maxlen=20)
         self.supply_cache: Dict[str, Dict] = {}
-        self.last_supply_update = datetime.now() # [추가] 마지막 업데이트 시간 추적
+        self.last_supply_update = datetime.now() # 마지막 업데이트 시간 추적
         self.supply_cache[self.market_proxy_code] = self._get_default_supply()
 
     def _get_default_supply(self) -> Dict:
@@ -71,7 +71,6 @@ class MarketAnalyzer:
     def update_regime(self):
         """RSI와 ATR 분석을 통한 시장 성격 정의
         수집된 데이터를 바탕으로 시장 성격만 정의
-        
         """
         try:
             # 1. 수집 위임
@@ -80,8 +79,12 @@ class MarketAnalyzer:
             if not chart_data: return
 
             # 2. 데이터 정제 및 지표 계산 (I/O 없음)
-            closes = [abs(float(item['cur_prc'])) for item in chart_data]
-            self.market_rsi = self.trend_calc.calculate(closes)
+            # [Refactor] indicators 모듈은 [과거 -> 최신] 순서를 기대하므로 역순 정렬
+            # API에서 받은 chart_data는 보통 [최신, ..., 과거] 순서임
+            closes = [abs(float(item['cur_prc'])) for item in chart_data][::-1]
+            
+            # [Refactor] 함수형 RSI 호출
+            self.market_rsi = ind.calculate_rsi(closes, period=14)
             
             # ATR 계산 로직 (수치 계산에만 집중)
             tr_list = []
@@ -91,7 +94,7 @@ class MarketAnalyzer:
                 pc = abs(float(chart_data[i-1]['cur_prc']))
                 tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
             
-            atr = statistics.mean(tr_list[-14:]) if tr_list else 0.0
+            atr = statistics.mean(tr_list[:14]) if tr_list else 0.0
             self.market_atr_history.append(atr)
             avg_atr = statistics.mean(self.market_atr_history) if len(self.market_atr_history) >= 5 else atr
             
@@ -126,6 +129,7 @@ class MarketAnalyzer:
                 chart_5m = self.collector.fetch_minute_chart(stock_code, tic="5") # 5분봉 데이터
                 chart_1m = self.collector.fetch_minute_chart(stock_code, tic="1") # 1분봉 데이터
 
+                # [Refactor] indicators 모듈 사용을 위해 [과거 -> 최신] 순으로 정렬
                 chart_60m.reverse()
                 chart_5m.reverse()
                 chart_1m.reverse()
@@ -166,35 +170,18 @@ class MarketAnalyzer:
         self.supply_cache[code]['chart_data'] = chart
 
     def _update_program_data(self, code: str, pgm_map: Dict):
-        """
-        [Atomic Update] 특정 종목의 프로그램 매매 데이터를 캐시에 반영
-        :param code: 종목코드
-        :param pgm_map: Collector가 반환한 프로그램 매매 맵핑 데이터
-        """
+        """[Atomic Update] 프로그램 매매 데이터"""
         try:
             if code in pgm_map:
-                # 해당 종목의 프로그램 데이터가 존재하면 캐시 업데이트
                 self.supply_cache[code]['pgm_data'] = pgm_map[code]
-            else:
-                # 데이터가 없을 경우 이전 상태를 유지하거나 로그 기록
-                # (장 시작 직후나 거래가 없는 경우 발생 가능)
-                pass
         except Exception as e:
             logger.error(f"[{code}] pgm_data 캐시 구조가 초기화 실패: {e}")
 
     def _update_foreign_data(self, code: str, frgn_map: Dict):
-        """
-        [Atomic Update] 특정 종목의 외국계 창구 데이터를 캐시에 반영
-        :param code: 종목코드
-        :param frgn_map: Collector가 반환한 외국계 창구 맵핑 데이터
-        """
+        """[Atomic Update] 외국계 창구 데이터"""
         try:
             if code in frgn_map:
-                # 해당 종목의 외국계 데이터가 존재하면 캐시 업데이트
                 self.supply_cache[code]['foreign_data'] = frgn_map[code]
-            else:
-                # 외국계 창구 발생 내역이 없는 경우
-                pass
         except Exception as e:
             logger.error(f"[{code}] foreign_data 캐시 구조가 초기화 실패: {e}")
 
@@ -206,7 +193,6 @@ class MarketAnalyzer:
             prices = [d['cur_prc'] for d in chart_1m]
             volumes = [d['trde_qty'] for d in chart_1m]
 
-            # vol_factor 선계산 (VWAP Score에서도 참조 가능하도록)
             avg_prev_vol = max(1.0, sum(volumes[-5:-1]) / 4)
             curr_vol = volumes[-1]
             vol_factor = min(2.0, curr_vol / avg_prev_vol)
@@ -219,19 +205,16 @@ class MarketAnalyzer:
 
     def _update_vwap_data(self, code: str, chart_5m: List[Dict]):
         """VWAP(거래대금가중평균) 및 현재가 독립 업데이트"""
-        # VWAP 연산에 필요한 5분봉 데이터 수집
         try:
             if not chart_5m: return
 
             prices = [abs(float(d['cur_prc'])) for d in chart_5m]
             vols = [float(d['trde_qty']) for d in chart_5m]
 
-            # VWAP 산출: Sum(가격 * 거래량) / Sum(거래량)
             total_val = sum(p * v for p, v in zip(prices, vols))
             total_vol = sum(vols)
             vwap = total_val / total_vol if total_vol > 0 else prices[-1]
 
-            # 캐시 반영 (현재가 포함)
             self.supply_cache[code]['prev_vwap'] = self.supply_cache[code]['vwap']
             self.supply_cache[code]['vwap'] = round(vwap, 2)
             self.supply_cache[code]['price'] = prices[-1]
@@ -247,14 +230,13 @@ class MarketAnalyzer:
             if not chart_60m:
                 return
 
-            # 2. 데이터 정렬 (과거 -> 현재 순서) 및 가격 리스트 추출
-            # Collector에서 이미 clean_numeric 가공이 완료된 상태임
+            # chart_60m은 이미 reverse() 되어 [과거 -> 최신] 상태임
             prices = [d['cur_prc'] for d in chart_60m]
 
-            # 3. 내재화된 trend_calc(Indicators 객체)를 사용하여 RSI 계산
-            # RSI 계산에 필요한 최소 데이터(period) 확보 여부 확인
-            if len(prices) > self.trend_calc.period:
-                rsi_val = self.trend_calc.calculate(prices)
+            # [Refactor] indicators 모듈 사용
+            # RSI 계산에 필요한 최소 데이터(15개 이상 권장) 확보 여부 확인
+            if len(prices) > 14:
+                rsi_val = ind.calculate_rsi(prices, period=14)
                 self.supply_cache[code]['trend_rsi'] = round(rsi_val, 2)
                 
         except Exception as e:
@@ -265,18 +247,20 @@ class MarketAnalyzer:
             """종목별 동적 변동성(ATR%) 업데이트"""
             if not chart_5m: return
 
+            # chart_5m은 [과거 -> 최신] 상태
             highs = [d['high_pric'] for d in chart_5m]
             lows = [d['low_pric'] for d in chart_5m]
             closes = [d['cur_prc'] for d in chart_5m]
 
-            # atr_percent 계산 및 저장
-            atr_p = self.trend_calc.calculate_atr_percent(highs, lows, closes)
+            # [Refactor] indicators 모듈 사용
+            atr_p = ind.calculate_atr_percent(highs, lows, closes, period=14)
             self.supply_cache[code]['atr_percent'] = atr_p
         except Exception as e:
             logger.error(f"[{code}] 동적 변동성(ATR%) 업데이트 중 오류: {e}")
 
     def _update_trend_data(self, code: str, chart_5m: List[Dict]):
-        # 60분봉 혹은 5분봉 데이터를 충분히 가져옴 (예: 120개)
+        """이동평균선(EMA) 업데이트"""
+        # 60분봉 혹은 5분봉 데이터를 충분히 가져옴 (예: 60개 이상)
         if len(chart_5m) < 60: return
 
         prices = [d['cur_prc'] for d in chart_5m]
@@ -284,10 +268,10 @@ class MarketAnalyzer:
         # 1. 이전 EMA 60 보존 (기울기 계산용)
         self.supply_cache[code]['prev_ema60'] = self.supply_cache[code].get('ema60', 0)
 
-        # 2. 지표 계산기를 통해 각 평단 산출
-        self.supply_cache[code]['ema5'] = self.trend_calc.calculate_ema(prices, 5)
-        self.supply_cache[code]['ema20'] = self.trend_calc.calculate_ema(prices, 20)
-        self.supply_cache[code]['ema60'] = self.trend_calc.calculate_ema(prices, 60)
+        # 2. [Refactor] indicators 모듈을 통해 EMA 계산
+        self.supply_cache[code]['ema5'] = ind.calculate_ema(prices, 5)
+        self.supply_cache[code]['ema20'] = ind.calculate_ema(prices, 20)
+        self.supply_cache[code]['ema60'] = ind.calculate_ema(prices, 60)
         
         # 3. [방어] 첫 실행 시 slope 노이즈 방지
         if self.supply_cache[code]['prev_ema60'] == 0:

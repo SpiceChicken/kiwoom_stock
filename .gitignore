@@ -35,6 +35,7 @@ config/
 *.db
 logs/
 tests/
+etc/
 
 # IDEs
 .vscode/
