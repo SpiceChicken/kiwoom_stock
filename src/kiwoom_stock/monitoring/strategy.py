@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 class TradingStrategy:
     """
     [Strategy] 트레이딩 전략 (v2.5 Modularized)
-    - 점수 계산 로직을 scoring 모듈로 위임
-    - SupplyData 데이터 클래스 활용
+    - 역할: Analyzer가 수집한 데이터를 바탕으로 매수/매도/관망 여부를 '판단'
+    - 특징 1: 점수 계산(Calculation) 로직은 'scoring' 모듈로 위임하여 코드를 경량화
+    - 특징 2: 'SupplyData' 데이터 클래스를 사용하여 타입 안전성 확보
+    - 특징 3: 차등 진입 전략(Primary Driver) 및 과열 필터 적용
     """
     
     def __init__(self, strategy_config: Dict):
@@ -22,7 +24,7 @@ class TradingStrategy:
         self.momentum_threshold = strategy_config.get("momentum_threshold", 10.0)
         self.debug_mode = strategy_config.get("debug_mode", False)
 
-        # 시간 설정
+        # 시간 설정 (장 마감 3분 전 강제 청산 등)
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
         self.exit_time_obj = time.fromisoformat(exit_str)
         dummy_dt = datetime.combine(datetime.today(), self.exit_time_obj)
@@ -31,11 +33,12 @@ class TradingStrategy:
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config = {}
         
-        # 임계값 초기화
-        self.curr_strict_th = 87.0
-        self.curr_supply_th = 82.0
-        self.curr_alert_th = 75.0
+        # [Thresholds] 진입 임계값 초기화 (87.0/82.0 이원화)
+        self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 (엄격)
+        self.curr_supply_th = 82.0  # Supply 주도 시 (완화)
+        self.curr_alert_th = 75.0   # 관심 종목 등록 기준
 
+        # 매매 규칙 로드 (익절, 손절, 점수 감쇠율)
         self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025)
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.015)
@@ -45,17 +48,21 @@ class TradingStrategy:
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
 
-        # 메모리(잔상 효과) 관리 - Strategy의 상태(State)로 유지
+        # [Memory] 지표 잔상 효과 (호가 공백 보정용 상태 저장)
         self._alpha_memory: Dict[str, float] = {}
         self.alpha_decay = strategy_config.get("alpha_decay", 0.8)
         self._supply_memory: Dict[str, float] = {}
         self.supply_decay = strategy_config.get("supply_decay", 0.8)
 
         if self.debug_mode:
-            logger.warning("🚨 [DEBUG MODE] Strategy initialized in TEST mode.")
+            logger.warning("🚨 [DEBUG MODE] Strategy initialized in TEST mode. (Time checks bypassed)")
 
     def update_context(self, regime: MarketRegime):
-        """시장 레짐 변경 시 설정 업데이트"""
+        """
+        [Context Update] 시장 레짐에 따라 임계값 동적 조정
+        - 디버그 모드일 경우: 설정 파일의 'debug_thresholds'를 강제 적용
+        - 일반 모드일 경우: 레짐(강세/약세)에 맞는 설정 로드
+        """
         if self.debug_mode:
             if self._current_regime != "DEBUG_MODE":
                 self._current_regime = "DEBUG_MODE"
@@ -73,42 +80,59 @@ class TradingStrategy:
             regimes = self.settings.get("regimes", {})
             self._cached_config = regimes.get(regime_val, regimes.get("default", {}))
             
+            # 설정 파일 값 우선 적용 (없으면 기본값 87/82 유지)
             config_th = self._cached_config.get("thresholds", {})
             self.curr_strict_th = config_th.get('strong', 87.0)
             self.curr_supply_th = config_th.get('strong_supply', 82.0)
             self.curr_alert_th = config_th.get('alert', 75.0)
             
-            logger.info(f"Strategy Updated: {regime_val}")
+            logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}, Supply: {self.curr_supply_th}")
 
-    # ... (Time Check Methods 생략: is_monitoring_time 등 기존과 동일) ...
+    # --- Time & Risk Checks ---
     def is_monitoring_time(self) -> bool:
+        """장 운영 시간 체크 (디버그 모드 시 무조건 True)"""
         if self.debug_mode: return True
         now = datetime.now()
         if now.weekday() >= 5: return False
         return time(8, 30) <= now.time() <= self.exit_time_obj
 
     def is_trading_window(self) -> bool:
+        """신규 진입 가능 시간 체크 (15:00 마감)"""
         if self.debug_mode: return True
         return datetime.now().time() < self.deadline_time
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
+        """계좌 전체 손실 한도 초과 여부 확인"""
         return total_pnl <= self.total_loss_limit
 
     def get_exit_reason(self, pos: Position, strong_threshold: float) -> Optional[str]:
-        # (기존 로직 유지)
+        """
+        [Exit Logic] 청산 조건 판별
+        1. Time Cut: 15:27 강제 청산 (디버그 모드 제외)
+        2. Stop Loss: 손절선 이탈
+        3. Take Profit: 목표가 도달 (단, 점수가 높으면 홀딩하여 수익 극대화)
+        4. Score Decay: 점수 급락 시 청산 (수익 중일 땐 더 민감하게 반응)
+        """
         profit_rate = (pos.sell_price / pos.buy_price - 1)
-        if datetime.now().time() >= self.forced_exit_time:
+        
+        if not self.debug_mode and datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
+            
         if profit_rate <= self.stop_loss_rate:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
+            
         if profit_rate >= self.target_profit_rate:
+            # 점수가 여전히 강력하면(strong_threshold 이상) 더 보유
             if pos.current_score >= strong_threshold:
                 return None 
             return f"Take Profit (+{profit_rate*100:.1f}%)"
         
+        # 점수 하락 감지 (수익권에서는 Decay 민감도 1.5배 증가)
         current_decay = self.decay_rate
         if profit_rate >= 0.01: current_decay *= 1.5
         relative_threshold = pos.buy_score * (1 - current_decay)
+        
+        # 절대 기준(alert)과 상대 기준(relative) 중 낮은 값을 이탈 기준으로 설정
         final_sell_threshold = min(relative_threshold, self.curr_alert_th)
 
         if pos.current_score < final_sell_threshold:
@@ -116,8 +140,11 @@ class TradingStrategy:
         return None
 
     def _calculate_conviction_score(self, data: SupplyData) -> Tuple[float, Dict]:
-        """[Delegation] 점수 계산을 scoring 모듈에 위임"""
-        # 메모리 값 조회
+        """
+        [Delegation] 점수 계산의 상세 로직은 'scoring' 모듈에게 위임
+        - Strategy는 이전 점수(Memory)를 관리하고, 결과를 취합하는 역할만 수행
+        """
+        # 메모리(이전 점수) 조회
         prev_alpha = self._alpha_memory.get(data.stock_code, 0.0)
         prev_supply = self._supply_memory.get(data.stock_code, 0.0)
 
@@ -131,7 +158,7 @@ class TradingStrategy:
         self._alpha_memory[data.stock_code] = a_score
         self._supply_memory[data.stock_code] = s_score
 
-        # 동적 가중치 및 최종 점수 계산
+        # 동적 가중치 계산 및 승산형(Multiplicative) 총점 산출
         w = scoring.calculate_dynamic_weights(data)
         
         final_score = (
@@ -147,6 +174,7 @@ class TradingStrategy:
         return round(final_score, 1), details
     
     def _get_momentum(self, stock_code: str, current_score: float) -> float:
+        """점수 변화량(모멘텀) 측정"""
         scores = self.history.get(stock_code, [])
         if not scores:
             self.history[stock_code] = [current_score]
@@ -154,37 +182,49 @@ class TradingStrategy:
         avg_prev_score = sum(scores) / len(scores)
         momentum = round(current_score - avg_prev_score, 1)
         scores.append(current_score)
-        self.history[stock_code] = scores[-5:]
+        self.history[stock_code] = scores[-5:] # 최근 5개 점수만 유지
         return momentum
         
     def evaluate(self, metrics: SupplyData) -> Dict:
-        """통합 평가 (Input type changed to SupplyData)"""
+        """
+        [Final Verdict] 통합 평가 (Analyzer가 전달한 SupplyData 기반)
+        1. 점수 및 모멘텀 산출
+        2. 주 동인(Primary Driver) 분석
+        3. 차등 진입 기준 적용 (Supply vs Trend)
+        4. 필터링 (과열, 하락세 등) 후 최종 매수 신호 생성
+        """
         stock_code = metrics.stock_code
         score, score_detail = self._calculate_conviction_score(metrics)
         momentum = self._get_momentum(stock_code, score)
         
         status = "관망"
         is_buy_signal = False
+        
+        # 주 동인 식별 (점수를 견인한 1등 공신)
         primary_driver = max(score_detail, key=score_detail.get)
 
+        # [Logic] 차등 진입 전략
+        # - Supply 주도: 완화된 기준 (82.0) 적용 -> 기회 포착
+        # - Trend 주도: 엄격한 기준 (87.0) 적용 -> 고점 추격 방지
         if primary_driver == 'supply':
             effective_threshold = self.curr_supply_th
         else:
             effective_threshold = self.curr_strict_th
 
+        # 최종 판정
         if score >= effective_threshold:
             if momentum < 0:
-                status = "⚠️고점경계"
+                status = "⚠️고점경계" # 점수는 높지만 꺾이는 중
                 is_buy_signal = False
             elif score_detail['trend'] >= 90.0:
-                status = "⚠️추세과열"
+                status = "⚠️추세과열" # [Filter] Trend 과열 필터 (평균회귀 위험)
                 is_buy_signal = False
             else:
                 status = "🔥강력추천"
                 is_buy_signal = True
         elif score >= self.curr_alert_th:
             if momentum >= self.momentum_threshold:
-                status = "🚀수급폭발"
+                status = "🚀수급폭발" # 점수 부족하나 기세가 좋음
                 is_buy_signal = False
             else:
                 status = "👀관심"
