@@ -5,7 +5,7 @@ import json
 import logging
 
 from kiwoom_stock.api.client import KiwoomClient
-from kiwoom_stock.monitoring.engine import MultiTimeframeRSIMonitor
+from kiwoom_stock.monitoring.engine import TradingEngine
 from kiwoom_stock.utils import setup_structured_logging
 
 # 로거 설정
@@ -40,7 +40,7 @@ def main():
                 )
 
         # 엔진 초기화 (이후 발생하는 에러는 네트워크가 아닌 로직 에러임)
-        monitor = MultiTimeframeRSIMonitor(client, config)
+        monitor = TradingEngine(client, config)
         
         logger.info("🚀 키움 증권 올-웨더 모니터링 시스템 가동 시작")
 
