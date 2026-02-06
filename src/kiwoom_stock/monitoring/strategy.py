@@ -37,6 +37,7 @@ class TradingStrategy:
         self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 (엄격)
         self.curr_supply_th = 82.0  # Supply 주도 시 (완화)
         self.curr_alert_th = 75.0   # 관심 종목 등록 기준
+        self.curr_interest_th = 65.0  # 절대 이탈 기준선 (기본값)
 
         # 매매 규칙 로드 (익절, 손절, 점수 감쇠율)
         self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
@@ -85,6 +86,7 @@ class TradingStrategy:
             self.curr_strict_th = config_th.get('strong', 87.0)
             self.curr_supply_th = config_th.get('strong_supply', 82.0)
             self.curr_alert_th = config_th.get('alert', 75.0)
+            self.curr_interest_th = config_th.get('interest', 65.0)
             
             logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}, Supply: {self.curr_supply_th}")
 
@@ -115,28 +117,40 @@ class TradingStrategy:
         """
         profit_rate = (pos.sell_price / pos.buy_price - 1)
         
+        # 1. 시간 청산
         if not self.debug_mode and datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
             
+        # 2. 손절매
         if profit_rate <= self.stop_loss_rate:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
             
+        # 3. 익절매 (Trailing Logic)
         if profit_rate >= self.target_profit_rate:
-            # 점수가 여전히 강력하면(strong_threshold 이상) 더 보유
             if pos.current_score >= strong_threshold:
                 return None 
             return f"Take Profit (+{profit_rate*100:.1f}%)"
         
-        # 점수 하락 감지 (수익권에서는 Decay 민감도 1.5배 증가)
-        current_decay = self.decay_rate
-        if profit_rate >= 0.01: current_decay *= 1.5
+        # 4. 점수 하락 감지 (Score Decay) - [수정됨]
+        current_decay = self.decay_rate  # 기본값 (예: 0.25)
+        
+        # 수익권에서는 민감도를 높여서(Decay 감소) 이익을 빠르게 확정
+        # 기존 (*= 1.5) -> 수정 (*= 0.5): 25% 하락 허용 -> 12.5% 하락만 허용
+        if profit_rate >= 0.01:
+            current_decay *= 0.5 
+            
         relative_threshold = pos.buy_score * (1 - current_decay)
         
-        # 절대 기준(alert)과 상대 기준(relative) 중 낮은 값을 이탈 기준으로 설정
-        final_sell_threshold = min(relative_threshold, self.curr_alert_th)
+        # 절대 기준선을 Alert(75) -> Interest Threshold로 완화
+        # 잦은 조기 털림 방지
+        absolute_threshold = self.curr_interest_th
+
+        # 둘 중 더 낮은 값을 적용하여 웬만하면 버티되, 
+        # 수익권이거나 점수가 심각하게 망가지면 매도
+        final_sell_threshold = min(relative_threshold, absolute_threshold)
 
         if pos.current_score < final_sell_threshold:
-            return f"Score Decay (-{current_decay*100:.0f}%)"
+            return f"Score Decay (-{current_decay*100:.1f}%)"
         return None
 
     def _calculate_conviction_score(self, data: SupplyData) -> Tuple[float, Dict]:
