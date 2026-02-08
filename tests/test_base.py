@@ -1,3 +1,4 @@
+# tests/test_base.py
 import pytest
 import requests_mock
 from kiwoom_stock.api.base import BaseClient
@@ -8,11 +9,13 @@ def test_api_error_handling(mocker):
     mock_auth = mocker.Mock()
     mock_auth.get_token.return_value = "fake_token"
     
-    client = BaseClient(mock_auth, "https://mockapi.kiwoom.com")
+    # [수정] Mock URL과 Base URL을 일치시킴
+    base_url = "https://mockapi.kiwoom.com"
+    client = BaseClient(mock_auth, base_url)
     
     with requests_mock.Mocker() as m:
-        # 서버가 에러 코드를 주는 상황 시뮬레이션
-        m.post("https://api.com/test", json={"return_code": -100, "return_message": "에러발생"})
+        # [수정] 클라이언트가 호출할 URL을 정확히 가로채도록 설정
+        m.post(f"{base_url}/test", json={"return_code": -100, "return_message": "에러발생"})
         
         with pytest.raises(KiwoomAPIResponseError) as exc:
             client.request("/test", "api_id", {})

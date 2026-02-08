@@ -34,7 +34,6 @@ config/
 .env
 *.db
 logs/
-tests/
 etc/
 
 # IDEs

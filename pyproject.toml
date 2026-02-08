@@ -26,6 +26,7 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-mock",
+    "requests-mock",
     "flake8",
     "mypy",
     "types-requests",
