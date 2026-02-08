@@ -35,13 +35,15 @@ class KiwoomClient:
         # socket.create_connection은 'https://...' 형태를 인식하지 못합니다.
         parsed_url = urlparse(base_url)
         host = parsed_url.hostname
+        # 포트가 명시되어 있으면 그 포트를, 없으면 443(https) 기본값 사용
+        port = parsed_url.port if parsed_url.port else 443 
         
-        logger.info(f"🌐 시스템 준비 상태 점검 중... (대상: {host})")
+        logger.info(f"🌐 시스템 준비 상태 점검 중... (대상: {host}:{port})")
         
         while time.time() - start_time < timeout:
             try:
                 # 단계 1: 기본 소켓 연결 확인 (DNS 및 물리망 체크)
-                socket.create_connection((host, 443), timeout=5)
+                socket.create_connection((host, port), timeout=5)
                 
                 # 단계 2: 실전 토큰 발급 시도 (인증 성공 여부 체크)
                 # Authenticator 내부에 토큰 발급 로직이 수행되도록 호출

@@ -26,7 +26,7 @@ def main():
                 strategy_params = json.load(f)
         except FileNotFoundError as e:
             logger.critical(f"설정 파일을 찾을 수 없습니다: {e}")
-            return
+            sys.exit(1)
 
         # 2-3. 설정 통합
         config = {**system_config, **strategy_params}

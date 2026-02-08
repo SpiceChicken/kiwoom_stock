@@ -65,7 +65,8 @@ class TradeLogger:
         )
         cursor = self.conn.execute(query, params)
         self.conn.commit()
-        return cursor.lastrowid
+        
+        return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
 
     def record_sell(self, pos: Position):
         """매도 시 해당 레코드를 'CLOSED' 상태로 업데이트합니다."""
