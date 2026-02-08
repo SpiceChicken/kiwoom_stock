@@ -33,7 +33,7 @@ class Notifier:
         except Exception as e:
             logger.error(f"Slack 전송 실패: {e}")
 
-    def _send_slack_blocks(self, blocks: List[Dict]):
+    def _send_slack_blocks(self, blocks: List[Dict[str, Any]]):
         """Slack Block Kit 메시지 전송 헬퍼"""
         if not self.webhook_url:
             return
@@ -140,7 +140,7 @@ class Notifier:
 
     def notify_error(self, message: str):
         """메인 루프 내 일반 에러 알림"""
-        blocks = [
+        blocks: List[Dict[str, Any]] = [
             {
                 "type": "section",
                 "text": {
@@ -154,7 +154,7 @@ class Notifier:
 
     def notify_critical(self, message: str):
         """시스템 장애(킬스위치): 강력한 경고 디자인"""
-        blocks = [
+        blocks: List[Dict[str, Any]] = [
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"🚨 *[SYSTEM STOP]*\n*사유:* {message}"}

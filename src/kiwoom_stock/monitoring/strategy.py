@@ -45,7 +45,7 @@ class TradingStrategy:
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.03)
 
         self.history: Dict[str, List[float]] = {}
-        self.total_loss_limit = strategy_config.get("total_loss_limit", -5)
+        self.total_loss_limit: float = float(strategy_config.get("total_loss_limit", -5))
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
 
