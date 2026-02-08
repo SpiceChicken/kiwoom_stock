@@ -2,7 +2,7 @@ import logging
 import requests
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from kiwoom_stock.monitoring.manager import Position
 
@@ -86,7 +86,7 @@ class Notifier:
 
     def notify_buy(self, buy_data: Dict):
         """매수 알림: 시각적 대시보드 형태 (Block Kit)"""
-        blocks = [
+        blocks = List[Dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {"type": "plain_text", "text": f"🔵 매수 신호 발생 ({buy_data['stock_name']})"}
@@ -117,7 +117,7 @@ class Notifier:
         emoji = "🔥" if profit > 0 else "📉"
         status_text = "수익 실현" if profit > 0 else "손절 실행"
         
-        blocks = [
+        blocks: List[Dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {"type": "plain_text", "text": f"{emoji} {status_text} ({pos.stock_name})"}

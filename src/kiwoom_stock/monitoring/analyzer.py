@@ -23,7 +23,7 @@ class MarketAnalyzer:
         self.market_proxy_code = market_config.get("proxy_code", "069500") # KODEX 200 등 시장 대표 ETF
         self.market_rsi = 50.0
         self.market_regime = MarketRegime.UNKNOWN
-        self.market_atr_history = deque(maxlen=20)
+        self.market_atr_history: deque[float] = deque(maxlen=20)
         
         # [Refactor] Dict[str, Dict] -> Dict[str, SupplyData]
         # 종목 코드를 키로, 정형화된 데이터 객체(SupplyData)를 값으로 저장

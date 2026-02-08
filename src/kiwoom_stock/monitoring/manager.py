@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -26,6 +26,8 @@ class Position:
     sell_time: Optional[str] = None
     sell_reason: Optional[str] = None
     current_score: Optional[float] = None
+    # DB에는 없지만, 프로그램 실행 중(Runtime)에만 사용하는 메모리 변수
+    atr_percent: Optional[float] = None
     
     @property
     def calc_profit_rate(self) -> float:
@@ -171,7 +173,7 @@ class StockManager:
             logger.error(f"Manager order processing error: {e}")
             return False, None
 
-    def process_sell_order(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Dict]]:
+    def process_sell_order(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Position]]:
         """
         [Manager] 실제 매도 주문 집행 및 데이터 처리 전담
         """

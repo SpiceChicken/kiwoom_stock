@@ -1,7 +1,7 @@
 import logging
 import math
 from datetime import datetime, time, timedelta
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List, Any
 
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.core.schema import SupplyData
@@ -31,7 +31,7 @@ class TradingStrategy:
         self.forced_exit_time = (dummy_dt - timedelta(minutes=3)).time()
 
         self._current_regime = MarketRegime.UNKNOWN
-        self._cached_config = {}
+        self._cached_config: Dict[str, Any] = {}
         
         # [Thresholds] 진입 임계값 초기화 (87.0/82.0 이원화)
         self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 (엄격)
@@ -44,7 +44,7 @@ class TradingStrategy:
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.03)
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.03)
 
-        self.history = {} 
+        self.history: Dict[str, List[float]] = {}
         self.total_loss_limit = strategy_config.get("total_loss_limit", -5)
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
@@ -230,8 +230,9 @@ class TradingStrategy:
         status = "관망"
         is_buy_signal = False
         
-        # 주 동인 식별 (점수를 견인한 1등 공신)
-        primary_driver = max(score_detail, key=score_detail.get)
+        # 주 동인 식별
+        # max 함수의 key를 람다로 명시하여 타입 에러 방지
+        primary_driver = max(score_detail, key=lambda k: score_detail[k])
 
         # [Logic] 차등 진입 전략
         # - Supply 주도: 완화된 기준 (82.0) 적용 -> 기회 포착

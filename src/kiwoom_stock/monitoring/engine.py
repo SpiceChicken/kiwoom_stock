@@ -7,7 +7,7 @@
 import sys
 import logging
 import time as time_mod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .analyzer import MarketAnalyzer
@@ -16,6 +16,7 @@ from .manager import StockManager
 from .notifier import Notifier
 from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.core.schema import SupplyData
+from kiwoom_stock.monitoring.manager import Position
 
 logger = logging.getLogger(__name__)
 
@@ -147,17 +148,25 @@ class TradingEngine:
             self.stock_mgr.is_not_recent_exit(v['stock_code'])
         )
 
-    def _execute_order(self, side: str, verdict: Dict, reason: str = None):
+    def _execute_order(self, side: str, verdict: Dict, reason: Optional[str] = None):
         """[Execution] 매매 집행 통합 메서드"""
         code = verdict['stock_code']
-        success, data = False, {}
+        success = False
+        # data 변수가 Dict와 Position 모두 담을 수 있도록 Union 처리
+        data: Union[Dict, Position, None] = None
 
         if side == 'BUY':
             success, data = self.stock_mgr.process_buy_order(verdict)
-            if success: self.notifier.notify_buy(data)
+            # data가 Dict인지 확인 후 전달 (Type Guard)
+            if success and isinstance(data, dict): 
+                self.notifier.notify_buy(data)
         elif side == 'SELL':
-            success, data = self.stock_mgr.process_sell_order(verdict, reason)
-            if success: self.notifier.notify_sell(data)
+            # reason이 None일 경우 안전 처리
+            safe_reason = reason if reason else "Unknown"
+            success, data = self.stock_mgr.process_sell_order(verdict, safe_reason)
+            # data가 Position인지 확인 후 전달
+            if success and isinstance(data, Position):
+                self.notifier.notify_sell(data)
 
         if not success:
             logger.error(f"❌ {side} Order Failed: {code}")
