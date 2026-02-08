@@ -1,4 +1,4 @@
-# kiwoom_project/pyproject.toml
+# pyproject.toml
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -6,11 +6,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwoom_stock"
-version = "0.1.0"
-description = "Kiwoom REST API Stock Monitoring System"
+# 1. 버전 업데이트: v2.6 반영
+version = "2.6.0"
+description = "Kiwoom Stock Trading System (v2.6) with CI/CD"
+readme = "README.MD"
+requires-python = ">=3.9"
+# 2. 필수 라이브러리 명시 (requirements.txt 대체)
 dependencies = [
-    "requests",
+    "requests>=2.28.0",
+    "pandas>=1.5.0",
+    "rich>=12.0.0",
+    # 윈도우 환경에서만 설치되도록 조건 부여 (Linux CI 에러 방지)
+    "pywin32>=305; sys_platform == 'win32'",
+    "PyQt5>=5.15.0; sys_platform == 'win32'"
+]
+
+# 3. 개발/테스트용 의존성 (pip install .[dev] 로 설치 가능)
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-mock",
+    "flake8",
+    "mypy",
+    "types-requests",
+    "pandas-stubs"
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# --- 아래는 CI/CD 도구 설정 ---
+
+# Pytest 설정: 소스 경로 인식
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Mypy (타입 체크) 설정
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+# 외부 라이브러리(pywin32 등) 타입 힌트가 없어도 에러 무시
+ignore_missing_imports = true

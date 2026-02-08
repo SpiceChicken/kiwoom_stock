@@ -1,0 +1,64 @@
+name: Kiwoom Stock System CI
+
+# 트리거: 메인, 개발 브랜치에 푸시되거나 PR이 올라오면 실행
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. 소스 코드 체크아웃
+    - uses: actions/checkout@v3
+
+    # 2. Python 환경 설정 (로컬 버전인 3.13에 맞춤)
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.13"
+        cache: 'pip'
+
+    # [중요] 3. 설정 파일 생성 (Secrets -> File 주입)
+    # Python 코드가 실행되기 전에 config 폴더와 파일들이 존재해야 함
+    - name: Create Config Files
+      run: |
+        mkdir -p config
+        echo '${{ secrets.CONFIG_JSON }}' > config/config.json
+        echo '${{ secrets.STRATEGY_CONFIG_JSON }}' > config/strategy_config.json
+        
+        # 파일 생성 확인 (보안상 내용은 출력하지 않음)
+        echo "Verifying config files..."
+        ls -l config/
+
+    # 4. 의존성 설치
+    # pyproject.toml 설정을 따르며, [dev] 옵션으로 테스트 도구까지 설치
+    # Linux 환경이므로 pywin32는 자동으로 제외됨 (pyproject.toml 설정 덕분)
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    # 5. Linting (코드 스타일 검사)
+    - name: Lint with flake8
+      run: |
+        # 문법 에러나 치명적인 오류는 빌드 중단
+        flake8 src tests --count --select=E9,F63,F7,F82 --show-source --statistics
+        # 스타일 경고는 허용하되 출력 (줄 길이 120자 제한)
+        flake8 src tests --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+    # 6. Type Checking (정적 타입 검사)
+    - name: Type check with mypy
+      run: |
+        # ignore-missing-imports 옵션이 pyproject.toml에 설정되어 있어야 함
+        mypy src/kiwoom_stock/core
+        mypy src/kiwoom_stock/monitoring
+
+    # 7. Unit Testing (유닛 테스트)
+    # Config 파일이 생성된 상태이므로 테스트 코드 내부에서 설정 로드 가능
+    - name: Test with pytest
+      run: |
+        pytest tests/
