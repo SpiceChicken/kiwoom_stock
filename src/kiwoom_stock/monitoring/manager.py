@@ -114,6 +114,11 @@ class StockManager:
 
         pos.sell_price = verdict['price']
         pos.current_score = verdict['score']
+
+        # [New] ATR 정보를 Position 객체에 임시 저장 (메모리 전용)
+        # DB 스키마에 없어도 객체 속성으로는 동적 할당 가능
+        # verdict에 'atr_percent'가 없으면 기본값 1.5 사용
+        pos.atr_percent = verdict['atr_percent']
         
         # [추상화 호출] 판정은 평가기에게 맡깁니다.
         sell_reason = self.strategy.get_exit_reason(pos, strong_threshold)

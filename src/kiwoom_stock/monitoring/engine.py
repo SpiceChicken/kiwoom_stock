@@ -81,7 +81,7 @@ class TradingEngine:
         # 2. 킬스위치(누적 손실) 체크
         total_pnl = self.stock_mgr.get_total_pnl_status(self.db.get_today_realized_pnl())
         if self.strategy.is_kill_switch_activated(total_pnl):
-            msg = f"🚨 KILL-SWITCH ACTIVATED (PnL: {total_pnl}%)"
+            msg = f"🚨 KILL-SWITCH ACTIVATED (PnL: {total_pnl:.1f}%)"
             logger.critical(msg)
             self.notifier.notify_critical(msg)
             self._force_liquidate() # 비상 청산

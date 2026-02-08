@@ -36,19 +36,31 @@ def calculate_alpha_score(data: SupplyData, prev_score: float, decay: float) -> 
     return float(round(final_alpha, 2))
 
 def calculate_supply_score(data: SupplyData, prev_score: float, decay: float) -> float:
-    """[Supply] 수급 주체 개입 강도"""
+    """[Supply] 수급 주체 개입 강도 (수급 지속성 지수 반영)"""
+    
+    # 1. 기본 점수 (체결강도 기반)
     base_score = max(0, min(100, 50 + (data.strength - 100) * 0.5))
 
     market_total_million = data.market_total_amount / 1000000
     if market_total_million < 10.0:
         pgm_adj, frgn_adj = 0, 0
     else:
+        # 2. 순매수 비중 계산
         pgm_adj = max(-0.5, min(0.5, data.pgm_data.net_amt / market_total_million))
         frgn_adj = max(-0.5, min(0.5, data.foreign_data.netprps_prica / market_total_million))
 
+    # [New] 수급 지속성 지수 (Supply Persistence Index)
+    # 거래량이 터졌는데(vol_ratio 높음) 순매수가 약하다면 '가짜 수급' 의심 -> 가중치 축소
+    persistence_factor = 1.0
+    if data.vol_ratio > 2.0: # 거래량이 평소 2배 이상인데
+        net_buying_impact = abs(pgm_adj + frgn_adj)
+        if net_buying_impact < 0.1: # 순매수 기여도가 낮다면 (0.1 미만)
+            persistence_factor = 0.5 # 페널티 부여 (단타성 거래량 의심)
+    
+    # 3. 최종 수급 영향력 산출
     trust_factor = 1.0 if data.vol_ratio >= 5.0 else 0.5
     supply_impact = (pgm_adj + frgn_adj) * 5.0
-    multiplier = 1.0 + (supply_impact * trust_factor)
+    multiplier = 1.0 + (supply_impact * trust_factor * persistence_factor) # 지속성 팩터 추가
 
     current_supply_score = min(100.0, base_score * multiplier)
     

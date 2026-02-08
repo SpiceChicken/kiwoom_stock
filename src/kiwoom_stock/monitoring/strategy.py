@@ -41,8 +41,8 @@ class TradingStrategy:
 
         # 매매 규칙 로드 (익절, 손절, 점수 감쇠율)
         self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
-        self.target_profit_rate = strategy_config.get("target_profit_rate", 0.025)
-        self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.015)
+        self.target_profit_rate = strategy_config.get("target_profit_rate", 0.03)
+        self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.03)
 
         self.history = {} 
         self.total_loss_limit = strategy_config.get("total_loss_limit", -5)
@@ -116,22 +116,38 @@ class TradingStrategy:
         4. Score Decay: 점수 급락 시 청산 (수익 중일 땐 더 민감하게 반응)
         """
         profit_rate = (pos.sell_price / pos.buy_price - 1)
+        # 종목의 변동성(ATR)에 비례하여 손절폭 부여 (기본 1.5배)
+        current_atr = getattr(pos, 'atr_percent', 1.5)
         
         # 1. 시간 청산
         if not self.debug_mode and datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
             
-        # 2. 손절매
-        if profit_rate <= self.stop_loss_rate:
+        # 2. [Dynamic Stop Loss] ATR 기반 동적 손절매
+
+        # 목표: ATR * 1.5
+        dynamic_stop = -(current_atr * 1.5) / 100
+        # 안전장치: 최소 -1.0% 보장 (노이즈 방지), 최대 제한 (stop_loss_rate)
+        final_stop = max(min(dynamic_stop, -0.01), self.stop_loss_rate)
+
+        if profit_rate <= final_stop:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
             
-        # 3. 익절매 (Trailing Logic)
-        if profit_rate >= self.target_profit_rate:
+        # 3. [Dynamic Take Profit] ATR 기반 동적 익절
+        
+        # 목표: ATR * 3.0 (손절폭의 2배)
+        dynamic_target = (current_atr * 3.0) / 100
+        
+        # 최소한 기본 목표가(target_profit_rate)는 넘어야 함 (너무 낮은 목표 방지)
+        final_target = max(dynamic_target, self.target_profit_rate)
+
+        if profit_rate >= final_target:
+            # 목표가를 달성했더라도, 점수가 여전히 강력하면 더 보유 (Trend Following)
             if pos.current_score >= strong_threshold:
                 return None 
             return f"Take Profit (+{profit_rate*100:.1f}%)"
         
-        # 4. 점수 하락 감지 (Score Decay) - [수정됨]
+        # 4. 점수 하락 감지 (Score Decay)
         current_decay = self.decay_rate  # 기본값 (예: 0.25)
         
         # 수익권에서는 민감도를 높여서(Decay 감소) 이익을 빠르게 확정
@@ -254,5 +270,6 @@ class TradingStrategy:
                 "primary_driver": primary_driver,
                 # Engine 호환성을 위해 필요한 필드들 전달
                 "price": metrics.price,
-                "stock_code": stock_code
+                "stock_code": stock_code,
+                "atr_percent": metrics.atr_percent
             }
