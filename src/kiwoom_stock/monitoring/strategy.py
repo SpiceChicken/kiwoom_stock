@@ -49,12 +49,6 @@ class TradingStrategy:
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
 
-        # [Memory] 지표 잔상 효과 (호가 공백 보정용 상태 저장)
-        self._alpha_memory: Dict[str, float] = {}
-        self.alpha_decay = strategy_config.get("alpha_decay", 0.8)
-        self._supply_memory: Dict[str, float] = {}
-        self.supply_decay = strategy_config.get("supply_decay", 0.8)
-
         if self.debug_mode:
             logger.warning("🚨 [DEBUG MODE] Strategy initialized in TEST mode. (Time checks bypassed)")
 
@@ -120,7 +114,7 @@ class TradingStrategy:
         current_atr = getattr(pos, 'atr_percent', 1.5)
         
         # 1. 시간 청산
-        if not self.debug_mode and datetime.now().time() >= self.forced_exit_time:
+        if datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
             
         # 2. [Dynamic Stop Loss] ATR 기반 동적 손절매
@@ -168,40 +162,6 @@ class TradingStrategy:
         if pos.current_score < final_sell_threshold:
             return f"Score Decay (-{current_decay*100:.1f}%)"
         return None
-
-    def _calculate_conviction_score(self, data: SupplyData) -> Tuple[float, Dict]:
-        """
-        [Delegation] 점수 계산의 상세 로직은 'scoring' 모듈에게 위임
-        - Strategy는 이전 점수(Memory)를 관리하고, 결과를 취합하는 역할만 수행
-        """
-        # 메모리(이전 점수) 조회
-        prev_alpha = self._alpha_memory.get(data.stock_code, 0.0)
-        prev_supply = self._supply_memory.get(data.stock_code, 0.0)
-
-        # Scoring 모듈 호출 (순수 함수)
-        a_score = scoring.calculate_alpha_score(data, prev_alpha, self.alpha_decay)
-        s_score = scoring.calculate_supply_score(data, prev_supply, self.supply_decay)
-        v_score = scoring.calculate_vwap_score(data)
-        t_score = scoring.calculate_trend_score(data)
-        
-        # 메모리 업데이트 (State Update)
-        self._alpha_memory[data.stock_code] = a_score
-        self._supply_memory[data.stock_code] = s_score
-
-        # 동적 가중치 계산 및 승산형(Multiplicative) 총점 산출
-        w = scoring.calculate_dynamic_weights(data)
-        
-        final_score = (
-            math.pow(max(1.0, a_score), w.get('alpha', 0.25)) *
-            math.pow(max(1.0, s_score), w.get('supply', 0.25)) *
-            math.pow(max(1.0, v_score), w.get('vwap', 0.25)) *
-            math.pow(max(1.0, t_score), w.get('trend', 0.25))
-        )
-
-        details = {
-            "alpha": a_score, "supply": s_score, "vwap": v_score, "trend": t_score
-        }
-        return round(final_score, 1), details
     
     def _get_momentum(self, stock_code: str, current_score: float) -> float:
         """점수 변화량(모멘텀) 측정"""
@@ -224,7 +184,7 @@ class TradingStrategy:
         4. 필터링 (과열, 하락세 등) 후 최종 매수 신호 생성
         """
         stock_code = metrics.stock_code
-        score, score_detail = self._calculate_conviction_score(metrics)
+        score, score_detail = metrics.total_score, metrics.score_detail
         momentum = self._get_momentum(stock_code, score)
         
         status = "관망"

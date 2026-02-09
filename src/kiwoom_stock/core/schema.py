@@ -52,3 +52,8 @@ class SupplyData:
     # 하위 데이터 객체
     pgm_data: PgmData = field(default_factory=PgmData)
     foreign_data: ForeignData = field(default_factory=ForeignData)
+
+    # [New] 스무딩 된 세부 점수 저장용 (Alpha, Supply, VWAP, Trend)
+    # analyzer.py에서 계산된 smoothed_metrics가 여기에 저장됩니다.
+    score_detail: Dict[str, float] = field(default_factory=dict)
+    total_score: float = 0.0

@@ -6,6 +6,7 @@ from typing import List, Dict
 
 from .collector import MarketDataCollector
 from kiwoom_stock.core import indicators as ind
+from kiwoom_stock.core import scoring
 from kiwoom_stock.core.schema import SupplyData, PgmData, ForeignData
 from kiwoom_stock.core.types import MarketRegime
 
@@ -13,21 +14,20 @@ logger = logging.getLogger(__name__)
 
 class MarketAnalyzer:
     """
-    [Helper] 시장 환경 분석기 (Refactored to use SupplyData)
-    - 역할 1: 전체 시장의 성격(Regime)을 진단 (RSI, ATR 활용)
-    - 역할 2: 개별 종목의 수급 및 차트 데이터를 수집하여 SupplyData 객체로 캐싱
-    - 데이터 구조: 기존의 암시적인 Dict 대신 명시적인 SupplyData Dataclass 사용
+    [Helper] 시장 환경 분석기 (v2.7 Final)
+    - 역할: 데이터 수집, 지표 스무딩, 동적 가중치 기반 점수 산출
     """
     def __init__(self, client, market_config: Dict):
         self.collector = MarketDataCollector(client)
-        self.market_proxy_code = market_config.get("proxy_code", "069500") # KODEX 200 등 시장 대표 ETF
+        self.market_proxy_code = market_config.get("proxy_code", "069500")
         self.market_rsi = 50.0
         self.market_regime = MarketRegime.UNKNOWN
         self.market_atr_history: deque[float] = deque(maxlen=20)
         
-        # [Refactor] Dict[str, Dict] -> Dict[str, SupplyData]
-        # 종목 코드를 키로, 정형화된 데이터 객체(SupplyData)를 값으로 저장
         self.supply_cache: Dict[str, SupplyData] = {}
+        # [New] 지표별 누적 스무딩 히스토리
+        self.metric_history: Dict[str, Dict[str, float]] = {}
+        
         self.last_supply_update = datetime.now()
         self.supply_cache[self.market_proxy_code] = SupplyData(stock_code=self.market_proxy_code)
 
@@ -78,8 +78,7 @@ class MarketAnalyzer:
 
     def update_priority_supply(self, stock_codes: List[str]):
         """
-        [Data Pipeline] 감시 대상 종목 데이터 일괄 업데이트
-        - API 호출 효율화를 위해 벌크 데이터(프로그램, 외인)를 먼저 가져온 후 개별 종목에 분배
+        [Data Pipeline] 데이터 업데이트 -> 스무딩 -> 동적 가중치 -> 총점 산출
         """
         try:
             # 1. 벌크 데이터 수집 (1회 호출로 전체 종목 커버)
@@ -109,12 +108,57 @@ class MarketAnalyzer:
                 self._update_basic_data(data, stock_code)
                 self._update_strength_data(data, stock_code)
                 
-                # 지표별 업데이트 (지표 계산에 필요한 데이터가 모이면 수행)
+                # 지표 업데이트 (순서 중요: Alpha, VWAP 등에서 vol_factor, prev_vwap 등을 사용함)
                 self._update_alpha_data(data, chart_1m)
                 self._update_vwap_data(data, chart_5m)
                 self._update_trend_rsi(data, chart_60m)
                 self._update_volatility_data(data, chart_5m)
                 self._update_trend_data(data, chart_5m)
+
+                # -------------------------------------------------------------
+                # [Logic] Scoring Pipeline (v2.7)
+                # -------------------------------------------------------------
+                
+                # 1) Raw Score 계산 (모든 함수가 data 객체 하나만 받음)
+                raw_alpha = scoring.calculate_alpha_score(data)
+                raw_supply = scoring.calculate_supply_score(data)
+                raw_vwap = scoring.calculate_vwap_score(data)
+                raw_trend = scoring.calculate_trend_score(data)
+                
+                current_raw = {
+                    'alpha': raw_alpha, 'supply': raw_supply, 'vwap': raw_vwap, 'trend': raw_trend
+                }
+
+                # 2) Metric-level Smoothing (Adaptive EMA)
+                prev_metrics = self.metric_history.get(stock_code, current_raw)
+                smoothed_metrics = {}
+
+                # [Change] 상수를 제거하고, 현재 종목 상태에 맞는 민감도 자동 계산
+                adaptive_factors = self._get_adaptive_factors(data)
+                
+                for key, val in current_raw.items():
+                    # 종목 상황에 맞춰 계산된 factor 사용
+                    factor = adaptive_factors.get(key, 0.2) 
+                    
+                    smoothed_val = (val * factor) + (prev_metrics[key] * (1 - factor))
+                    smoothed_metrics[key] = round(smoothed_val, 2)
+                
+                self.metric_history[stock_code] = smoothed_metrics
+                data.score_detail = smoothed_metrics
+
+                # 3) Dynamic Weights 계산
+                dynamic_weights = scoring.calculate_dynamic_weights(data)
+
+                # 4) 최종 점수 산출 (가중 기하평균)
+                score_result = scoring.calculate_total_score(
+                    smoothed_metrics['alpha'],
+                    smoothed_metrics['supply'],
+                    smoothed_metrics['vwap'],
+                    smoothed_metrics['trend'],
+                    dynamic_weights # 동적 가중치 전달
+                )
+                data.total_score = score_result['total_score']
+                # -------------------------------------------------------------
 
             self.last_supply_update = datetime.now()
         except Exception as e:
@@ -180,7 +224,8 @@ class MarketAnalyzer:
         total_val = sum(p * v for p, v in zip(prices, vols))
         total_vol = sum(vols)
         vwap = total_val / total_vol if total_vol > 0 else prices[-1]
-
+        
+        # [중요] 이전 VWAP 갱신 (기울기 계산용)
         data.prev_vwap = data.vwap if data.vwap > 0 else vwap
         data.vwap = round(vwap, 2)
         data.price = prices[-1]
@@ -205,10 +250,48 @@ class MarketAnalyzer:
         if len(chart_5m) < 60: return
         prices = [float(d['cur_prc']) for d in chart_5m]
         
-        # 기울기 계산을 위해 이전 EMA 값 보존
+        # [중요] 이전 EMA60 갱신 (기울기 계산용)
         data.prev_ema60 = data.ema60 if data.ema60 > 0 else ind.calculate_ema(prices, 60)
         
         # 최신 EMA 계산
         data.ema5 = ind.calculate_ema(prices, 5)
         data.ema20 = ind.calculate_ema(prices, 20)
         data.ema60 = ind.calculate_ema(prices, 60)
+
+    # [New] 적응형 민감도 산출 메서드 추가
+    def _get_adaptive_factors(self, data: SupplyData) -> Dict[str, float]:
+        """
+        [Adaptive Logic] 거래량과 변동성에 따라 스무딩 민감도 자동 조절
+        - 거래량 폭발(Vol Ratio ↑) -> 민감도 UP (빠르게 반응)
+        - 변동성 확대(ATR ↑) -> 민감도 DOWN (노이즈 필터링)
+        """
+        # 1. 기본 베이스 (보수적 출발)
+        base_factor = 0.2 
+
+        # 2. 거래량 보너스 (신뢰도)
+        # 평소(1.0)보다 거래량이 2배, 3배 터지면 현재 데이터를 더 믿음
+        # 최대 0.3까지 가산 (Vol Ratio 5.0일 때 최대)
+        vol_bonus = min(0.3, max(0.0, (data.vol_ratio - 1.0) * 0.075))
+
+        # 3. 변동성 페널티 (노이즈)
+        # ATR이 1.5%를 넘어가면 노이즈로 간주하여 민감도 차감
+        # 최대 0.15까지 차감
+        atr_penalty = min(0.15, max(0.0, (data.atr_percent - 1.5) * 0.05))
+
+        # 최종 동적 팩터 (0.05 ~ 0.6 사이로 제한)
+        dynamic_base = base_factor + vol_bonus - atr_penalty
+        dynamic_base = max(0.05, min(0.6, dynamic_base))
+
+        return {
+            # Alpha: 가장 민감해야 하므로 베이스보다 높게 설정
+            'alpha': min(0.8, dynamic_base * 1.5),
+            
+            # Supply: 수급은 거래량에 비례하여 신뢰하되 적당히 유지
+            'supply': dynamic_base,
+            
+            # VWAP: 지지선은 노이즈에 둔감해야 함
+            'vwap': dynamic_base,
+            
+            # Trend: 추세는 가장 무거워야 함 (쉽게 바뀌면 안 됨)
+            'trend': max(0.05, dynamic_base * 0.7)
+        }
