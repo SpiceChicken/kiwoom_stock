@@ -29,6 +29,7 @@ jobs:
         mkdir -p config
         echo '${{ secrets.CONFIG_JSON }}' > config/config.json
         echo '${{ secrets.STRATEGY_CONFIG_JSON }}' > config/strategy_config.json
+        echo '${{ secrets.SCORING_CONFIG_JSON }}' > config/scoring_config.json
         
         # 파일 생성 확인 (보안상 내용은 출력하지 않음)
         echo "Verifying config files..."

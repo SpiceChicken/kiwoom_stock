@@ -59,7 +59,12 @@ def sample_supply_data():
     
     # [수정] 가격을 확실한 우상향 패턴으로 변경 (과거 -> 현재)
     data.price_series = [78000, 78500, 79000, 79500, 80000, 80500]
-    data.volume_series = [1000, 1200, 1500, 1300, 2000, 2500] 
+    data.volume_series = [1000, 1200, 1500, 1300, 2000, 2500]
+
+    # Strategy 테스트용으로 쓸 때 (이미 분석이 끝난 상태를 가정)
+    data.score_detail = {'alpha': 90.0, 'supply': 80.0, 'vwap': 95.0, 'trend': 85.0}
+    data.total_score = 87.5  # 가중 기하평균 대략 계산값
+    
     return data
 
 @pytest.fixture
