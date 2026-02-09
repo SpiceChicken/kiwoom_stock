@@ -1,6 +1,7 @@
 # tests/conftest.py
 import pytest
 from unittest.mock import MagicMock
+from datetime import datetime
 from kiwoom_stock.core.schema import SupplyData, PgmData, ForeignData
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.monitoring.strategy import TradingStrategy
@@ -28,7 +29,23 @@ def mock_strategy_config():
 
 # [수정] strategy 픽스처를 이곳으로 옮겨 모든 테스트 파일이 공유하도록 함
 @pytest.fixture
-def strategy(mock_strategy_config):
+def strategy(mock_strategy_config, mocker):
+    """
+    [해결책] MagicMock 대신 실제 datetime을 상속받아 now()만 조작합니다.
+    이렇게 하면 combine, strptime 등 다른 메서드는 실제처럼 동작하여 TypeError가 사라집니다.
+    """
+    real_datetime = datetime
+
+    class MockDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # 테스트 중에는 무조건 '2026-02-10 10:00:00' (장 중)으로 고정
+            return real_datetime(2026, 2, 10, 10, 0, 0)
+
+    # kiwoom_stock.monitoring.strategy 모듈 안의 'datetime' 클래스를 
+    # 우리가 만든 MockDatetime 클래스로 바꿔치기 합니다.
+    mocker.patch("kiwoom_stock.monitoring.strategy.datetime", MockDatetime)
+    
     st = TradingStrategy(mock_strategy_config)
     st.update_context(MarketRegime.STABLE_BULL)
     return st
