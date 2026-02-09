@@ -22,7 +22,7 @@ class MarketAnalyzer:
         self.market_proxy_code = market_config.get("proxy_code", "069500")
         self.market_rsi = 50.0
         self.market_regime = MarketRegime.UNKNOWN
-        self.market_atr_history = deque(maxlen=20)
+        self.market_atr_history: deque[float] = deque(maxlen=20)
         
         self.supply_cache: Dict[str, SupplyData] = {}
         # [New] 지표별 누적 스무딩 히스토리
