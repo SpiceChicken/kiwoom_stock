@@ -43,14 +43,13 @@ def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> flo
 def calculate_alpha_score(data: SupplyData) -> float:
     """
     [Alpha] 적응형 가속도 평가 (Physics-based Net Force)
-    * Logic: 추진력(Alpha)에서 저항력(Trend/VWAP Resistance)을 차감하여 '알짜 힘(Net Force)' 산출
-    * Remove: 인위적인 상수 감점(score * 0.8) 제거
+    * Logic: Thrust(추진력) - Gravity(중력) - Drag(매물저항) - [New] Overheat(과열저항)
+    * Update: RSI 과열을 scoring 단계에서 '내부 저항'으로 처리하여 점수를 스스로 깎음
     """
     cfg = config.SCORING_CONFIG['alpha']
 
-    # 1. 추진력(Thrust) 계산: 거래량 + 모멘텀 + 체결강도
+    # 1. 추진력(Thrust) 계산
     # ---------------------------------------------------
-    # [Unit Correction]
     raw_vol_ratio = data.vol_ratio
     vol_r = (raw_vol_ratio / 100.0) if raw_vol_ratio > 50.0 else raw_vol_ratio
     vol_r = max(0.1, vol_r)
@@ -68,48 +67,52 @@ def calculate_alpha_score(data: SupplyData) -> float:
     w_vol = max(0.05, min(0.8, cfg['w_vol_base'] + vol_influence))
     remain = 1.0 - w_vol
     
-    # thrust: 순수 상승 에너지 (양수/음수 가능)
+    # thrust: 순수 상승 에너지
     thrust = (w_vol * norm_vol) + (remain * 0.6 * norm_mom) + (remain * 0.4 * norm_pow)
 
 
-    # 2. 저항력(Resistance) 계산: 중력 + 공기저항
+    # 2. 저항력(Resistance) 계산: 중력 + 공기저항 + [New] 과열
     # ---------------------------------------------------
     resistance_force = 0.0
     atr = max(0.5, getattr(data, 'atr_percent', 1.5))
     
     # A. 중력 (Gravity): EMA60 역배열 저항
-    # 주가가 EMA60 아래에 있으면, 깊이에 비례하여 저항 발생
     if data.ema60 > 0 and data.cur_prc < data.ema60:
-        # gap_sigma: 60일선까지의 거리가 ATR의 몇 배인가?
         dist = data.ema60 - data.cur_prc
         gap_sigma = dist / (data.cur_prc * atr / 100.0)
-        
-        # 깊을수록 저항이 세짐 (Logarithmic damping)
-        # 예: 1 Sigma -> 1.0, 3 Sigma -> 1.5 ...
         gravity = math.log(1.0 + gap_sigma) * cfg['w_resistance']
         resistance_force += gravity
 
     # B. 공기저항 (Drag): VWAP 붕괴 저항
-    # 주가가 VWAP 아래에 있으면 매물 압박 발생
     if data.vwap > 0 and data.cur_prc < data.vwap:
         dist = data.vwap - data.cur_prc
         gap_sigma = dist / (data.cur_prc * atr / 100.0)
-        
-        # VWAP 저항은 즉각적이므로 선형에 가깝게 반영
         drag = math.sqrt(gap_sigma) * cfg['w_support']
         resistance_force += drag
+
+    # C. [New] 과열 저항 (Overheat Resistance)
+    # RSI가 80을 넘어가면 '엔진 과열'로 보아 저항이 급격히 발생
+    # RSI 80: 저항 0
+    # RSI 85: 저항 발생
+    # RSI 90: 추진력을 상쇄할 만큼 강력한 저항
+    if rsi_v > 80.0:
+        excess_heat = rsi_v - 80.0
+        # 제곱으로 페널티를 주어 90 넘으면 점수 급락 유도
+        thermal_drag = (excess_heat / 5.0) ** 2.0  
+        resistance_force += thermal_drag
+        
+        # 로깅 (필요시)
+        # logger.debug(f"[{data.stock_name}] RSI Overheat({rsi_v}): Drag={thermal_drag:.2f}")
 
 
     # 3. 알짜 힘 (Net Force) 및 점수 산출
     # ---------------------------------------------------
-    # 추진력에서 저항을 뺍니다.
     net_force = thrust - resistance_force
     
-    # Adaptive Slope (변동성 클수록 완만하게)
+    # Adaptive Slope
     raw_k = 12.0 / (0.5 + (atr * 0.5))
     adaptive_k = max(cfg['k_min'], min(cfg['k_max'], raw_k))
     
-    # 최종 점수 매핑
     final_score = _sigmoid(net_force, k=adaptive_k) * 100.0
     
     return float(round(final_score, 2))
@@ -129,45 +132,30 @@ def calculate_supply_score(data: SupplyData) -> float:
 
     # 2. Market Cap Reliability (거래대금 규모)
     # amt_mil: 백만 원 단위 (예: 10,000 = 100억원)
-    amt_mil = data.market_total_amount / 1000000.0
+    amt_mil = data.trde_qty * data.vwap / 1000000.0
     
     if amt_mil <= cfg['min_amt_mil']:
-        reliability = 0.0
-    else:
-        # log10(10)=1.0, log10(1000)=3.0 (10억~1000억 구간에서 신뢰도 상승)
-        val = (math.log10(max(amt_mil, 1.0)) - 1.0) / 2.0
-        reliability = max(0.0, min(1.0, val))
+        return 0.0
 
     # 3. Supply Impact (Net Buy Ratio)
     net_buy_ratio = 0.0
     if amt_mil > 0:
         if not data.pgm_data: pgm_net = 0.0
-        else: pgm_net = getattr(data.pgm_data, 'net_amt', 0.0)
+        else: pgm_net = getattr(data.pgm_data, 'netprps_prica', 0.0)
 
         if not data.foreign_data: frgn_net = 0.0
         else: frgn_net = getattr(data.foreign_data, 'netprps_prica', 0.0)
         
-        # [Fix] Won -> Million Won Conversion (단위 통일)
-        pgm_net_mil = pgm_net / 1000000.0
-        frgn_net_mil = frgn_net / 1000000.0
-        
         # 거래대금 대비 순매수 비중 계산
-        pgm_ratio = pgm_net_mil / amt_mil
-        frgn_ratio = frgn_net_mil / amt_mil
+        pgm_ratio = pgm_net / amt_mil
+        frgn_ratio = frgn_net / amt_mil
         
-        # [Smart Money] 외국인 수급에 1.2배 가중치 부여
-        net_buy_ratio = pgm_ratio + (frgn_ratio * 1.2)
-        
-    # tanh 스케일링
-    # 예: 순매수 비중이 10%(0.1)면 -> tanh(0.5) ≈ 0.46 (상당한 호재)
-    # 예: 순매수 비중이 1%(0.01)면 -> tanh(0.05) ≈ 0.05 (미미함)
-    impact = math.tanh(net_buy_ratio * 5.0)
-    final_impact = impact * reliability
+        # [Smart Money] 외국인 수급에 1.1배 가중치 부여
+        net_buy_ratio = pgm_ratio + (frgn_ratio * 1.1)
     
     # 4. Final Multiplier
-    # 긍정적 수급: 최대 1.5배 (점수 상승)
     # 부정적 수급: 최소 0.5배 (점수 하락)
-    multiplier = max(cfg['multiplier_floor'], 1.0 + (final_impact * 0.5))
+    multiplier = max(cfg['multiplier_floor'], 1.0 + net_buy_ratio)
     
     current_supply_score = min(100.0, base_score * multiplier)
     return float(round(current_supply_score, 2))

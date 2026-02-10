@@ -69,9 +69,8 @@ def sample_supply_data():
         ema20=79500.0,
         ema60=78000.0,
         prev_ema60=77500.0,
-        market_total_amount=10000000000.0
     )
-    data.pgm_data = PgmData(net_amt=50.0)
+    data.pgm_data = PgmData(netprps_prica=50.0)
     data.foreign_data = ForeignData(netprps_prica=30.0)
     
     # [수정] 가격을 확실한 우상향 패턴으로 변경 (과거 -> 현재)

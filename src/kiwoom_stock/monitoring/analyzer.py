@@ -172,8 +172,6 @@ class MarketAnalyzer:
         data.vol_ratio = float(basic.get('trde_pre', 0.0))
         data.trde_qty = int(basic.get('trde_qty', 0))
         data.cur_prc = float(basic.get('cur_prc', 0))
-        # 거래대금 추정 (거래량 * 현재가)
-        data.market_total_amount = max(1.0, float(data.trde_qty) * float(data.cur_prc))
 
     def _update_strength_data(self, data: SupplyData, code: str):
         """체결강도 업데이트"""
@@ -190,10 +188,10 @@ class MarketAnalyzer:
         if data.stock_code in pgm_map:
             p_info = pgm_map[data.stock_code]
             data.pgm_data = PgmData(
-                net_amt=float(p_info.get('net_amt', 0)),
-                ratio=float(p_info.get('ratio', 0)),
-                buy_amt=float(p_info.get('buy_amt', 0)),
-                sel_amt=float(p_info.get('sel_amt', 0))
+                netprps_prica=float(p_info.get('netprps_prica', 0)),
+                all_trde_rt=float(p_info.get('all_trde_rt', 0)),
+                buy_cntr_amt=float(p_info.get('buy_cntr_amt', 0)),
+                sel_cntr_amt=float(p_info.get('sel_cntr_amt', 0))
             )
 
     def _update_foreign_data(self, data: SupplyData, frgn_map: Dict):
