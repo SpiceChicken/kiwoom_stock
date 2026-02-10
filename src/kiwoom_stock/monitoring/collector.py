@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import List, Dict
+from typing import List, Dict, Any
 from ..api.parser import clean_numeric
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class MarketDataCollector:
             logger.error(f"외국계 창구 데이터 수집 실패: {e}")
             return {}
 
-    def fetch_order_book(self, code: str) -> List[Dict]:
+    def fetch_order_book(self, code: str) -> Dict[str, Any]:
         try:
             items = self.client.market.get_order_book(code)
 
@@ -96,7 +96,7 @@ class MarketDataCollector:
             logger.error(f"호가 잔량 데이터 수집 실패: {e}")
             return {}
 
-    def fetch_recent_ticks(self, code: str) -> List[Dict]:
+    def fetch_recent_ticks(self, code: str) -> Dict[str, Any]:
         try:
             items = self.client.market.get_recent_ticks(code)
 
