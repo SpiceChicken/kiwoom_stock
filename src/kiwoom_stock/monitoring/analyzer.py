@@ -159,6 +159,9 @@ class MarketAnalyzer:
                 )
                 data.total_score = score_result['total_score']
                 # -------------------------------------------------------------
+                # 7. [Sniper Protocol] 심층 분석 (함수 분리)
+                # -------------------------------------------------------------
+                self._perform_deep_analysis(data, stock_code)
 
             self.last_supply_update = datetime.now()
         except Exception as e:
@@ -166,14 +169,38 @@ class MarketAnalyzer:
 
     # --- Helper Methods: SupplyData 객체를 직접 조작하여 데이터 무결성 유지 ---
 
+    def _perform_deep_analysis(self, data: SupplyData, code: str):
+        """
+        [Sniper Protocol] 심층 분석 (Deep Analysis)
+        - 조건: 1차 점수가 합격권(75점) 이상인 경우에만 비싼 API 호출
+        - 역할: 호가 잔량 및 고래 체결 데이터를 수집하여 점수 보정
+        """
+        if data.total_score < 75.0:
+            return
+
+        try:
+            # A. 정밀 데이터 수집 (Collector 위임 - ka10004, ka10003)
+            # collector.py에 해당 메서드가 구현되어 있어야 함
+            order_book = self.collector.fetch_order_book(code)
+            ticks = self.collector.fetch_recent_ticks(code)
+            
+            # C. [Re-Scoring] 보너스 점수 적용
+            new_score = scoring.apply_deep_analysis_bonus(data.total_score, {**order_book, **ticks})
+            
+            if ticks['whale_found']:
+                logger.info(f"🐋 Whale Detected! {code}: {ticks['whale_vol']}억 Boost ({data.total_score} -> {new_score})")
+            
+            data.total_score = new_score
+            
+        except Exception as e:
+            logger.error(f"Deep analysis failed for {code}: {e}")
+
     def _update_basic_data(self, data: SupplyData, code: str):
         """기본 시세 및 거래량 비율 업데이트"""
         basic = self.collector.fetch_stock_basic(code)
         data.vol_ratio = float(basic.get('trde_pre', 0.0))
         data.trde_qty = int(basic.get('trde_qty', 0))
         data.cur_prc = float(basic.get('cur_prc', 0))
-        # 거래대금 추정 (거래량 * 현재가)
-        data.market_total_amount = max(1.0, float(data.trde_qty) * float(data.cur_prc))
 
     def _update_strength_data(self, data: SupplyData, code: str):
         """체결강도 업데이트"""
@@ -190,10 +217,10 @@ class MarketAnalyzer:
         if data.stock_code in pgm_map:
             p_info = pgm_map[data.stock_code]
             data.pgm_data = PgmData(
-                net_amt=float(p_info.get('net_amt', 0)),
-                ratio=float(p_info.get('ratio', 0)),
-                buy_amt=float(p_info.get('buy_amt', 0)),
-                sel_amt=float(p_info.get('sel_amt', 0))
+                netprps_prica=float(p_info.get('netprps_prica', 0)),
+                all_trde_rt=float(p_info.get('all_trde_rt', 0)),
+                buy_cntr_amt=float(p_info.get('buy_cntr_amt', 0)),
+                sel_cntr_amt=float(p_info.get('sel_cntr_amt', 0))
             )
 
     def _update_foreign_data(self, data: SupplyData, frgn_map: Dict):

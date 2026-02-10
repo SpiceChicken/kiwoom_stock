@@ -82,3 +82,26 @@ class MarketService:
         })
         
         return data.get("frgn_wicket_trde_upper", [])
+    
+    def get_recent_ticks(self, stock_code: str) -> Dict[str, int]:
+        """
+        주식 체결 정보 조회 (ka10003) - 문서 p.20
+        * 최근 체결 내역을 분석하여 '고래(Whale)'의 흔적을 찾음
+        """
+        data = self.base.request("/api/dostk/stkinfo", "ka10003", {
+            "stk_cd": stock_code,
+            "inqr_typ": "0", # 0:전체, 1:체결, 2:미체결
+            "cnt": "20"      # 최근 20건
+        })
+
+        return data.get('cntr_infr', {})
+
+    def get_order_book(self, stock_code: str) -> Dict[str, int]:
+        """
+        주식 호가 잔량 조회 (ka10004)
+        """
+        data = self.base.request("/api/dostk/mrkcond", "ka10004", {
+            "stk_cd": stock_code
+        })
+        
+        return data

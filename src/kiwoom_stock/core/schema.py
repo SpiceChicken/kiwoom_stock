@@ -4,10 +4,10 @@ from typing import List, Dict, Optional
 @dataclass
 class PgmData:
     """프로그램 매매 데이터"""
-    net_amt: float = 0.0    # 순매수금액
-    ratio: float = 0.0      # 비중
-    buy_amt: float = 0.0    # 매수금액
-    sel_amt: float = 0.0    # 매도금액
+    netprps_prica: float = 0.0    # 순매수금액
+    all_trde_rt: float = 0.0      # 비중
+    buy_cntr_amt: float = 0.0    # 매수금액
+    sel_cntr_amt: float = 0.0    # 매도금액
 
 @dataclass
 class ForeignData:
@@ -47,7 +47,6 @@ class SupplyData:
     # 기타 메타데이터
     trde_qty: int = 0
     cur_prc: float = 0.0
-    market_total_amount: float = 1.0
     
     # 하위 데이터 객체
     pgm_data: PgmData = field(default_factory=PgmData)
