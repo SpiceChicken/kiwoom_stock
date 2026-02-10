@@ -159,12 +159,41 @@ class MarketAnalyzer:
                 )
                 data.total_score = score_result['total_score']
                 # -------------------------------------------------------------
+                # 7. [Sniper Protocol] 심층 분석 (함수 분리)
+                # -------------------------------------------------------------
+                self._perform_deep_analysis(data, stock_code)
 
             self.last_supply_update = datetime.now()
         except Exception as e:
             logger.error(f"전체 수급 데이터 통합 중 오류: {e}")
 
     # --- Helper Methods: SupplyData 객체를 직접 조작하여 데이터 무결성 유지 ---
+
+    def _perform_deep_analysis(self, data: SupplyData, code: str):
+        """
+        [Sniper Protocol] 심층 분석 (Deep Analysis)
+        - 조건: 1차 점수가 합격권(75점) 이상인 경우에만 비싼 API 호출
+        - 역할: 호가 잔량 및 고래 체결 데이터를 수집하여 점수 보정
+        """
+        if data.total_score < 75.0:
+            return
+
+        try:
+            # A. 정밀 데이터 수집 (Collector 위임 - ka10004, ka10003)
+            # collector.py에 해당 메서드가 구현되어 있어야 함
+            order_book = self.collector.fetch_order_book(code)
+            ticks = self.collector.fetch_recent_ticks(code)
+            
+            # C. [Re-Scoring] 보너스 점수 적용
+            new_score = scoring.apply_deep_analysis_bonus(data.total_score, {**order_book, **ticks})
+            
+            if ticks['whale_found']:
+                logger.info(f"🐋 Whale Detected! {code}: {ticks['whale_vol']}억 Boost ({data.total_score} -> {new_score})")
+            
+            data.total_score = new_score
+            
+        except Exception as e:
+            logger.error(f"Deep analysis failed for {code}: {e}")
 
     def _update_basic_data(self, data: SupplyData, code: str):
         """기본 시세 및 거래량 비율 업데이트"""

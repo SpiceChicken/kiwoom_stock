@@ -309,3 +309,54 @@ def calculate_total_score(
         "total_score": round(final_score, 1),
         "weights": norm_w
     }
+
+def apply_deep_analysis_bonus(total_score: float, deep_data: Dict) -> float:
+    """
+    [Deep Dive] 정밀 분석 (호가/고래) 결과 반영 (Proportional Logic)
+    * Update: 상수(if-else) 제거 -> 연속 함수(Log/Tanh) 적용
+    * Logic:
+        1. 호가 잔량: Log2 스케일 적용 (2배 차이마다 ±5% 변동)
+        2. 고래 체결: Tanh 스케일 적용 (체결액 비례 가산, 자연스러운 포화)
+    """
+    final_score = total_score
+    
+    sell_total = deep_data.get('sell_total', 0)
+    buy_total = deep_data.get('buy_total', 0)
+    whale_found = deep_data.get('whale_found', False)
+    whale_vol = deep_data.get('whale_vol', 0.0)
+
+    # 1. 호가 잔량 분석 (Order Book Imbalance)
+    # Logarithmic Scale: 비율이 기하급수적으로 커져도 점수는 선형적으로 반영
+    if buy_total > 0 and sell_total > 0:
+        # Ratio = 매도잔량 / 매수잔량
+        # 1.0 (균형) -> log2(1) = 0 -> 변동 없음
+        # 2.0 (매도우위) -> log2(2) = +1 -> +5% Boost
+        # 0.5 (매수우위) -> log2(0.5) = -1 -> -5% Penalty
+        ratio = sell_total / buy_total
+        
+        # log2 적용 (비율의 대칭성 확보)
+        log_ratio = math.log2(ratio)
+        
+        # 계수 설정: 2배 차이당 5% 변동 (0.05)
+        # 상/하한 캡: 최대 ±15% (변동폭 제한)
+        imbalance_factor = max(-0.15, min(0.15, log_ratio * 0.05))
+        
+        final_score *= (1.0 + imbalance_factor)
+
+    # 2. 고래 체결 분석 (Whale Impact)
+    # Hyperbolic Tangent Scale: 금액이 커질수록 가산폭이 체감(Diminishing Return)
+    if whale_found and whale_vol > 0:
+        # whale_vol 단위: 억 원
+        # tanh(x * k): k는 민감도. 
+        # 10억 체결 시 -> tanh(10 * 0.1) = tanh(1.0) ≈ 0.76 (76% 반영)
+        # 50억 체결 시 -> tanh(50 * 0.1) = tanh(5.0) ≈ 0.99 (99% 반영)
+        
+        # Max Boost: 15% (0.15)
+        # 1억 체결: 0.1 * 0.15 = 1.5% 가산
+        # 10억 체결: 0.76 * 0.15 = 11.4% 가산
+        # 30억 이상: 거의 15% 가산 (포화)
+        
+        whale_boost = math.tanh(whale_vol * 0.1) * 0.15
+        final_score *= (1.0 + whale_boost)
+        
+    return float(round(min(100.0, final_score), 2))

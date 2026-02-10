@@ -79,3 +79,52 @@ class MarketDataCollector:
         except Exception as e:
             logger.error(f"외국계 창구 데이터 수집 실패: {e}")
             return {}
+
+    def fetch_order_book(self, code: str) -> List[Dict]:
+        try:
+            items = self.client.market.get_order_book(code)
+
+            # 실제 응답 구조에 따라 필드명이 다를 수 있으므로 안전하게 처리
+            sell_total = clean_numeric(items.get('tot_sel_req', "0"))
+            buy_total = clean_numeric(items.get('tot_buy_req', "0"))
+            
+            return {
+                'sell_total': sell_total,
+                'buy_total': buy_total
+            }
+        except Exception as e:
+            logger.error(f"호가 잔량 데이터 수집 실패: {e}")
+            return {}
+
+    def fetch_recent_ticks(self, code: str) -> List[Dict]:
+        try:
+            items = self.client.market.get_recent_ticks(code)
+
+            whale_volume_sum = 0.0
+            whale_detected = False
+
+            # KOSPI 100 기준 고래 임계값: 3억 원
+            WHALE_THRESHOLD = 300_000_000
+            
+            for tick in items:
+                try:
+                    # cur_prc: 체결가, cntr_trde_qty: 체결량
+                    price = clean_numeric(tick.get('cur_prc', "0"))
+                    volume = clean_numeric(tick.get('cntr_trde_qty', "0"))
+                    
+                    amount = price * volume
+                    
+                    # [기준] 한 건당 5천만 원 이상 체결 시 고래로 간주
+                    if amount >= WHALE_THRESHOLD:
+                        whale_detected = True
+                        whale_volume_sum += (amount / 100_000_000.0) # 억 단위 환산
+                except:
+                    continue
+
+            return {
+                'whale_found': whale_detected,
+                'whale_vol': round(whale_volume_sum, 2)
+            }
+        except Exception as e:
+            logger.error(f"호가 잔량 데이터 수집 실패: {e}")
+            return {}
