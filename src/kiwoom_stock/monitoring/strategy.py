@@ -174,6 +174,53 @@ class TradingStrategy:
         scores.append(current_score)
         self.history[stock_code] = scores[-5:] # 최근 5개 점수만 유지
         return momentum
+
+    def _check_universal_filters(self, metrics: SupplyData) -> Tuple[bool, str]:
+        """
+        [Universal Filters] 통계적 필터링 (Simple Constants)
+        """
+        details = metrics.score_detail
+        if not details: return False, ""
+            
+        alpha_score = details.get('alpha', 0.0)
+        supply_score = details.get('supply', 0.0)
+        vwap_score = details.get('vwap', 0.0)
+        trend_score = details.get('trend', 0.0)
+        total_score = metrics.total_score
+        
+        current_price = metrics.cur_prc
+        vwap_price = metrics.vwap
+
+        # 1. [VWAP Filters] 과열 방지
+        # "VWAP 점수가 총점의 절반도 안 된다면? -> 균형 붕괴 (너무 비쌈)"
+        if vwap_score < total_score * 0.5:
+            if current_price > vwap_price:
+                return True, f"VWAP 과열 (Score: {vwap_score:.1f})"
+            else:
+                # 가격은 싼데 모멘텀도 없다? -> 하락 추세 (Dip Buying 실패)
+                if alpha_score < total_score * 0.8:
+                    return True, f"VWAP 하회 & 모멘텀 부족 (Alpha: {alpha_score:.1f})"
+
+        # 2. [Supply Cut] 가짜 모멘텀 방지 (비율 체크)
+        # 모멘텀(Alpha)은 좋은데 수급(Supply)이 70%도 안 따라온다? -> 가짜
+        if alpha_score > total_score: # 관심권 이상일 때만 체크
+            min_supply = alpha_score * 0.7
+            if supply_score < min_supply:
+                 return True, f"수급 불균형 ({alpha_score:.1f} < {min_supply:.1f})"
+
+        # 3. [Trend Trap] 추세 설거지 방지 (비율 체크)
+        # 추세(Trend)는 높은데, 이를 받쳐줄 힘(Support)이 75%도 안 된다? -> 설거지
+        if trend_score >= total_score:
+            max_support = max(alpha_score, supply_score)
+            min_support = trend_score * 0.75
+            if max_support < min_support:
+                return True, f"추세 소진 (Support {max_support:.1f} < {min_support:.1f})"
+
+        # 4. [Safety Net] 기초 체력 체크
+        if (supply_score + vwap_score) / 2 < total_score * 0.5:
+             return True, f"S+V 밸런스 붕괴"
+
+        return False, ""
         
     def evaluate(self, metrics: SupplyData) -> Dict:
         """
@@ -202,7 +249,13 @@ class TradingStrategy:
         else:
             effective_threshold = self.curr_strict_th
 
+        # 아무리 점수가 높아도, 여기 걸리면 무조건 탈락
+        is_filtered, filter_reason = self._check_universal_filters(metrics)
+
         # 최종 판정
+        if is_filtered:
+            status = f"관망 ({filter_reason})"
+            is_buy_signal = False
         if score >= effective_threshold:
             if momentum < 0:
                 status = "⚠️고점경계" # 점수는 높지만 꺾이는 중
