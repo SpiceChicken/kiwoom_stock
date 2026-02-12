@@ -87,12 +87,12 @@ class TradingStrategy:
         if self.debug_mode: return True
         now = datetime.now()
         if now.weekday() >= 5: return False
-        return time(8, 30) <= now.time() <= self.exit_time_obj
+        return time(9, 0) <= now.time() <= self.exit_time_obj
 
     def is_trading_window(self) -> bool:
         """신규 진입 가능 시간 체크 (15:00 마감)"""
         if self.debug_mode: return True
-        return datetime.now().time() < self.deadline_time
+        return time(9, 0) <= datetime.now().time() < self.deadline_time
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
         """계좌 전체 손실 한도 초과 여부 확인"""

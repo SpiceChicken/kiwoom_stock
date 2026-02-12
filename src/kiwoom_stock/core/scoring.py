@@ -43,77 +43,69 @@ def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> flo
 def calculate_alpha_score(data: SupplyData) -> float:
     """
     [Alpha] 적응형 가속도 평가 (Physics-based Net Force)
-    * Logic: Thrust(추진력) - Gravity(중력) - Drag(매물저항) - [New] Overheat(과열저항)
+    * Logic: Thrust(추진력) - Gravity(중력) - Drag(매물저항) - Overheat(과열저항)
     * Update: RSI 과열을 scoring 단계에서 '내부 저항'으로 처리하여 점수를 스스로 깎음
     """
     cfg = config.SCORING_CONFIG['alpha']
 
-    # 1. 추진력(Thrust) 계산
+    # 1. 데이터 전처리 (단위 통일)
     # ---------------------------------------------------
-    raw_vol_ratio = data.vol_ratio
-    vol_r = (raw_vol_ratio / 100.0) if raw_vol_ratio > 50.0 else raw_vol_ratio
-    vol_r = max(0.1, vol_r)
+    raw_vol = data.vol_ratio # 거래대비
+    rsi_v = data.trend_rsi # RSI
+    pwr_v = data.strength # 체결강도
 
-    rsi_v = getattr(data, 'trend_rsi', 50.0)
-    pwr_v = data.strength
-
-    # [Normalization]
-    norm_vol = math.log(vol_r) / cfg['std_vol']
-    norm_mom = (rsi_v - 50.0) / cfg['std_rsi']
-    norm_pow = (pwr_v - 100.0) / cfg['std_pwr']
-
-    # [Combination]
-    vol_influence = math.tanh(norm_vol) * cfg['w_vol_scale']
-    w_vol = max(0.05, min(0.8, cfg['w_vol_base'] + vol_influence))
-    remain = 1.0 - w_vol
+    # 2. 핵심 지표 계산 (Tanh Scaling)
+    # ---------------------------------------------------
     
-    # thrust: 순수 상승 에너지
-    thrust = (w_vol * norm_vol) + (remain * 0.6 * norm_mom) + (remain * 0.4 * norm_pow)
+    # A. 거래량 (Volume): 거래비율 - cfg['alpha_volumn'](100)
+    # Scale: 200% 차이를 1.0으로 봄 (즉, 300% 터지면 tanh(1.0)=0.76점)
+    # 100% -> 0점, 300% -> 0.76점, 500% -> 0.96점 (포화)
+    norm_vol = math.tanh((raw_vol - cfg['alpha_volumn']) / 100.0)
 
+    # B. RSI (Momentum): cfg['alpha_rsi'](75) - RSI (75 이하는 점수 상승, 75 이상은 하락)
+    # RSI > 75 -> 과열 페널티
+    norm_mom = math.tanh((cfg['alpha_rsi'] - rsi_v) / 15.0)
 
-    # 2. 저항력(Resistance) 계산: 중력 + 공기저항 + [New] 과열
+    # C. 체결강도 (Power): 체결강도 - cfg['alpha_power'](100)
+    # Scale: 50% 차이를 1.0으로 봄
+    # 100% -> 0점, 150% -> (150-100) / 50 = 1.0 -> tanh(1.0) = 0.76점
+    norm_pow = math.tanh((pwr_v - cfg['alpha_power']) / 50)
+    
+    # thrust: 단순 평균 (Average)
+    thrust = (norm_vol + norm_mom + norm_pow) / 3.0
+
+    # 3. 저항력(Resistance) 계산: 중력 + 공기저항 + 과열
     # ---------------------------------------------------
     resistance_force = 0.0
-    atr = max(0.5, getattr(data, 'atr_percent', 1.5))
+    atr_ratio = getattr(data, 'atr_percent', 0.015)
+    atr_ratio = max(0.005, atr_ratio) # 0.5% 미만은 0.5%로 보정 (Divide by Zero 방지)
     
-    # A. 중력 (Gravity): EMA60 역배열 저항
+    # A. 중력 (Gravity): EMA60 역배열
     if data.ema60 > 0 and data.cur_prc < data.ema60:
         dist = data.ema60 - data.cur_prc
-        gap_sigma = dist / (data.cur_prc * atr / 100.0)
-        gravity = math.log(1.0 + gap_sigma) * cfg['w_resistance']
+        # Sigma = 주가 * 변동성비율(ATR)
+        sigma = data.cur_prc * atr_ratio 
+        gap_sigma = dist / sigma
+        
+        # 가중치 2.0 (Config 대체)
+        gravity = math.sqrt(gap_sigma)
         resistance_force += gravity
 
-    # B. 공기저항 (Drag): VWAP 붕괴 저항
+    # B. 공기저항 (Drag): VWAP 하회
     if data.vwap > 0 and data.cur_prc < data.vwap:
         dist = data.vwap - data.cur_prc
-        gap_sigma = dist / (data.cur_prc * atr / 100.0)
-        drag = math.sqrt(gap_sigma) * cfg['w_support']
+        sigma = data.cur_prc * atr_ratio
+        gap_sigma = dist / sigma
+        
+        drag = math.sqrt(gap_sigma)
         resistance_force += drag
 
-    # C. [New] 과열 저항 (Overheat Resistance)
-    # RSI가 80을 넘어가면 '엔진 과열'로 보아 저항이 급격히 발생
-    # RSI 80: 저항 0
-    # RSI 85: 저항 발생
-    # RSI 90: 추진력을 상쇄할 만큼 강력한 저항
-    if rsi_v > 80.0:
-        excess_heat = rsi_v - 80.0
-        # 제곱으로 페널티를 주어 90 넘으면 점수 급락 유도
-        thermal_drag = (excess_heat / 5.0) ** 2.0  
-        resistance_force += thermal_drag
-        
-        # 로깅 (필요시)
-        # logger.debug(f"[{data.stock_name}] RSI Overheat({rsi_v}): Drag={thermal_drag:.2f}")
-
-
-    # 3. 알짜 힘 (Net Force) 및 점수 산출
+    # 5. 알짜 힘 (Net Force) 및 점수 산출
     # ---------------------------------------------------
     net_force = thrust - resistance_force
     
-    # Adaptive Slope
-    raw_k = 12.0 / (0.5 + (atr * 0.5))
-    adaptive_k = max(cfg['k_min'], min(cfg['k_max'], raw_k))
-    
-    final_score = _sigmoid(net_force, k=adaptive_k) * 100.0
+    final_score = _sigmoid(net_force, k=atr_ratio * cfg['atr_leverage']) * 100.0
+    print(f"stock: {data.stock_code}, norm_vol: {norm_vol:.2f}, norm_mom: {norm_mom:.2f}, norm_pow {norm_pow:.2f}, net_force: {net_force:.2f}, final_score: {final_score:.2f}")
     
     return float(round(final_score, 2))
 
