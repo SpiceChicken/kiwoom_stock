@@ -33,9 +33,8 @@ class TradingStrategy:
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config: Dict[str, Any] = {}
         
-        # [Thresholds] 진입 임계값 초기화 (87.0/82.0 이원화)
+        # [Thresholds] 진입 임계값 초기화
         self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 (엄격)
-        self.curr_supply_th = 82.0  # Supply 주도 시 (완화)
         self.curr_alert_th = 75.0   # 관심 종목 등록 기준
         self.curr_interest_th = 65.0  # 절대 이탈 기준선 (기본값)
 
@@ -63,9 +62,8 @@ class TradingStrategy:
                 self._current_regime = "DEBUG_MODE"
                 debug_th = self.settings.get("debug_thresholds", {})
                 self.curr_strict_th = debug_th.get("strong", 50.0)
-                self.curr_supply_th = debug_th.get("strong_supply", 50.0)
                 self.curr_alert_th = debug_th.get("alert", 40.0)
-                logger.warning(f"🚨 [DEBUG] Thresholds Fixed: {self.curr_strict_th}/{self.curr_supply_th}")
+                logger.warning(f"🚨 [DEBUG] Thresholds Fixed: {self.curr_strict_th}")
             return
 
         regime_val = regime.value if hasattr(regime, 'value') else str(regime)
@@ -78,11 +76,10 @@ class TradingStrategy:
             # 설정 파일 값 우선 적용 (없으면 기본값 87/82 유지)
             config_th = self._cached_config.get("thresholds", {})
             self.curr_strict_th = config_th.get('strong', 87.0)
-            self.curr_supply_th = config_th.get('strong_supply', 82.0)
             self.curr_alert_th = config_th.get('alert', 75.0)
             self.curr_interest_th = config_th.get('interest', 65.0)
             
-            logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}, Supply: {self.curr_supply_th}")
+            logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}")
 
     # --- Time & Risk Checks ---
     def is_monitoring_time(self) -> bool:
@@ -191,6 +188,10 @@ class TradingStrategy:
         current_price = metrics.cur_prc
         vwap_price = metrics.vwap
 
+        # [Alpha Filters] 모멘텀 필터링
+        if alpha_score < self.curr_strict_th:
+            return True, f"Alpha 부족 (Score: {alpha_score:.1f})"
+
         # 1. [VWAP Filters] 과열 방지
         # "VWAP 점수가 총점의 절반도 안 된다면? -> 균형 붕괴 (너무 비쌈)"
         if vwap_score < total_score * 0.5:
@@ -241,14 +242,6 @@ class TradingStrategy:
         # max 함수의 key를 람다로 명시하여 타입 에러 방지
         primary_driver = max(score_detail, key=lambda k: score_detail[k])
 
-        # [Logic] 차등 진입 전략
-        # - Supply 주도: 완화된 기준 (82.0) 적용 -> 기회 포착
-        # - Trend 주도: 엄격한 기준 (87.0) 적용 -> 고점 추격 방지
-        if primary_driver == 'supply':
-            effective_threshold = self.curr_supply_th
-        else:
-            effective_threshold = self.curr_strict_th
-
         # 아무리 점수가 높아도, 여기 걸리면 무조건 탈락
         is_filtered, filter_reason = self._check_universal_filters(metrics)
 
@@ -258,7 +251,7 @@ class TradingStrategy:
             is_buy_signal = False
 
         else:
-            if score >= effective_threshold:
+            if score >= self.curr_strict_th:
                 if momentum < 0:
                     status = "⚠️고점경계" # 점수는 높지만 꺾이는 중
                     is_buy_signal = False
