@@ -256,23 +256,25 @@ class TradingStrategy:
         if is_filtered:
             status = f"관망 ({filter_reason})"
             is_buy_signal = False
-        if score >= effective_threshold:
-            if momentum < 0:
-                status = "⚠️고점경계" # 점수는 높지만 꺾이는 중
-                is_buy_signal = False
-            elif score_detail['trend'] >= 90.0:
-                status = "⚠️추세과열" # [Filter] Trend 과열 필터 (평균회귀 위험)
-                is_buy_signal = False
-            else:
-                status = "🔥강력추천"
-                is_buy_signal = True
-        elif score >= self.curr_alert_th:
-            if momentum >= self.momentum_threshold:
-                status = "🚀수급폭발" # 점수 부족하나 기세가 좋음
-                is_buy_signal = False
-            else:
-                status = "👀관심"
-                is_buy_signal = False
+
+        else:
+            if score >= effective_threshold:
+                if momentum < 0:
+                    status = "⚠️고점경계" # 점수는 높지만 꺾이는 중
+                    is_buy_signal = False
+                elif score_detail['trend'] >= 90.0:
+                    status = "⚠️추세과열" # [Filter] Trend 과열 필터 (평균회귀 위험)
+                    is_buy_signal = False
+                else:
+                    status = "🔥강력추천"
+                    is_buy_signal = True
+            elif score >= self.curr_alert_th:
+                if momentum >= self.momentum_threshold:
+                    status = "🚀수급폭발" # 점수 부족하나 기세가 좋음
+                    is_buy_signal = False
+                else:
+                    status = "👀관심"
+                    is_buy_signal = False
 
         return {
                 "score": score,
