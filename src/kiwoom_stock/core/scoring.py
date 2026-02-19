@@ -43,264 +43,304 @@ def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> flo
 def calculate_alpha_score(data: SupplyData) -> float:
     """
     [Alpha] 적응형 가속도 평가 (Physics-based Net Force)
-    * Logic: Thrust(추진력) - Gravity(중력) - Drag(매물저항) - [New] Overheat(과열저항)
+    * Logic: Thrust(추진력) - Gravity(중력) - Drag(매물저항) - Overheat(과열저항)
     * Update: RSI 과열을 scoring 단계에서 '내부 저항'으로 처리하여 점수를 스스로 깎음
     """
     cfg = config.SCORING_CONFIG['alpha']
 
-    # 1. 추진력(Thrust) 계산
+    # 1. 데이터 전처리 (단위 통일)
     # ---------------------------------------------------
-    raw_vol_ratio = data.vol_ratio
-    vol_r = (raw_vol_ratio / 100.0) if raw_vol_ratio > 50.0 else raw_vol_ratio
-    vol_r = max(0.1, vol_r)
+    raw_vol = data.vol_ratio # 거래대비
+    rsi_v = data.trend_rsi # RSI
+    pwr_v = data.strength # 체결강도
 
-    rsi_v = getattr(data, 'trend_rsi', 50.0)
-    pwr_v = data.strength
-
-    # [Normalization]
-    norm_vol = math.log(vol_r) / cfg['std_vol']
-    norm_mom = (rsi_v - 50.0) / cfg['std_rsi']
-    norm_pow = (pwr_v - 100.0) / cfg['std_pwr']
-
-    # [Combination]
-    vol_influence = math.tanh(norm_vol) * cfg['w_vol_scale']
-    w_vol = max(0.05, min(0.8, cfg['w_vol_base'] + vol_influence))
-    remain = 1.0 - w_vol
+    # 2. 핵심 지표 계산 (Tanh Scaling)
+    # ---------------------------------------------------
     
-    # thrust: 순수 상승 에너지
-    thrust = (w_vol * norm_vol) + (remain * 0.6 * norm_mom) + (remain * 0.4 * norm_pow)
+    # A. 거래량 (Volume): 거래비율 - cfg['alpha_volumn'](100)
+    # Scale: 200% 차이를 1.0으로 봄 (즉, 300% 터지면 tanh(1.0)=0.76점)
+    # 100% -> 0점, 300% -> 0.76점, 500% -> 0.96점 (포화)
+    norm_vol = math.tanh((raw_vol - cfg['alpha_volumn']) / 100.0)
 
+    # B. RSI (Momentum): cfg['alpha_rsi'](75) - RSI (75 이하는 점수 상승, 75 이상은 하락)
+    # RSI > 75 -> 과열 페널티
+    norm_mom = math.tanh((cfg['alpha_rsi'] - rsi_v) / 15.0)
 
-    # 2. 저항력(Resistance) 계산: 중력 + 공기저항 + [New] 과열
+    # C. 체결강도 (Power): 체결강도 - cfg['alpha_power'](100)
+    # Scale: 50% 차이를 1.0으로 봄
+    # 100% -> 0점, 150% -> (150-100) / 50 = 1.0 -> tanh(1.0) = 0.76점
+    norm_pow = math.tanh((pwr_v - cfg['alpha_power']) / 50)
+    
+    # thrust: 단순 평균 (Average)
+    thrust = (norm_vol + norm_mom + norm_pow) / 3.0
+
+    # 3. 저항력(Resistance) 계산: 중력 + 공기저항 + 과열
     # ---------------------------------------------------
     resistance_force = 0.0
-    atr = max(0.5, getattr(data, 'atr_percent', 1.5))
+    atr_ratio = getattr(data, 'atr_percent', 0.015)
+    atr_ratio = max(0.005, atr_ratio) # 0.5% 미만은 0.5%로 보정 (Divide by Zero 방지)
     
-    # A. 중력 (Gravity): EMA60 역배열 저항
+    # A. 중력 (Gravity): EMA60 역배열
     if data.ema60 > 0 and data.cur_prc < data.ema60:
         dist = data.ema60 - data.cur_prc
-        gap_sigma = dist / (data.cur_prc * atr / 100.0)
-        gravity = math.log(1.0 + gap_sigma) * cfg['w_resistance']
+        # Sigma = 주가 * 변동성비율(ATR)
+        sigma = data.cur_prc * atr_ratio 
+        gap_sigma = dist / sigma
+        
+        # 가중치 2.0 (Config 대체)
+        gravity = math.sqrt(gap_sigma)
         resistance_force += gravity
 
-    # B. 공기저항 (Drag): VWAP 붕괴 저항
+    # B. 공기저항 (Drag): VWAP 하회
     if data.vwap > 0 and data.cur_prc < data.vwap:
         dist = data.vwap - data.cur_prc
-        gap_sigma = dist / (data.cur_prc * atr / 100.0)
-        drag = math.sqrt(gap_sigma) * cfg['w_support']
+        sigma = data.cur_prc * atr_ratio
+        gap_sigma = dist / sigma
+        
+        drag = math.sqrt(gap_sigma)
         resistance_force += drag
 
-    # C. [New] 과열 저항 (Overheat Resistance)
-    # RSI가 80을 넘어가면 '엔진 과열'로 보아 저항이 급격히 발생
-    # RSI 80: 저항 0
-    # RSI 85: 저항 발생
-    # RSI 90: 추진력을 상쇄할 만큼 강력한 저항
-    if rsi_v > 80.0:
-        excess_heat = rsi_v - 80.0
-        # 제곱으로 페널티를 주어 90 넘으면 점수 급락 유도
-        thermal_drag = (excess_heat / 5.0) ** 2.0  
-        resistance_force += thermal_drag
-        
-        # 로깅 (필요시)
-        # logger.debug(f"[{data.stock_name}] RSI Overheat({rsi_v}): Drag={thermal_drag:.2f}")
-
-
-    # 3. 알짜 힘 (Net Force) 및 점수 산출
+    # 5. 알짜 힘 (Net Force) 및 점수 산출
     # ---------------------------------------------------
     net_force = thrust - resistance_force
     
-    # Adaptive Slope
-    raw_k = 12.0 / (0.5 + (atr * 0.5))
-    adaptive_k = max(cfg['k_min'], min(cfg['k_max'], raw_k))
-    
-    final_score = _sigmoid(net_force, k=adaptive_k) * 100.0
+    final_score = _sigmoid(net_force, k=atr_ratio * cfg['atr_leverage']) * 100.0
+    print(f"stock: {data.stock_code}, norm_vol: {norm_vol:.2f}, norm_mom: {norm_mom:.2f}, norm_pow {norm_pow:.2f}, net_force: {net_force:.2f}, final_score: {final_score:.2f}")
     
     return float(round(final_score, 2))
-
 
 def calculate_supply_score(data: SupplyData) -> float:
     """
-    [Supply] 수급 강도 (Unit Fix)
-    * Fix: 순매수 금액(Won)을 백만원 단위로 변환하여 거래대금(Million)과 비율 매칭
-    * Logic: 체결강도(Base) * 수급 임팩트(Multiplier)
+    [Supply] 수급 폭발력 (Aggressive Buying Pressure)
+    - 목적: 실질적인 단기 시세 분출을 일으키는 '공격적 매수세' 포착
+    - 변경사항: 프로그램/외인 가중치 제거 -> 단순 합산 (Smart Money Sum)
     """
     cfg = config.SCORING_CONFIG['supply']
-
-    # 1. Base Score (체결강도 기반)
-    # 100% -> 50점, 150% -> 75점, 200% -> 100점
-    base_score = max(0.0, min(100.0, 50.0 + (data.strength - 100.0) * 0.5))
-
-    # 2. Market Cap Reliability (거래대금 규모)
-    # amt_mil: 백만 원 단위 (예: 10,000 = 100억원)
-    amt_mil = data.trde_qty * data.vwap / 1000000.0
     
-    if amt_mil <= cfg['min_amt_mil']:
-        return 0.0
-
-    # 3. Supply Impact (Net Buy Ratio)
-    net_buy_ratio = 0.0
-    if amt_mil > 0:
-        if not data.pgm_data: pgm_net = 0.0
-        else: pgm_net = getattr(data.pgm_data, 'netprps_prica', 0.0)
-
-        if not data.foreign_data: frgn_net = 0.0
-        else: frgn_net = getattr(data.foreign_data, 'netprps_prica', 0.0)
-        
-        # 거래대금 대비 순매수 비중 계산
-        pgm_ratio = pgm_net / amt_mil
-        frgn_ratio = frgn_net / amt_mil
-        
-        # [Smart Money] 외국인 수급에 1.1배 가중치 부여
-        net_buy_ratio = pgm_ratio + (frgn_ratio * 1.1)
+    # 1. 체결강도 (Execution Strength) - 단기 시세의 핵심 엔진
+    # ------------------------------------------------------------------
+    # Physics: 100% 이하는 '정지/후퇴'로 간주하여 과감히 0점 처리.
+    # 100%를 초과하는 '잉여 힘(Excess Power)'에 대해서만 점수 부여.
     
-    # 4. Final Multiplier
-    # 부정적 수급: 최소 0.5배 (점수 하락)
-    multiplier = max(cfg['multiplier_floor'], 1.0 + net_buy_ratio)
+    raw_strength = data.strength
     
-    current_supply_score = min(100.0, base_score * multiplier)
-    return float(round(current_supply_score, 2))
-
-
-def calculate_vwap_score(data: SupplyData) -> float:
-    """[VWAP] 지지력 + 오버슈팅 방어"""
-    cfg = config.SCORING_CONFIG['vwap']
-
-    if data.vwap <= 0: return 50.0
-    
-    # 1. Z-Score
-    raw_gap_pct = (data.cur_prc - data.vwap) / data.vwap * 100.0
-    
-    if not hasattr(data, 'atr_percent') or data.atr_percent is None:
-        atr = cfg['atr_default']
+    if raw_strength <= 100.0:
+        strength_score = 0.0
     else:
-        atr = max(0.5, data.atr_percent)
+        # Tanh Scale: 100을 기점으로 50단위 증가 시마다 점수 포화
+        # 150% -> tanh(1.0) ≈ 76점
+        strength_score = math.tanh((raw_strength - 100.0) / 50.0) * 100.0
 
-    adaptive_scale = atr * 2.0
-    z_score = _safe_div(raw_gap_pct, adaptive_scale)
+
+    # 2. 스마트 머니 침투율 (Smart Money Penetration)
+    # ------------------------------------------------------------------
+    # Physics: '누가 샀는가'에 가중치를 두지 않고, '얼마나 관여했는가(Density)'만 측정.
+    # 거래대금 대비 주포(기관/외인)의 순매수 비중 계산.
     
-    # 2. Base Score
-    damped_z = z_score * 0.5
-    base_score = 50.0 + (math.tanh(damped_z) * 50.0)
+    # 거래대금 추정 (백만 원 단위)
+    amt_mil = (data.trde_qty * data.vwap) / 1_000_000.0
     
-    # 3. Overheat Penalty
-    threshold = 3.0
-    if z_score > threshold:
-        overheat = z_score - threshold
-        overheat = min(overheat, cfg['overheat_cap'])
-        penalty = _rational_penalty(overheat, hardness=cfg['penalty_hardness'])
+    # 데이터 방어: 거래대금 1억 미만은 신뢰도 부족으로 패스
+    if amt_mil < cfg['min_amt_mil']: 
+        smart_score = 0.0
     else:
-        penalty = 1.0
+        pgm_net = getattr(data.pgm_data, 'netprps_prica', 0.0)
+        frgn_net = getattr(data.foreign_data, 'netprps_prica', 0.0)
         
-    final_score = base_score * penalty
+        # [Refactored] 가중치 제거 (Unbiased Sum)
+        # 프로그램이든 외국인이든 '돈의 힘'은 평등하다고 가정.
+        smart_net = pgm_net + frgn_net
+        
+        # 침투율 (Penetration Ratio)
+        # 전체 거래대금 중 메이저 자금이 차지하는 비중
+        penetration = smart_net / amt_mil
+        
+        # Tanh Scale: 거래대금의 5%(0.05) 이상을 주포가 샀다면 강력한 신호
+        # 0.05 -> tanh(1.0) ≈ 76점 / 음수(순매도)면 마이너스 점수
+        smart_score = math.tanh(penetration * 20.0) * 100.0
+
+
+    # 3. 최종 결합 (Combination with Quality Filter)
+    # ------------------------------------------------------------------
+    
+    # Base: 체결강도 (즉각적인 시세 반응)
+    final_score = strength_score
+    
+    # Boost: 스마트 머니가 받쳐주면 점수 증폭
+    # 상승 국면(점수>0)일 때만 반영 (하락 중에 외인이 사봤자 물 타기일 수 있음)
+    if final_score > 0:
+        # 가중치 없이 스마트 머니 점수를 30% 비중으로 혼합
+        # 예: 체결강도 만점(100) + 외인 매수 만점(100) -> 100점
+        # 예: 체결강도 만점(100) + 외인 폭풍 매도(-100) -> 40점 (신뢰도 하락)
+        final_score = (final_score * 0.7) + (max(-50.0, smart_score) * 0.3)
+    
+    # Filter: 거래량 퀄리티 (Volume Quality)
+    # 거래량이 전일 동시간 대비 50% 미만이면 가짜 상승(허매수) 가능성 -> 점수 반토막
+    vol_ratio = data.vol_ratio
+    if vol_ratio < 50.0:
+        final_score *= 0.5
+    elif vol_ratio > 200.0:
+        # 거래량 200% 이상 폭발 시 가산점 (최대 10점)
+        bonus = math.log10(vol_ratio / 100.0) * 10.0 
+        final_score += min(10.0, bonus)
+
     return float(round(max(0.0, min(100.0, final_score)), 2))
 
+def calculate_vwap_score(data: SupplyData) -> float:
+    """
+    [VWAP] 동적 탄성 도약 (Dynamic Trampoline Effect)
+    - 목적: VWAP를 발판 삼아 튀어 오르는 '위치(Sweet Spot)'와 '힘(Strength)'의 결합
+    - 특징: 체결강도와 가우스 곡선을 이용해 모멘텀 보너스를 동적으로 스케일링
+    """
+    if getattr(data, 'vwap', 0) <= 0: return 50.0
+    
+    disparity_pct = (data.cur_prc - data.vwap) / data.vwap * 100.0
+    
+    # ------------------------------------------------------------------
+    # 1. 위치 에너지 (Position Score)
+    # ------------------------------------------------------------------
+    if disparity_pct < -0.5:
+        # VWAP 아래로 완전히 가라앉음 (익사)
+        return 0.0
+    elif disparity_pct < 0:
+        # 수면 아래 돌파 직전 (30~50점)
+        pos_score = 30.0 + (disparity_pct + 0.5) * 40.0
+    else:
+        # 상승 구간: Tanh 기울기를 완화(0.33)하여 너무 쉽게 점수가 오르지 않게 제어
+        # 이격도 3% 수준에서 약 88점 도달
+        pos_score = 50.0 + math.tanh(disparity_pct * 0.33) * 50.0
+
+    
+    # ------------------------------------------------------------------
+    # 2. 동적 운동 에너지 보너스 (Dynamic Momentum Bonus)
+    # ------------------------------------------------------------------
+    momentum_bonus = 0.0
+    if disparity_pct > 0:
+        # A. 가우스 최적점 (Gaussian Peak): 이격도 2.0% 부근에서 탄성 극대화
+        # 2.0%에서 1.0(Max), 1.0%나 3.0%에서 약 0.6 수준으로 부드럽게 감소
+        gaussian_peak = math.exp(-0.5 * ((disparity_pct - 2.0) / 1.0) ** 2)
+        
+        # B. 힘 승수 (Strength Multiplier): 체결강도가 보너스의 크기를 결정
+        # 체결강도가 100% 이하면 보너스 무효화, 150% 이상일 때 강하게 발동
+        raw_strength = getattr(data, 'strength', 100.0)
+        strength_multiplier = max(0.0, math.tanh((raw_strength - 100.0) / 50.0))
+        
+        # 최대 15점의 보너스를 '위치 효율(Gaussian)'과 '현재 밀어올리는 힘(Strength)'에 비례하여 동적 지급
+        momentum_bonus = 15.0 * gaussian_peak * strength_multiplier
+
+    
+    # ------------------------------------------------------------------
+    # 3. 과열 제어 (Overheat Control)
+    # ------------------------------------------------------------------
+    penalty = 1.0
+    if disparity_pct > 5.0:
+        # 5% 초과분 1%당 10% 감점 (추격매수 방지)
+        excess = disparity_pct - 5.0
+        penalty = max(0.0, 1.0 - (excess * 0.1))
+
+
+    final_score = (pos_score + momentum_bonus) * penalty
+    
+    return float(round(max(0.0, min(100.0, final_score)), 2))
 
 def calculate_trend_score(data: SupplyData) -> float:
-    """[Trend] 효율성 + 클라이맥스 방지"""
-    cfg = config.SCORING_CONFIG['trend']
-    eps = cfg['eps']
+    """
+    [Trend] 발사각 및 가속도 (Launch Angle & Divergence)
+    - 목적: 단기 이평선이 중기 이평선을 뚫고 폭발적으로 확산하는 '각도' 측정
+    - 변경사항: 효율성/클라이맥스 페널티 제거 -> 단기 이격 확산도 중심의 공격적 로직
+    """
+    
+    # 데이터 유효성 검사
+    if data.ema20 <= 0 or data.ema5 <= 0: return 50.0
 
-    if data.ema60 <= eps: return 50.0
+    # 1. 단기 추세 방향 (Direction)
+    # ------------------------------------------------------------------
+    # Physics: 단기(5)가 중기(20) 아래에 있다면 하락 파동이 진행 중인 것.
+    # 단타 엔진에서는 떨어지는 칼날의 반등을 노리지 않음. 가차 없이 0점.
+    if data.ema5 < data.ema20:
+        return 0.0
 
-    # 1. Vectors & Path
-    vec_p_s = data.cur_prc - data.ema5
-    vec_s_m = data.ema5 - data.ema20
-    vec_m_l = data.ema20 - data.ema60
-    
-    net_move = (data.cur_prc - data.ema60)
-    total_path = abs(vec_p_s) + abs(vec_s_m) + abs(vec_m_l)
-    
-    # 2. Efficiency
-    efficiency = _safe_div(abs(net_move), max(total_path, eps), default=0.0)
-    
-    # 3. Strength Z-Score
-    atr = max(0.5, getattr(data, 'atr_percent', 1.5))
-    safe_ema60 = max(data.ema60, eps)
-    net_move_pct = (net_move / safe_ema60) * 100.0
-    z_score = _safe_div(net_move_pct, atr * 2.0)
-    
-    # 4. Base Score
-    adjusted_strength = z_score * efficiency
-    base_score = _sigmoid(adjusted_strength, k=1.0) * 100.0
+    # 2. 발사각 측정 (Divergence = Launch Angle)
+    # ------------------------------------------------------------------
+    # EMA5와 EMA20이 얼마나 가파르게 벌어지고 있는가? (%)
+    divergence_pct = (data.ema5 - data.ema20) / data.ema20 * 100.0
 
-    # 5. Climax Penalty
-    threshold = cfg['climax_threshold']
-    if z_score > threshold:
-        climax = z_score - threshold
-        penalty = _rational_penalty(climax, hardness=cfg['penalty_hardness'])
-    else:
-        penalty = 1.0
+    # Tanh Scale 적용 (S-Curve)
+    # 이격도가 0% ~ 3%로 벌어지는 구간을 집중적으로 점수화
+    # 1.5% 벌어졌을 때 -> tanh(1.0) ≈ 76점 (본격적인 슈팅)
+    # 3.0% 벌어졌을 때 -> tanh(2.0) ≈ 96점 (폭주 상태)
+    angle_score = math.tanh(divergence_pct / 1.5) * 100.0
+
+
+    # 3. 주가 위치 보정 (Riding the Trend)
+    # ------------------------------------------------------------------
+    # 이평선(평균)은 오르고 있어도, 현재 주가가 꺾이면 선행 지표로서 위험함.
+    price_to_ema5 = (data.cur_prc - data.ema5) / data.ema5 * 100.0
+
+    if price_to_ema5 < 0:
+        # 단기 생명선(EMA5)을 아래로 깼다면, 추세가 꺾이기 시작한 것 (조정 진입)
+        # 발사각 점수를 즉시 50% 삭감 (급브레이크)
+        angle_score *= 0.5
         
-    final_score = base_score * penalty
-    return float(round(final_score, 2))
+    elif price_to_ema5 > 3.0:
+        # 주가가 EMA5보다 3% 이상 높으면 순간적인 갭(음봉 꽂힐 확률) 리스크가 있음.
+        # 기존 로직처럼 '클라이맥스 페널티'를 주어 점수를 폭락시키진 않지만,
+        # 약간의 마찰력(Drag)을 주어 최고점 도달을 살짝 지연시킴 (90%만 반영)
+        angle_score *= 0.9
 
+    return float(round(max(0.0, min(100.0, angle_score)), 2))
 
 def calculate_dynamic_weights(data: SupplyData) -> Dict[str, float]:
-    """[Weights] 동적 가중치"""
-    # 1. 거래량 가중치
-    safe_vol = max(0.0, min(data.vol_factor, 10.0))
-    imp_alpha = 1.0 * safe_vol
-    imp_supply = 1.0 * safe_vol
-    
-    # 2. VWAP 이격도 가중치
+    """
+    [Weights] 동적 가중치 (3-Factor 전술 엔진)
+    - 특징: Alpha 더미 데이터 삭제. 순수 Trigger(S, V, T) 비율만 반환
+    """
+    vol_multiplier = 1.0 + math.log10(max(1.0, data.vol_factor))
+    imp_supply = 1.2 * vol_multiplier
+
+    imp_vwap = 1.0
     if data.vwap > 0:
-        deviation = abs(ind.calculate_disparity(data.cur_prc, data.vwap))
-        denom = max(0.1, getattr(data, 'atr_percent', 1.0))
-        imp_vwap = 1.5 / (1.0 + (deviation / denom))
-    else:
-        imp_vwap = 1.0
+        disparity_pct = (data.cur_prc - data.vwap) / data.vwap * 100.0
+        if disparity_pct > 3.0:
+            imp_vwap = max(0.5, 1.0 - (disparity_pct - 3.0) * 0.1)
 
-    # 3. 추세 정배열 가중치
-    gap1 = data.ema5 - data.ema20
-    gap2 = data.ema20 - data.ema60
-    denom = abs(gap1) + abs(gap2)
-    
-    alignment_ratio = _safe_div(abs(gap1 + gap2), denom, default=0.5)
-    imp_trend = math.log(1.0 + math.exp(alignment_ratio)) * 1.5
+    imp_trend = 1.0
+    if data.ema20 > 0 and data.ema5 > data.ema20:
+        divergence_pct = (data.ema5 - data.ema20) / data.ema20 * 100.0
+        imp_trend += math.tanh(divergence_pct / 2.0) * 0.5
 
-    # 4. Total Sum Safety
-    total_imp = imp_alpha + imp_supply + imp_vwap + imp_trend
-    total_imp = max(total_imp, 1e-6)
+    total_imp = max(imp_supply + imp_vwap + imp_trend, 1e-6)
     
+    # 딱 3가지만 반환 (alpha 제거)
     return {
-        'alpha': imp_alpha / total_imp,
-        'supply': imp_supply / total_imp,
-        'vwap': imp_vwap / total_imp,
-        'trend': imp_trend / total_imp
+        'supply': float(round(imp_supply / total_imp, 3)),
+        'vwap': float(round(imp_vwap / total_imp, 3)),
+        'trend': float(round(imp_trend / total_imp, 3))
     }
 
 
-def calculate_total_score(
-    alpha: float, 
-    supply: float, 
-    vwap: float, 
-    trend: float,
-    weights: Dict[str, float]
-) -> dict:
-    """[Total] 종합 점수 (Log-Geometric Mean)"""
-    expected_keys = ['alpha', 'supply', 'vwap', 'trend']
-    for k in expected_keys:
-        if k not in weights:
-            # 기본 가중치로 보정
-            weights[k] = 0.25
-
-    sum_w = sum(weights.values())
-    if sum_w <= 1e-9:
-        norm_w = {k: 0.25 for k in expected_keys}
-    else:
-        norm_w = {k: v / sum_w for k, v in weights.items()}
-
-    scores = {
-        'alpha': max(1.0, alpha),
-        'supply': max(1.0, supply),
-        'vwap': max(1.0, vwap),
-        'trend': max(1.0, trend)
-    }
+def calculate_total_score(scores: Dict[str, float], weights: Dict[str, float]) -> dict:
+    """
+    [Total] 전술 종합 점수 (Log-Geometric Mean / 3-Factor Model)
+    - 특징: 개별 변수 대신 scores 딕셔너리를 받아 내부에서 필요한 키만 추출.
+    """
+    # Alpha는 여기서 아예 제외하고 3개만 타겟팅합니다.
+    expected_keys = ['supply', 'vwap', 'trend'] 
+    default_w = 1.0 / 3.0
     
+    # 1. 가중치 정규화 (Normalization)
+    sum_w = sum(weights.get(k, 0.0) for k in expected_keys)
+    if sum_w <= 1e-9:
+        norm_w = {k: default_w for k in expected_keys}
+    else:
+        norm_w = {k: weights.get(k, 0.0) / sum_w for k in expected_keys}
+
+    # 2. 로그-기하 평균 산출 (scores 딕셔너리에서 바로 추출)
     log_sum = 0.0
     for k in expected_keys:
-        w = norm_w.get(k, 0.25)
-        s = scores[k]
+        w = norm_w[k]
+        # scores 딕셔너리에서 값을 꺼내되, 없으면 기본값 1.0 (Log(0) 방지)
+        s = max(1.0, scores.get(k, 1.0))
         log_sum += w * math.log(s)
         
     final_score = math.exp(log_sum)
@@ -309,7 +349,6 @@ def calculate_total_score(
         "total_score": round(final_score, 1),
         "weights": norm_w
     }
-
 def apply_deep_analysis_bonus(total_score: float, deep_data: Dict) -> float:
     """
     [Deep Dive] 정밀 분석 (호가/고래) 결과 반영 (Proportional Logic)

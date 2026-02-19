@@ -116,47 +116,44 @@ class MarketAnalyzer:
                 self._update_trend_data(data, chart_5m)
 
                 # -------------------------------------------------------------
-                # [Logic] Scoring Pipeline (v2.7)
+                # [Logic] Scoring Pipeline (2-Stage 단기 폭발 모델)
                 # -------------------------------------------------------------
                 
-                # 1) Raw Score 계산 (모든 함수가 data 객체 하나만 받음)
-                raw_alpha = scoring.calculate_alpha_score(data)
-                raw_supply = scoring.calculate_supply_score(data)
-                raw_vwap = scoring.calculate_vwap_score(data)
-                raw_trend = scoring.calculate_trend_score(data)
-                
-                current_raw = {
-                    'alpha': raw_alpha, 'supply': raw_supply, 'vwap': raw_vwap, 'trend': raw_trend
+                # 1) Raw Score 계산 (통합 딕셔너리)
+                raw_scores = {
+                    'alpha': scoring.calculate_alpha_score(data),
+                    'supply': scoring.calculate_supply_score(data),
+                    'vwap': scoring.calculate_vwap_score(data),
+                    'trend': scoring.calculate_trend_score(data)
                 }
 
-                # 2) Metric-level Smoothing (Adaptive EMA)
-                prev_metrics = self.metric_history.get(stock_code, current_raw)
+                # 2) Metric-level Smoothing (일괄 스무딩)
+                prev_metrics = self.metric_history.get(stock_code, raw_scores)
                 smoothed_metrics = {}
-
-                # [Change] 상수를 제거하고, 현재 종목 상태에 맞는 민감도 자동 계산
                 adaptive_factors = self._get_adaptive_factors(data)
                 
-                for key, val in current_raw.items():
-                    # 종목 상황에 맞춰 계산된 factor 사용
+                for key, val in raw_scores.items():
                     factor = adaptive_factors.get(key, 0.2) 
-                    
                     smoothed_val = (val * factor) + (prev_metrics[key] * (1 - factor))
                     smoothed_metrics[key] = round(smoothed_val, 2)
                 
-                self.metric_history[stock_code] = smoothed_metrics
-                data.score_detail = smoothed_metrics
+                # [Fix] 다음 틱 계산을 위해 온전한 4개 지표를 깊은 복사(copy)하여 저장
+                self.metric_history[stock_code] = smoothed_metrics.copy()
+                
+                # -------------------------------------------------------------
+                # [Clean Architecture] 객체 분리 (Separation of Concerns)
+                # -------------------------------------------------------------
+                # .pop()을 사용해 alpha를 꺼내서 전용 필드에 담음 
+                # (history에는 copy본이 들어갔으므로 안전하게 원본 딕셔너리 조작 가능)
+                data.alpha_score = smoothed_metrics.pop('alpha') 
+                
+                # 이제 smoothed_metrics에는 S, V, T만 순수하게 남음
+                data.score_detail = smoothed_metrics 
 
-                # 3) Dynamic Weights 계산
+                # 3) Dynamic Weights 및 총점 산출 (순수 3-Factor만 전달)
                 dynamic_weights = scoring.calculate_dynamic_weights(data)
-
-                # 4) 최종 점수 산출 (가중 기하평균)
-                score_result = scoring.calculate_total_score(
-                    smoothed_metrics['alpha'],
-                    smoothed_metrics['supply'],
-                    smoothed_metrics['vwap'],
-                    smoothed_metrics['trend'],
-                    dynamic_weights # 동적 가중치 전달
-                )
+                score_result = scoring.calculate_total_score(smoothed_metrics, dynamic_weights)
+                
                 data.total_score = score_result['total_score']
                 # -------------------------------------------------------------
                 # 7. [Sniper Protocol] 심층 분석 (함수 분리)

@@ -33,9 +33,8 @@ class TradingStrategy:
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config: Dict[str, Any] = {}
         
-        # [Thresholds] 진입 임계값 초기화 (87.0/82.0 이원화)
+        # [Thresholds] 진입 임계값 초기화
         self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 (엄격)
-        self.curr_supply_th = 82.0  # Supply 주도 시 (완화)
         self.curr_alert_th = 75.0   # 관심 종목 등록 기준
         self.curr_interest_th = 65.0  # 절대 이탈 기준선 (기본값)
 
@@ -63,9 +62,8 @@ class TradingStrategy:
                 self._current_regime = "DEBUG_MODE"
                 debug_th = self.settings.get("debug_thresholds", {})
                 self.curr_strict_th = debug_th.get("strong", 50.0)
-                self.curr_supply_th = debug_th.get("strong_supply", 50.0)
                 self.curr_alert_th = debug_th.get("alert", 40.0)
-                logger.warning(f"🚨 [DEBUG] Thresholds Fixed: {self.curr_strict_th}/{self.curr_supply_th}")
+                logger.warning(f"🚨 [DEBUG] Thresholds Fixed: {self.curr_strict_th}")
             return
 
         regime_val = regime.value if hasattr(regime, 'value') else str(regime)
@@ -78,11 +76,10 @@ class TradingStrategy:
             # 설정 파일 값 우선 적용 (없으면 기본값 87/82 유지)
             config_th = self._cached_config.get("thresholds", {})
             self.curr_strict_th = config_th.get('strong', 87.0)
-            self.curr_supply_th = config_th.get('strong_supply', 82.0)
             self.curr_alert_th = config_th.get('alert', 75.0)
             self.curr_interest_th = config_th.get('interest', 65.0)
             
-            logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}, Supply: {self.curr_supply_th}")
+            logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}")
 
     # --- Time & Risk Checks ---
     def is_monitoring_time(self) -> bool:
@@ -90,12 +87,12 @@ class TradingStrategy:
         if self.debug_mode: return True
         now = datetime.now()
         if now.weekday() >= 5: return False
-        return time(8, 30) <= now.time() <= self.exit_time_obj
+        return time(9, 0) <= now.time() <= self.exit_time_obj
 
     def is_trading_window(self) -> bool:
         """신규 진입 가능 시간 체크 (15:00 마감)"""
         if self.debug_mode: return True
-        return datetime.now().time() < self.deadline_time
+        return time(9, 0) <= datetime.now().time() < self.deadline_time
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
         """계좌 전체 손실 한도 초과 여부 확인"""
@@ -177,114 +174,89 @@ class TradingStrategy:
 
     def _check_universal_filters(self, metrics: SupplyData) -> Tuple[bool, str]:
         """
-        [Universal Filters] 통계적 필터링 (Simple Constants)
+        [Stage 2 Filters] 3-Factor 타점 검증
+        - 이미 Alpha(입장권)를 통과한 종목에 한해, 치명적인 결함이 있는지 검사
         """
         details = metrics.score_detail
         if not details: return False, ""
             
-        alpha_score = details.get('alpha', 0.0)
         supply_score = details.get('supply', 0.0)
         vwap_score = details.get('vwap', 0.0)
         trend_score = details.get('trend', 0.0)
-        total_score = metrics.total_score
-        
-        current_price = metrics.cur_prc
-        vwap_price = metrics.vwap
 
-        # 1. [VWAP Filters] 과열 방지
-        # "VWAP 점수가 총점의 절반도 안 된다면? -> 균형 붕괴 (너무 비쌈)"
-        if vwap_score < total_score * 0.5:
-            if current_price > vwap_price:
-                return True, f"VWAP 과열 (Score: {vwap_score:.1f})"
-            else:
-                # 가격은 싼데 모멘텀도 없다? -> 하락 추세 (Dip Buying 실패)
-                if alpha_score < total_score * 0.8:
-                    return True, f"VWAP 하회 & 모멘텀 부족 (Alpha: {alpha_score:.1f})"
+        # 1. 수급 실종 (Fake Pump)
+        # 차트가 아무리 좋아도 당장 쏴줄 '돈'이 안 들어오면 가짜 상승
+        if supply_score < 40.0:
+            return True, f"수급 부족 (Supply: {supply_score:.1f})"
 
-        # 2. [Supply Cut] 가짜 모멘텀 방지 (비율 체크)
-        # 모멘텀(Alpha)은 좋은데 수급(Supply)이 70%도 안 따라온다? -> 가짜
-        if alpha_score > total_score: # 관심권 이상일 때만 체크
-            min_supply = alpha_score * 0.7
-            if supply_score < min_supply:
-                 return True, f"수급 불균형 ({alpha_score:.1f} < {min_supply:.1f})"
-
-        # 3. [Trend Trap] 추세 설거지 방지 (비율 체크)
-        # 추세(Trend)는 높은데, 이를 받쳐줄 힘(Support)이 75%도 안 된다? -> 설거지
-        if trend_score >= total_score:
-            max_support = max(alpha_score, supply_score)
-            min_support = trend_score * 0.75
-            if max_support < min_support:
-                return True, f"추세 소진 (Support {max_support:.1f} < {min_support:.1f})"
-
-        # 4. [Safety Net] 기초 체력 체크
-        if (supply_score + vwap_score) / 2 < total_score * 0.5:
-             return True, f"S+V 밸런스 붕괴"
+        # 2. 밸런스 붕괴 (단일 지표 맹신 방지)
+        # 기하평균이 알아서 깎아주지만, 명시적인 하한선 설정
+        if vwap_score < 30.0:
+             return True, f"VWAP 지지력 상실"
+        if trend_score < 20.0:
+             return True, f"추세선(EMA5) 이탈"
 
         return False, ""
         
     def evaluate(self, metrics: SupplyData) -> Dict:
         """
-        [Final Verdict] 통합 평가 (Analyzer가 전달한 SupplyData 기반)
-        1. 점수 및 모멘텀 산출
-        2. 주 동인(Primary Driver) 분석
-        3. 차등 진입 기준 적용 (Supply vs Trend)
-        4. 필터링 (과열, 하락세 등) 후 최종 매수 신호 생성
+        [Final Verdict] 2-Stage 진입 판독기 (Aggressive Trigger)
         """
         stock_code = metrics.stock_code
-        score, score_detail = metrics.total_score, metrics.score_detail
-        momentum = self._get_momentum(stock_code, score)
+        total_score = metrics.total_score      
+        alpha_score = metrics.alpha_score
+        score_detail = metrics.score_detail
+        
+        momentum = self._get_momentum(stock_code, total_score)
         
         status = "관망"
         is_buy_signal = False
         
-        # 주 동인 식별
-        # max 함수의 key를 람다로 명시하여 타입 에러 방지
-        primary_driver = max(score_detail, key=lambda k: score_detail[k])
+        # 주 동인 식별 (alpha 제외)
+        svt_details = {k: v for k, v in score_detail.items() if k != 'alpha'}
+        primary_driver = max(svt_details, key=lambda k: svt_details[k]) if svt_details else "none"
 
-        # [Logic] 차등 진입 전략
-        # - Supply 주도: 완화된 기준 (82.0) 적용 -> 기회 포착
-        # - Trend 주도: 엄격한 기준 (87.0) 적용 -> 고점 추격 방지
-        if primary_driver == 'supply':
-            effective_threshold = self.curr_supply_th
-        else:
-            effective_threshold = self.curr_strict_th
-
-        # 아무리 점수가 높아도, 여기 걸리면 무조건 탈락
-        is_filtered, filter_reason = self._check_universal_filters(metrics)
-
-        # 최종 판정
-        if is_filtered:
-            status = f"관망 ({filter_reason})"
+        # ------------------------------------------------------------------
+        # [Stage 1] 입장권 검사 (Qualifier)
+        # ------------------------------------------------------------------
+        # 기본 모멘텀(Alpha)이 70점(관심선) 아래면 타점이 아무리 좋아도 무시
+        if alpha_score < 70.0:
+            status = f"관망 (Alpha 미달: {alpha_score:.1f})"
             is_buy_signal = False
-
+            
         else:
-            if score >= effective_threshold:
-                if momentum < 0:
-                    status = "⚠️고점경계" # 점수는 높지만 꺾이는 중
-                    is_buy_signal = False
-                elif score_detail['trend'] >= 90.0:
-                    status = "⚠️추세과열" # [Filter] Trend 과열 필터 (평균회귀 위험)
-                    is_buy_signal = False
-                else:
-                    status = "🔥강력추천"
-                    is_buy_signal = True
-            elif score >= self.curr_alert_th:
-                if momentum >= self.momentum_threshold:
-                    status = "🚀수급폭발" # 점수 부족하나 기세가 좋음
-                    is_buy_signal = False
-                else:
-                    status = "👀관심"
-                    is_buy_signal = False
+            # ------------------------------------------------------------------
+            # [Stage 2] 결함 검사 및 타점 트리거 (Trigger)
+            # ------------------------------------------------------------------
+            is_filtered, filter_reason = self._check_universal_filters(metrics)
+
+            if is_filtered:
+                status = f"관망 ({filter_reason})"
+                is_buy_signal = False
+            else:
+                # 총점(S.V.T)이 엄격한 진입 기준을 넘었는가?
+                if total_score >= self.curr_strict_th:
+                    if momentum < 0:
+                        status = "⚠️고점경계" # 점수는 높지만 속도가 줄어드는 중
+                    else:
+                        status = "🔥강력추천"
+                        is_buy_signal = True
+                
+                # 진입 기준은 못 넘었지만 예비 신호
+                elif total_score >= self.curr_alert_th:
+                    if momentum >= self.momentum_threshold:
+                        status = "🚀수급폭발" # 기세가 미친듯이 치고 올라옴
+                    else:
+                        status = "👀관심"
 
         return {
-                "score": score,
+                "score": total_score,          # UI 및 매니저에 표시될 최종 점수
                 "momentum": momentum,
                 "status": status,
                 'score_detail': score_detail,
                 "regime": self._current_regime,
                 "is_buy_signal": is_buy_signal,
                 "primary_driver": primary_driver,
-                # Engine 호환성을 위해 필요한 필드들 전달
                 "price": metrics.price,
                 "stock_code": stock_code,
                 "atr_percent": metrics.atr_percent
