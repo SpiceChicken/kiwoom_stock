@@ -61,7 +61,7 @@ def sample_supply_data():
         cur_prc=80500.0,
         vwap=80000.0,
         prev_vwap=79000.0,
-        alpha_score=0.0,
+        alpha_score=85.0,
         trend_rsi=65.0, 
         vol_factor=1.5,
         atr_percent=2.0,
