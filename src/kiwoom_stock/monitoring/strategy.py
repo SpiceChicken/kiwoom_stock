@@ -203,9 +203,8 @@ class TradingStrategy:
         [Final Verdict] 2-Stage 진입 판독기 (Aggressive Trigger)
         """
         stock_code = metrics.stock_code
-        total_score = metrics.total_score      
-        alpha_score = metrics.alpha_score
-        score_detail = metrics.score_detail
+        total_score, score_detail = metrics.total_score, metrics.score_detail
+        alpha_score = score_detail.get('alpha',0)
         
         momentum = self._get_momentum(stock_code, total_score)
         
@@ -220,7 +219,7 @@ class TradingStrategy:
         # [Stage 1] 입장권 검사 (Qualifier)
         # ------------------------------------------------------------------
         # 기본 모멘텀(Alpha)이 70점(관심선) 아래면 타점이 아무리 좋아도 무시
-        if alpha_score < 70.0:
+        if alpha_score < self.curr_alert_th:
             status = f"관망 (Alpha 미달: {alpha_score:.1f})"
             is_buy_signal = False
             

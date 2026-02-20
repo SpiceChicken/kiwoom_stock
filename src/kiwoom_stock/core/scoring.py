@@ -105,7 +105,7 @@ def calculate_alpha_score(data: SupplyData) -> float:
     net_force = thrust - resistance_force
     
     final_score = _sigmoid(net_force, k=atr_ratio * cfg['atr_leverage']) * 100.0
-    print(f"stock: {data.stock_code}, norm_vol: {norm_vol:.2f}, norm_mom: {norm_mom:.2f}, norm_pow {norm_pow:.2f}, net_force: {net_force:.2f}, final_score: {final_score:.2f}")
+    # print(f"stock: {data.stock_code}, norm_vol: {norm_vol:.2f}, norm_mom: {norm_mom:.2f}, norm_pow {norm_pow:.2f}, net_force: {net_force:.2f}, final_score: {final_score:.2f}")
     
     return float(round(final_score, 2))
 

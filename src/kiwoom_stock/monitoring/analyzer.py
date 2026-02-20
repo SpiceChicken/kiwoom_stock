@@ -138,23 +138,18 @@ class MarketAnalyzer:
                     smoothed_metrics[key] = round(smoothed_val, 2)
                 
                 # [Fix] 다음 틱 계산을 위해 온전한 4개 지표를 깊은 복사(copy)하여 저장
-                self.metric_history[stock_code] = smoothed_metrics.copy()
+                self.metric_history[stock_code] = smoothed_metrics
                 
                 # -------------------------------------------------------------
                 # [Clean Architecture] 객체 분리 (Separation of Concerns)
                 # -------------------------------------------------------------
-                # .pop()을 사용해 alpha를 꺼내서 전용 필드에 담음 
-                # (history에는 copy본이 들어갔으므로 안전하게 원본 딕셔너리 조작 가능)
-                data.alpha_score = smoothed_metrics.pop('alpha') 
-                
-                # 이제 smoothed_metrics에는 S, V, T만 순수하게 남음
-                data.score_detail = smoothed_metrics 
 
                 # 3) Dynamic Weights 및 총점 산출 (순수 3-Factor만 전달)
                 dynamic_weights = scoring.calculate_dynamic_weights(data)
                 score_result = scoring.calculate_total_score(smoothed_metrics, dynamic_weights)
                 
                 data.total_score = score_result['total_score']
+                data.score_detail = smoothed_metrics
                 # -------------------------------------------------------------
                 # 7. [Sniper Protocol] 심층 분석 (함수 분리)
                 # -------------------------------------------------------------
