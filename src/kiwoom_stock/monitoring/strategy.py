@@ -114,12 +114,12 @@ class TradingStrategy:
         if datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
             
-        # 2. [Dynamic Stop Loss] ATR 기반 동적 손절매
-
-        # 목표: ATR * 1.5
-        dynamic_stop = -(current_atr * 1.5) / 100
-        # 안전장치: 최소 -1.0% 보장 (노이즈 방지), 최대 제한 (stop_loss_rate)
-        final_stop = max(min(dynamic_stop, -0.01), self.stop_loss_rate)
+        # 2. [Dynamic Stop Loss] ATR 기반 동적 손절매 (수정됨)
+        # 돌파 매매의 특성상 눌림목(Breathing Room)을 견뎌야 하므로 ATR * 3.0으로 확대
+        dynamic_stop = -(current_atr * 3.0) / 100
+        
+        # 안전장치: 최소 -1.5% 보장 (노이즈 방지), 최대 제한은 stop_loss_rate(-3%)보다 더 여유를 줌
+        final_stop = max(min(dynamic_stop, -0.015), self.stop_loss_rate * 1.5) # 최대 -4.5% 허용
 
         if profit_rate <= final_stop:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
@@ -219,7 +219,7 @@ class TradingStrategy:
         # [Stage 1] 입장권 검사 (Qualifier)
         # ------------------------------------------------------------------
         # 기본 모멘텀(Alpha)이 70점(관심선) 아래면 타점이 아무리 좋아도 무시
-        if alpha_score < self.curr_alert_th:
+        if alpha_score < self.curr_interest_th:
             status = f"관망 (Alpha 미달: {alpha_score:.1f})"
             is_buy_signal = False
             

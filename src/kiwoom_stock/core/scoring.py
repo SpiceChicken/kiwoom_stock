@@ -212,20 +212,18 @@ def calculate_vwap_score(data: SupplyData) -> float:
 
     
     # ------------------------------------------------------------------
-    # 2. 동적 운동 에너지 보너스 (Dynamic Momentum Bonus)
+    # 2. 동적 운동 에너지 보너스 (Dynamic Momentum Bonus) (수정됨)
     # ------------------------------------------------------------------
     momentum_bonus = 0.0
     if disparity_pct > 0:
-        # A. 가우스 최적점 (Gaussian Peak): 이격도 2.0% 부근에서 탄성 극대화
-        # 2.0%에서 1.0(Max), 1.0%나 3.0%에서 약 0.6 수준으로 부드럽게 감소
-        gaussian_peak = math.exp(-0.5 * ((disparity_pct - 2.0) / 1.0) ** 2)
+        # A. 가우스 최적점 (Gaussian Peak): 이격도 1.0% 부근에서 탄성 극대화 (초입 잡기)
+        # 1.0%에서 1.0(Max)을 주고, 멀어질수록 부드럽게 감소하도록 조정
+        gaussian_peak = math.exp(-0.5 * ((disparity_pct - 1.0) / 1.0) ** 2)
         
-        # B. 힘 승수 (Strength Multiplier): 체결강도가 보너스의 크기를 결정
-        # 체결강도가 100% 이하면 보너스 무효화, 150% 이상일 때 강하게 발동
+        # B. 힘 승수 (Strength Multiplier)
         raw_strength = getattr(data, 'strength', 100.0)
         strength_multiplier = max(0.0, math.tanh((raw_strength - 100.0) / 50.0))
         
-        # 최대 15점의 보너스를 '위치 효율(Gaussian)'과 '현재 밀어올리는 힘(Strength)'에 비례하여 동적 지급
         momentum_bonus = 15.0 * gaussian_peak * strength_multiplier
 
     
