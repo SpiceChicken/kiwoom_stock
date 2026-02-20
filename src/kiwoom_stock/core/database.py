@@ -124,3 +124,27 @@ class TradeLogger:
             return datetime.strptime(row['sell_time'], '%Y-%m-%d %H:%M:%S')
             
         return None
+
+    def get_today_traded_targets(self) -> Dict[str, str]:
+        """
+        오늘 거래(매수/매도) 이력이 있는 종목들의 코드와 이름을 딕셔너리로 묶어서 반환합니다.
+        반환 예시: {"042700": "한미반도체", "005490": "POSCO홀딩스"}
+        """
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        # DISTINCT를 사용하여 동일한 종목이 여러 번 거래되었더라도 한 번만 가져옵니다.
+        query = """
+            SELECT DISTINCT stock_code, stock_name 
+            FROM trades 
+            WHERE buy_time LIKE ? OR sell_time LIKE ?
+        """
+        
+        try:
+            cursor = self.conn.execute(query, (f"{today_str}%", f"{today_str}%"))
+            rows = cursor.fetchall()
+            
+            # 검색된 row를 { stock_code: stock_name } 형태의 딕셔너리로 변환
+            return {row['stock_code']: row['stock_name'] for row in rows}
+        except Exception as e:
+            print(f"오늘 거래 종목 타겟 추출 실패: {e}")
+            return {}
