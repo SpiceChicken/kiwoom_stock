@@ -96,7 +96,7 @@ class MarketDataCollector:
             logger.error(f"호가 잔량 데이터 수집 실패: {e}")
             return {}
 
-    def fetch_recent_ticks(self, code: str) -> Dict[str, Any]:
+    def fetch_recent_ticks(self, code: str) -> List[Dict[str, Any]]:
         try:
             items = self.client.market.get_recent_ticks(code)
 
