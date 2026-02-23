@@ -13,10 +13,6 @@ class Position:
     stock_name: str
     buy_price: float
     buy_score: float
-    alpha_score: float
-    supply_score: float
-    vwap_score: float
-    trend_score: float
     buy_time: str
     buy_regime: str
     status: str = 'OPEN'
@@ -146,19 +142,12 @@ class StockManager:
         try:
             # 1. 실제 키움증권/API 주문 전송 (TBD)
 
-            # 2. DB 기록용 데이터 생성
-            score_detail = verdict.get('score_detail', {})
-            processed_details = {f"{k}_score": v for k, v in score_detail.items()}
-
             # 2. 최종 buy_data 구성
             buy_data = {
                 "stock_code": stock_code,
                 "stock_name": self.stock_names[stock_code],
                 "buy_price": verdict.get('price'),
                 "buy_score": verdict.get('score'),
-                
-                # 상세 점수들(alpha_score, supply_score, vwap_score, trend_score) 자동 병합
-                **processed_details, 
                 "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 "buy_regime": verdict.get('regime')
             }
