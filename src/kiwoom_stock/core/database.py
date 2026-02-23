@@ -30,6 +30,13 @@ class TradeLogger:
             stock_name TEXT,
             buy_price REAL,
             buy_score REAL,
+            thrust REAL,
+            gravity REAL,
+            drag REAL,
+            magnetic REAL,
+            jerk REAL,
+            impulse REAL,
+            net_force REAL,
             buy_time TEXT,
             buy_regime TEXT,
             sell_price REAL,
@@ -129,16 +136,18 @@ class TradeLogger:
         query = """
         INSERT INTO trades (
             stock_code, stock_name, buy_price, buy_score, 
+            thrust, gravity, drag, magnetic, jerk, impulse, net_force,
             buy_time, buy_regime
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
-            data['stock_code'], data['stock_name'], data['buy_price'], data['buy_score'],
-            data['buy_time'], data['buy_regime']
+            data.get('stock_code'), data.get('stock_name'), data.get('buy_price'), data.get('buy_score'),
+            data.get('thrust', 0.0), data.get('gravity', 0.0), data.get('drag', 0.0), 
+            data.get('magnetic', 0.0), data.get('jerk', 0.0), data.get('impulse', 0.0), data.get('net_force', 0.0),
+            data.get('buy_time'), data.get('buy_regime')
         )
         cursor = self.conn.execute(query, params)
         self.conn.commit()
-        
         return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
 
     def record_sell(self, pos: Position):

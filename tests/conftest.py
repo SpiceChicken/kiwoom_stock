@@ -77,7 +77,7 @@ def sample_supply_data():
     data.volume_series = [1000, 1200, 1500, 1300, 2000, 2500]
 
     # 물리 엔진의 Vector Forces 딕셔너리로 교체
-    data.score_detail = {
+    data.forces = {
         "thrust": 1.25,
         "gravity": -0.85,
         "drag": -0.15,
