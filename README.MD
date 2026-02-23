@@ -1,64 +1,57 @@
-# 🚀 Kiwoom All-Weather Intelligent Monitoring System (v3.0)
+# 🚀 Kiwoom All-Weather Intelligent Monitoring System (Physical Dynamics Edition)
 
-본 프로젝트는 키움증권 REST API를 기반으로 시장의 상태(Regime)를 실시간 진단하고, **물리학적 합력 모델(Physics-based Net Force)**과 **동적 설정 아키텍처**를 통해 주도주를 포착하는 차세대 퀀트 트레이딩 시스템입니다.
+본 프로젝트는 키움증권 REST API를 기반으로 주가의 움직임을 질량을 가진 물체의 운동()으로 치환하여 분석하는 **차세대 물리적 퀀트 트레이딩 시스템(Physics-based Quant System)**입니다.
 
-**v3.0 Major Update**:
+파편화된 if-else 휴리스틱과 기계적 손절(Score Decay)의 한계를 극복하기 위해, '관성(Inertia)'과 '합력(Net Force)' 개념을 도입하여 세력의 개미털기(Shake-out) 구간을 버텨내고 진정한 주도주를 포착합니다.
 
-1. **Physics-based Alpha**: '추진력(Thrust)'과 '저항(Resistance)'의 합력으로 상승 강도를 계산하여 역배열 가짜 신호를 원천 차단.
-2. **Dynamic Configuration**: 코드 수정 없이 JSON 파일만으로 알고리즘 민감도를 실시간 튜닝하는 'Hot-Reload' 아키텍처 구축.
-3. **Unit-Corrected Supply**: 수급 데이터의 단위(Scale) 불일치 문제를 해결하여 '진짜 수급 주도주' 변별력 확보.
-4. **Universal Filter**: 통계적 패배 공식을 사전 차단하는 4중 안전장치 도입.
+**Major Update: Integrated Physical Dynamics & Hybrid State Management**:
+
+1. **Continuous Mathematical Model**: 점수가 즉시 0점이 되는 현상을 방지하고, 이전 속도(관성)에 현재의 힘을 누적하는 연속적 물리 모델 구축.
+2. **Multi-Dimensional Forces**: 체결강도, VWAP, 호가잔량, 순간거래량 등을 추진력, 중력, 자기력, 항력 등의 물리적 벡터로 변환하여 입체적 타점 도출.
+3. **Hybrid State Management**: 지연(Latency) 없는 In-Memory L1 캐시 연산과 비동기 DB 백업(L2)을 결합하여 속도와 안정성을 동시 확보.
+4. **Time-Decayed Crash Recovery**: 시스템 재시작 시 멈춰있던 시간만큼 관성을 감쇠시켜 안전하게 상태를 복구하는 지수 감쇠 보정 알고리즘 탑재.
 
 ---
 
 ## 🧠 Core Engine: Physics-based Quant Scoring
-본 프로젝트의 심장부인 트레이딩 엔진은 단순한 휴리스틱(if-else)을 배제하고, 주가의 움직임을 유체역학과 운동 에너지로 해석하는 **물리학적/수학적 모델링**을 기반으로 작동합니다.
 
-### 🎯 2-Stage 단기 폭발 모델 (Aggressive Short-term Model)
-엔진은 '입장권 검사'와 '타점 트리거'의 완벽하게 분리된 2단계(2-Stage) 필터링 아키텍처를 가집니다.
+엔진은 단순한 조건부 점수 합산이 아닌, 물리학의 속도 및 가속도 공식을 기반으로 동작합니다.
 
-#### Stage 1: Alpha Score (잠재 에너지 / Qualifier)
-"이 종목이 오늘 뛸 자격이 있는가?"를 판별하는 문지기입니다.
-* **Volume Thrust:** 거래량 폭발을 추진력(Thrust)으로 해석.
-* **Momentum Heat:** RSI 등을 기반으로 주가의 열에너지(Heat) 측정.
-* **통과 기준:** Alpha 점수 70점(관심선) 미만 시, 이후 타점이 아무리 좋아도 진입을 차단하여 불필요한 노이즈(가짜 신호)를 원천 봉쇄합니다.
+### 🎯 물리학적 스코어링 수식 (Physical Dynamics)
 
-#### Stage 2: S.V.T 3-Factor Model (운동 에너지 / Trigger)
-Alpha 관문을 통과한 종목에 한해, **"지금 방아쇠를 당겨야 하는가?"**를 결정하는 3대 전술 지표입니다.
+주가의 현재 상태(Score)는 물체의 '현재 속도()'를 Sigmoid 함수로 정규화하여 산출됩니다.
 
-1. **Supply (수급 폭발력):** 유체역학의 압력(Pressure) 모델링.
-   * 단순히 '외국인이 샀다'가 아니라, **'현재 거래대금 중 주포(기관/프로그램)의 자금 밀도(Penetration)'**를 측정합니다.
-   * 체결강도 100% 이하는 가차 없이 0점 처리하며, 잉여 힘(Excess Power)에 대해서만 Tanh(S-Curve)로 비선형 점수를 부여합니다.
-2. **VWAP (탄성 도약 / Trampoline Effect):** * '저가 매수(Mean Reversion)'가 아닌 '가속도 탑승(Momentum)'을 지향합니다.
-   * 주가가 VWAP를 발판 삼아 **+1% ~ +3% 위로 솟구치는 순간(Sweet Spot)**을 가우스 곡선(Gaussian Peak)으로 포착하여 최고점을 부여합니다.
-3. **Trend (발사각 / Launch Angle):**
-   * 단순한 이평선 정배열(미인대회)을 보지 않습니다.
-   * 단기 생명선(EMA5)이 중기선(EMA20)을 뚫고 치솟는 **발사 각도(Divergence Percentage)** 자체를 수치화하여 상승 관성(Inertia)에 올라탑니다. 단, 5일선 이탈 시 즉시 급브레이크(-50% 삭감)가 걸립니다.
+* **가속도 (Net Force):** 
+* **현재 속도 (Velocity):**  (이전 속도 유지 = 관성)
+* **최종 스코어 (Score):** 
 
-### 🔬 수학적 정합성 (Mathematical Intuition)
-* **Log-Geometric Mean (로그-기하 평균):** S.V.T 3가지 지표를 산술 평균으로 더하지 않습니다. 하나의 지표라도 치명적 결함(과락)이 발생하면 최종 확률이 기하급수적으로 폭락하여 시스템을 보호합니다.
-* **Dynamic Weights (동적 가중치):** 거래량이 폭발하면 수급(Supply)의 가중치가 높아지고, 주가가 VWAP에서 너무 멀어지면 VWAP 지표의 신뢰도를 스스로 낮추는 유기적 신경망을 갖추고 있습니다.
+### 🔬 6대 물리적 힘 (The 6 Physical Forces)
+
+1. **추진력 (Thrust):** 체결강도 100% 초과분을 기본 엔진으로 삼고, 당일 평균 대비 거래량(Volume Ratio)을 '질량/부스터'로 곱하여 가속도를 증폭시킵니다.
+2. **중력 (Gravity):** 주가가 VWAP에서 너무 멀어지면(ATR 기반 측정) 강한 하방 압력으로 작용하여 과열 매수를 방지합니다.
+3. **항력 (Drag):** RSI 과열 지표를 마찰열로 계산합니다. 주가가 급등할수록 차익실현 매물(공기 저항)이 거세져 속도가 무한히 발산하는 것을 막습니다.
+4. **자기력 (Magnetic Force):** 매도 호가창에 물량이 압도적으로 쌓여있을 때(매도벽) 발생하는 위쪽 호가로의 '진공 흡입력'을 수치화합니다.
+5. **져크 (Jerk / 가속도의 미분):** 5분 전 체결강도와 현재 체결강도를 비교하여 수급이 가속 중인지 감속 중인지 추세를 파악합니다.
+6. **충격량 (Impulse):** 특정 창구에서 순간적으로 터지는 대량 거래량을 '타격(망치)'으로 해석하여 속도 벡터에 즉각적인 스칼라 부스트(+5.0)를 가합니다.
 
 ---
 
-## 🏗 시스템 아키텍처 (System Architecture)
+## ⚡ 시스템 아키텍처 (System Architecture)
 
-### 1. 동적 설정 로더 (Dynamic Configuration Loader)
+초당 수십 번의 틱(Tick) 데이터가 쏟아지는 실시간 트레이딩 환경에서, 연산 지연(Slippage)을 0에 가깝게 유지하면서도 데이터 유실을 막기 위한 아키텍처가 적용되었습니다.
 
-하드코딩된 설정을 제거하고, **Dependency Injection(의존성 주입)** 패턴을 적용했습니다.
+### 1. 하이브리드 상태 관리 (Hybrid State Management)
 
-* **구조**: `config/` 디렉토리 내의 모든 `.json` 파일을 런타임에 자동으로 로드하여 전역 변수로 매핑합니다.
-* **장점**: 파이썬 코드를 전혀 수정하지 않고도, `scoring_config.json` 수정만으로 알고리즘의 민감도를 튜닝할 수 있습니다.
+* **L1 Cache (In-Memory Engine):** 트레이딩 메인 스레드는 오직 메모리(`dict`)에 존재하는  상태값만 참조하여 즉각적으로 점수를 뱉어냅니다.
+* **L2 Backup (Asynchronous DB Logging):** 계산이 완료된 결과는 메인 스레드와 완전히 분리된 전용 워커(`ThreadPoolExecutor`)를 통해 백그라운드에서 SQLite DB로 비동기 저장(Fire-and-Forget)됩니다.
 
-### 2. 명시적 데이터 구조 (Type-Safe Data Structure)
+### 2. 크래시 복구 메커니즘 (Crash Recovery)
 
-거대하고 불명확한 딕셔너리(`Dict`) 대신, `dataclass`를 도입하여 데이터의 무결성을 보장합니다.
+장중 시스템이 비정상 종료되더라도, 재시작 시 DB에서 마지막 속도()를 읽어옵니다. 단, 중단된 시간() 동안 시장의 관심이 식었음을 반영하여 **지수 감쇠(Time-Decayed Inertia)** 처리 후 메모리에 안전하게 적재합니다.
 
-* **SupplyData**: 종목별 지표, 가격, 수급 정보를 담는 핵심 객체. 필드 정의가 명확하여 IDE 자동완성 및 타입 체크가 가능합니다.
+### 3. 동적 설정 로더 (Dynamic Configuration Loader)
 
-### 3. 로직의 모듈화 (Modularization)
-
-* **Scoring Module (`core/scoring.py`)**: 비즈니스 로직과 설정이 완전히 분리되었습니다. 설정 파일이 없으면 기본값(Fallback)으로 안전하게 구동됩니다.
+파이썬 코드 수정 없이 `config/` 디렉토리 내의 `.json` 파일 수정만으로 알고리즘의 민감도와 마찰 계수 등을 런타임에 튜닝할 수 있습니다.
 
 ---
 
@@ -66,18 +59,19 @@ Alpha 관문을 통과한 종목에 한해, **"지금 방아쇠를 당겨야 하
 
 ```text
 Kiwoom-Stock/
-├── config/                 # [New] 설정 파일 저장소 (JSON)
-│   ├── config.json         # 시스템 및 계좌 설정
-│   ├── strategy_config.json# 매수/매도 임계값 전략
-│   └── scoring_config.json # 알고리즘 가중치 및 물리학 계수
+├── config/                 
+│   ├── config.json         # 계좌 및 API 시스템 설정
+│   └── scoring_config.json # 마찰 계수, 정규화 상수 등 물리 모델 하이퍼파라미터
 ├── src/
 │   └── kiwoom_stock/
 │       ├── core/
-│       │   ├── config.py   # 동적 설정 로더
-│       │   ├── scoring.py  # 물리학적 점수 산출 엔진
-│       │   └── ...
-├── logs/                   # 실행 로그
-├── data/                   # 분석 데이터 (CSV)
+│       │   ├── physics_engine.py  # [New] 6대 물리적 힘 및 Sigmoid 스코어링 연산 로직
+│       │   ├── state_manager.py   # [New] 관성 상태 캐싱, 비동기 DB 백업, 크래시 복구
+│       │   └── config.py          # 동적 설정 로더
+│       ├── monitoring/
+│       │   └── strategy.py        # 엔진을 호출하여 실제 매수/매도 시그널 생성
+├── logs/                   # 실행 로그 (상태 변화 및 매매 기록)
+├── data/                   # 분석 데이터 (SQLite DB 및 CSV 사후 검증용)
 ├── pyproject.toml          # 프로젝트 의존성 관리
 └── main.py                 # 프로그램 진입점
 
@@ -87,40 +81,32 @@ Kiwoom-Stock/
 
 ## 🚀 시작하기 (Getting Started)
 
-본 프로젝트는 `pyproject.toml`을 사용하여 의존성을 관리합니다. (Poetry 사용 권장)
+본 프로젝트는 `pyproject.toml`을 사용하여 의존성을 관리합니다.
 
 ### 1. 환경 설정 및 설치
 
 ```bash
-# Poetry를 사용하는 경우
 poetry install
-
-# 또는 pip를 사용하는 경우
+# 또는
 pip install .
 
 ```
 
 ### 2. 설정 파일 준비
 
-`config/` 폴더에 필요한 JSON 설정 파일들을 위치시킵니다.
-
-* **`scoring_config.json`**: `w_resistance`(중력 계수)를 조절하여 역배열 종목에 대한 페널티 강도를 조절합니다.
-* **`config.json`**: 계좌 번호 및 모의투자 여부를 설정합니다.
+`config/` 폴더에 `scoring_config.json`을 위치시켜 물리 엔진의 마찰 계수(`friction_coefficient`), 정규화 상수 등을 기호에 맞게 세팅합니다.
 
 ### 3. 실행
 
 ```bash
-# Poetry 실행
 poetry run python main.py
-
-# 또는 직접 실행
-python main.py
 
 ```
 
 ---
 
-## 📊 대시보드 및 리포트
+## 📊 사후 분석 및 검증 (Backtest Reporting)
 
-시스템은 실시간으로 `data/trade_analysis_YYYYMMDD.csv` 파일을 생성합니다.
-이 CSV 파일에는 **Alpha, Supply, VWAP, Trend** 4대 지표의 점수와 최종 판단 근거가 기록되어 있어, 엑셀 등을 통해 사후 분석(Back-testing)이 가능합니다.
+`tools/backtest_reporter.py`를 실행하면, DB에 저장된 물리 엔진의 상세 점수 추이와  변화량을 바탕으로 MFE(최대 허용 수익) 및 MAE(최대 허용 손실)를 Rich 기반의 깔끔한 터미널 UI로 분석할 수 있습니다.
+
+---
