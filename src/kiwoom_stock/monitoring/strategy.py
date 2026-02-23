@@ -156,5 +156,6 @@ class TradingStrategy:
                 "is_buy_signal": is_buy_signal,
                 "price": metrics.cur_prc,
                 "stock_code": stock_code,
-                "atr_percent": getattr(metrics, 'atr_percent', 0.5)
+                "atr_percent": getattr(metrics, 'atr_percent', 0.5),
+                "forces": getattr(metrics, 'forces', {})
             }

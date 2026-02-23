@@ -16,6 +16,14 @@ class Position:
     buy_time: str
     buy_regime: str
     status: str = 'OPEN'
+    # [추가]
+    thrust: float = 0.0
+    gravity: float = 0.0
+    drag: float = 0.0
+    magnetic: float = 0.0
+    jerk: float = 0.0
+    impulse: float = 0.0
+    net_force: float = 0.0
     # [추가] DB에서 읽어올 때 포함될 수 있는 필드들 (기본값 None)
     sell_price: Optional[float] = None
     profit_rate: Optional[float] = None
@@ -138,6 +146,7 @@ class StockManager:
 
         """
         stock_code = verdict['stock_code']
+        forces = verdict.get('forces', {})
         
         try:
             # 1. 실제 키움증권/API 주문 전송 (TBD)
@@ -148,6 +157,16 @@ class StockManager:
                 "stock_name": self.stock_names[stock_code],
                 "buy_price": verdict.get('price'),
                 "buy_score": verdict.get('score'),
+
+                # 개별 물리적 힘 매핑 (없을 경우 0.0)
+                "thrust": forces.get('thrust', 0.0),
+                "gravity": forces.get('gravity', 0.0),
+                "drag": forces.get('drag', 0.0),
+                "magnetic": forces.get('magnetic', 0.0),
+                "jerk": forces.get('jerk', 0.0),
+                "impulse": forces.get('impulse', 0.0),
+                "net_force": forces.get('net_force', 0.0),
+
                 "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 "buy_regime": verdict.get('regime')
             }

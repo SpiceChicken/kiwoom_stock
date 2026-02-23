@@ -105,7 +105,7 @@ class MarketAnalyzer:
                 )
                 
                 data.total_score = tracker_result["total_score"]
-                data.score_detail = tracker_result["forces"]
+                data.forces = tracker_result["forces"]
 
             self.last_supply_update = datetime.now()
         except Exception as e:

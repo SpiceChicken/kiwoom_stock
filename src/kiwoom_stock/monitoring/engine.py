@@ -192,7 +192,7 @@ class TradingEngine:
                 "score": v['score'],
                 "momentum": v['momentum'],
                 "reason": v['status'],
-                "forces": v.get('score_detail', {})  # [수정] 물리 엔진의 7대 벡터 힘 데이터 전달
+                "forces": v.get('forces', {})  # [수정] 물리 엔진의 7대 벡터 힘 데이터 전달
             })
         except Exception:
             pass
