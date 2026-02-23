@@ -109,4 +109,4 @@ class MarketDataCollector:
             ]
         except Exception as e:
             logger.error(f"호가 잔량 데이터 수집 실패: {e}")
-            return {}
+            return []
