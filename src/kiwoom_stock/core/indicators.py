@@ -225,7 +225,7 @@ def calculate_atr_percent(highs: List[float], lows: List[float], closes: List[fl
     :return: (ATR / 현재가) * 100
     """
     if not closes:
-        return 3.0 # 기본값
+        return 0.5 # 기본값
         
     atr = calculate_atr(highs, lows, closes, period)
     current_price = closes[-1]

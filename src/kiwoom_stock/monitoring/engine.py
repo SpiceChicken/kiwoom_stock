@@ -14,6 +14,7 @@ from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
 from .manager import StockManager
 from .notifier import Notifier
+from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.monitoring.manager import Position
@@ -29,7 +30,8 @@ class TradingEngine:
         
         # [Modules] 기능별 모듈 초기화
         self.db = TradeLogger()
-        self.analyzer = MarketAnalyzer(client, config.get("market", {}))
+        self.state_tracker = PhysicalStateTracker(self.db)
+        self.analyzer = MarketAnalyzer(client, config.get("market", {}), self.state_tracker)
         self.strategy = TradingStrategy(config.get("strategy", {}))
         self.stock_mgr = StockManager(client, self.db, self.strategy, config.get("filters", {}))
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
@@ -95,6 +97,11 @@ class TradingEngine:
         self.analyzer.update_regime()
         self.strategy.update_context(self.analyzer.market_regime)
         self.stock_mgr.update_target_stocks()
+        
+        for stock_code in self.stock_mgr.stocks:
+            if stock_code not in self.state_tracker._l1_cache:
+                self.state_tracker.recover_state_from_crash(stock_code)
+                
         self.analyzer.update_priority_supply(self.stock_mgr.stocks)
         self.notifier.start_status_session()
 
@@ -185,7 +192,7 @@ class TradingEngine:
                 "score": v['score'],
                 "momentum": v['momentum'],
                 "reason": v['status'],
-                **{f"{k}_score": val for k, val in v['score_detail'].items()}
+                "forces": v.get('score_detail', {})  # [수정] 물리 엔진의 7대 벡터 힘 데이터 전달
             })
         except Exception:
             pass

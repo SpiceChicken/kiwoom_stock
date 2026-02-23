@@ -1,35 +1,35 @@
+# src/kiwoom_stock/core/database.py
 import sqlite3
+import threading
+import queue
+import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 
 from kiwoom_stock.monitoring.manager import Position
 
-###### QUERY ######
-# 총 수익률 합계: SELECT SUM(profit_rate) FROM trades WHERE status='CLOSED'
-# 레짐별 평균 수익률: SELECT buy_regime, AVG(profit_rate) FROM trades GROUP BY buy_regime
-###################
+logger = logging.getLogger(__name__)
 
 class TradeLogger:
     def __init__(self, db_name="trades.db"):
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row  # 결과를 딕셔너리 형태로 받기 위함
+        self.conn.row_factory = sqlite3.Row
         self._create_table()
+        
+        # L2 Backup용 비동기 작업 큐 및 데몬 스레드 초기화
+        self._async_queue = queue.Queue()
+        self._worker_thread = threading.Thread(target=self._async_worker, daemon=True)
+        self._worker_thread.start()
 
     def _create_table(self):
-        """지표별 상세 점수 컬럼 추가"""
-        query = """
+        """기존 거래 내역 테이블과 물리학적 상태 저장을 위한 신규 테이블 생성"""
+        query_trades = """
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             stock_code TEXT,
             stock_name TEXT,
             buy_price REAL,
             buy_score REAL,
-            -- 상세 지표 점수 컬럼 추가 --
-            alpha_score REAL,
-            supply_score REAL,
-            vwap_score REAL,
-            trend_score REAL,
-            -----------------------
             buy_time TEXT,
             buy_regime TEXT,
             sell_price REAL,
@@ -39,8 +39,83 @@ class TradeLogger:
             status TEXT DEFAULT 'OPEN'
         )
         """
-        self.conn.execute(query)
+        query_physics = """
+        CREATE TABLE IF NOT EXISTS physics_state (
+            stock_code TEXT PRIMARY KEY,
+            velocity REAL,
+            thrust REAL,
+            gravity REAL,
+            drag REAL,
+            magnetic REAL,
+            jerk REAL,
+            impulse REAL,
+            net_force REAL,
+            last_updated TEXT
+        )
+        """
+        self.conn.execute(query_trades)
+        self.conn.execute(query_physics)
         self.conn.commit()
+
+    # =========================================================
+    # 비동기 물리 상태 백업 (L2 Backup)
+    # =========================================================
+    def _async_worker(self):
+        worker_conn = sqlite3.connect("trades.db", check_same_thread=False)
+        while True:
+            try:
+                task = self._async_queue.get()
+                if task is None: break
+                
+                stock_code, forces, timestamp_str = task
+                query = """
+                INSERT INTO physics_state 
+                (stock_code, velocity, thrust, gravity, drag, magnetic, jerk, impulse, net_force, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stock_code) DO UPDATE SET 
+                    velocity=excluded.velocity, 
+                    thrust=excluded.thrust,
+                    gravity=excluded.gravity,
+                    drag=excluded.drag,
+                    magnetic=excluded.magnetic,
+                    jerk=excluded.jerk,
+                    impulse=excluded.impulse,
+                    net_force=excluded.net_force,
+                    last_updated=excluded.last_updated
+                """
+                params = (
+                    stock_code,
+                    forces["current_velocity"],
+                    forces["thrust"], forces["gravity"], forces["drag"],
+                    forces["magnetic"], forces["jerk"], forces["impulse"],
+                    forces["net_force"],
+                    timestamp_str
+                )
+                worker_conn.execute(query, params)
+                worker_conn.commit()
+                
+            except Exception as e:
+                logger.error(f"비동기 DB 로깅 실패: {e}")
+            finally:
+                self._async_queue.task_done()
+
+    def async_log_physical_state(self, stock_code: str, forces_dict: Dict[str, float]):
+        """[수정] 단일 속도 대신 전체 힘 딕셔너리를 큐에 넣습니다."""
+        timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+        self._async_queue.put((stock_code, forces_dict, timestamp_str))
+        
+    def get_last_physical_state(self, stock_code: str) -> Optional[dict]:
+        # [수정] 크래시 복구를 위해 velocity 추출
+        query = "SELECT velocity, last_updated FROM physics_state WHERE stock_code = ?"
+        cursor = self.conn.execute(query, (stock_code,))
+        row = cursor.fetchone()
+        
+        if row:
+            return {
+                'velocity': row['velocity'],
+                'timestamp': datetime.strptime(row['last_updated'], '%Y-%m-%d %H:%M:%S.%f')
+            }
+        return None
 
     def load_open_positions(self) -> Dict:
         """프로그램 시작 시 'OPEN' 상태인 종목들을 불러와 메모리에 복구합니다."""
@@ -54,13 +129,11 @@ class TradeLogger:
         query = """
         INSERT INTO trades (
             stock_code, stock_name, buy_price, buy_score, 
-            alpha_score, supply_score, vwap_score, trend_score,
             buy_time, buy_regime
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """
         params = (
             data['stock_code'], data['stock_name'], data['buy_price'], data['buy_score'],
-            data['alpha_score'], data['supply_score'], data['vwap_score'], data['trend_score'],
             data['buy_time'], data['buy_regime']
         )
         cursor = self.conn.execute(query, params)

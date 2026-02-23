@@ -70,10 +70,26 @@ class Notifier:
         snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         for item in self.status_data:
+            forces = item.get('forces', {})
+            
+            # 개별 벡터 힘 안전 추출 (Fallback 0.0)
+            thrust = forces.get('thrust', 0.0)
+            gravity = forces.get('gravity', 0.0)
+            drag = forces.get('drag', 0.0)
+            magnetic = forces.get('magnetic', 0.0)
+            jerk = forces.get('jerk', 0.0)
+            impulse = forces.get('impulse', 0.0)
+            net_force = forces.get('net_force', 0.0)
+            
+            name = item.get('name', '')
+            price = item.get('price', 0)
+            score = item.get('score', 0.0)
+            momentum = item.get('momentum', 0.0)
+            reason = item.get('reason', '')
             # CSV 포맷: 스냅샷시간,레짐,종목명,점수,모멘텀,상태
-            log_line = (f"{snapshot_time},{regime},{item['name']},"
-                        f"{item['alpha_score']},{item['supply_score']},{item['vwap_score']},{item['trend_score']},"
-                        f"{item['score']:.1f},{item['momentum']:.1f},{item['reason']}")
+            log_line = (f"{snapshot_time},{regime},{name},{price}"
+                        f"{thrust},{gravity},{drag},{magnetic},{jerk},{impulse},{net_force},"
+                        f"{score:.1f},{momentum:.1f},{reason}")
             status_logger.info(log_line)
 
     def notify_buy(self, buy_data: Dict):

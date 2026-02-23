@@ -13,10 +13,6 @@ class Position:
     stock_name: str
     buy_price: float
     buy_score: float
-    alpha_score: float
-    supply_score: float
-    vwap_score: float
-    trend_score: float
     buy_time: str
     buy_regime: str
     status: str = 'OPEN'

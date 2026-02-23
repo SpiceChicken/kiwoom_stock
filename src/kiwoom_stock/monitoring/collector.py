@@ -100,31 +100,13 @@ class MarketDataCollector:
         try:
             items = self.client.market.get_recent_ticks(code)
 
-            whale_volume_sum = 0.0
-            whale_detected = False
-
-            # KOSPI 100 기준 고래 임계값: 3억 원
-            WHALE_THRESHOLD = 300_000_000
-            
-            for tick in items:
-                try:
-                    # cur_prc: 체결가, cntr_trde_qty: 체결량
-                    price = clean_numeric(tick.get('cur_prc', "0"))
-                    volume = clean_numeric(tick.get('cntr_trde_qty', "0"))
-                    
-                    amount = price * volume
-                    
-                    # [기준] 한 건당 5천만 원 이상 체결 시 고래로 간주
-                    if amount >= WHALE_THRESHOLD:
-                        whale_detected = True
-                        whale_volume_sum += (amount / 100_000_000.0) # 억 단위 환산
-                except:
-                    continue
-
-            return {
-                'whale_found': whale_detected,
-                'whale_vol': round(whale_volume_sum, 2)
-            }
+            return [
+                {
+                    key: clean_numeric(value) for key, value in item.items()
+                    if not re.search(r'[가-힣a-zA-Z]', str(value))
+                }
+                for item in items
+            ]
         except Exception as e:
             logger.error(f"호가 잔량 데이터 수집 실패: {e}")
             return {}

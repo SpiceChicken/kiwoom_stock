@@ -1,30 +1,24 @@
 import logging
-import math
 from datetime import datetime, time, timedelta
-from typing import Dict, Tuple, Optional, List, Any
+from typing import Dict, Optional, List, Any
 
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.core.schema import SupplyData
-from kiwoom_stock.core import scoring
 from kiwoom_stock.core.types import MarketRegime
 
 logger = logging.getLogger(__name__)
 
 class TradingStrategy:
     """
-    [Strategy] 트레이딩 전략 (v2.5 Modularized)
-    - 역할: Analyzer가 수집한 데이터를 바탕으로 매수/매도/관망 여부를 '판단'
-    - 특징 1: 점수 계산(Calculation) 로직은 'scoring' 모듈로 위임하여 코드를 경량화
-    - 특징 2: 'SupplyData' 데이터 클래스를 사용하여 타입 안전성 확보
-    - 특징 3: 차등 진입 전략(Primary Driver) 및 과열 필터 적용
+    [Strategy] 물리적 모멘텀 기반 트레이딩 전략
+    - 특징: 물리 엔진이 산출한 가속도(모멘텀)와 속도(스코어)를 활용하여 가장 순수한 동역학 기반 판단을 내립니다.
     """
     
     def __init__(self, strategy_config: Dict):
         self.settings = strategy_config
-        self.momentum_threshold = strategy_config.get("momentum_threshold", 10.0)
+        self.momentum_threshold = strategy_config.get("momentum_threshold", 5.0) # 스코어 변화량 임계치
         self.debug_mode = strategy_config.get("debug_mode", False)
 
-        # 시간 설정 (장 마감 3분 전 강제 청산 등)
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
         self.exit_time_obj = time.fromisoformat(exit_str)
         dummy_dt = datetime.combine(datetime.today(), self.exit_time_obj)
@@ -34,11 +28,10 @@ class TradingStrategy:
         self._cached_config: Dict[str, Any] = {}
         
         # [Thresholds] 진입 임계값 초기화
-        self.curr_strict_th = 87.0  # Trend/Alpha 주도 시 (엄격)
-        self.curr_alert_th = 75.0   # 관심 종목 등록 기준
-        self.curr_interest_th = 65.0  # 절대 이탈 기준선 (기본값)
+        self.curr_strict_th = 85.0
+        self.curr_alert_th = 75.0
+        self.curr_interest_th = 65.0
 
-        # 매매 규칙 로드 (익절, 손절, 점수 감쇠율)
         self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.03)
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.03)
@@ -48,215 +41,120 @@ class TradingStrategy:
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
 
-        if self.debug_mode:
-            logger.warning("🚨 [DEBUG MODE] Strategy initialized in TEST mode. (Time checks bypassed)")
-
     def update_context(self, regime: MarketRegime):
-        """
-        [Context Update] 시장 레짐에 따라 임계값 동적 조정
-        - 디버그 모드일 경우: 설정 파일의 'debug_thresholds'를 강제 적용
-        - 일반 모드일 경우: 레짐(강세/약세)에 맞는 설정 로드
-        """
-        if self.debug_mode:
-            if self._current_regime != "DEBUG_MODE":
-                self._current_regime = "DEBUG_MODE"
-                debug_th = self.settings.get("debug_thresholds", {})
-                self.curr_strict_th = debug_th.get("strong", 50.0)
-                self.curr_alert_th = debug_th.get("alert", 40.0)
-                logger.warning(f"🚨 [DEBUG] Thresholds Fixed: {self.curr_strict_th}")
+        """[Context Update] 시장 레짐에 따라 임계값 동적 조정"""
+        regime_val = regime.value if hasattr(regime, 'value') else str(regime)
+
+        if self.debug_mode: 
+            self._current_regime = regime_val
             return
 
-        regime_val = regime.value if hasattr(regime, 'value') else str(regime)
-        
         if self._current_regime != regime_val:
             self._current_regime = regime_val
             regimes = self.settings.get("regimes", {})
             self._cached_config = regimes.get(regime_val, regimes.get("default", {}))
             
-            # 설정 파일 값 우선 적용 (없으면 기본값 87/82 유지)
             config_th = self._cached_config.get("thresholds", {})
-            self.curr_strict_th = config_th.get('strong', 87.0)
+            self.curr_strict_th = config_th.get('strong', 85.0)
             self.curr_alert_th = config_th.get('alert', 75.0)
-            self.curr_interest_th = config_th.get('interest', 65.0)
             
             logger.info(f"Strategy Updated: {regime_val} | Strict: {self.curr_strict_th}")
 
-    # --- Time & Risk Checks ---
     def is_monitoring_time(self) -> bool:
-        """장 운영 시간 체크 (디버그 모드 시 무조건 True)"""
         if self.debug_mode: return True
         now = datetime.now()
         if now.weekday() >= 5: return False
         return time(9, 0) <= now.time() <= self.exit_time_obj
 
     def is_trading_window(self) -> bool:
-        """신규 진입 가능 시간 체크 (15:00 마감)"""
         if self.debug_mode: return True
         return time(9, 0) <= datetime.now().time() < self.deadline_time
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
-        """계좌 전체 손실 한도 초과 여부 확인"""
         return total_pnl <= self.total_loss_limit
 
     def get_exit_reason(self, pos: Position, strong_threshold: float) -> Optional[str]:
-        """
-        [Exit Logic] 청산 조건 판별
-        1. Time Cut: 15:27 강제 청산 (디버그 모드 제외)
-        2. Stop Loss: 손절선 이탈
-        3. Take Profit: 목표가 도달 (단, 점수가 높으면 홀딩하여 수익 극대화)
-        4. Score Decay: 점수 급락 시 청산 (수익 중일 땐 더 민감하게 반응)
-        """
+        """[Exit Logic] 동역학 기반 청산 조건 판별"""
         profit_rate = (pos.sell_price / pos.buy_price - 1)
-        # 종목의 변동성(ATR)에 비례하여 손절폭 부여 (기본 1.5배)
-        current_atr = getattr(pos, 'atr_percent', 1.5)
+        current_atr = getattr(pos, 'atr_percent', 0.5)
         
-        # 1. 시간 청산
         if datetime.now().time() >= self.forced_exit_time:
             return "Day Trade Close (3m Early)"
             
-        # 2. [Dynamic Stop Loss] ATR 기반 동적 손절매 (수정됨)
-        # 돌파 매매의 특성상 눌림목(Breathing Room)을 견뎌야 하므로 ATR * 3.0으로 확대
         dynamic_stop = -(current_atr * 3.0) / 100
-        
-        # 안전장치: 최소 -1.5% 보장 (노이즈 방지), 최대 제한은 stop_loss_rate(-3%)보다 더 여유를 줌
-        final_stop = max(min(dynamic_stop, -0.015), self.stop_loss_rate * 1.5) # 최대 -4.5% 허용
+        final_stop = max(min(dynamic_stop, -0.015), self.stop_loss_rate * 1.5)
 
         if profit_rate <= final_stop:
             return f"Stop Loss ({profit_rate*100:.1f}%)"
             
-        # 3. [Dynamic Take Profit] ATR 기반 동적 익절
-        
-        # 목표: ATR * 3.0 (손절폭의 2배)
         dynamic_target = (current_atr * 3.0) / 100
-        
-        # 최소한 기본 목표가(target_profit_rate)는 넘어야 함 (너무 낮은 목표 방지)
         final_target = max(dynamic_target, self.target_profit_rate)
 
         if profit_rate >= final_target:
-            # 목표가를 달성했더라도, 점수가 여전히 강력하면 더 보유 (Trend Following)
             if pos.current_score >= strong_threshold:
                 return None 
             return f"Take Profit (+{profit_rate*100:.1f}%)"
         
-        # 4. 점수 하락 감지 (Score Decay)
-        current_decay = self.decay_rate  # 기본값 (예: 0.25)
-        
-        # 수익권에서는 민감도를 높여서(Decay 감소) 이익을 빠르게 확정
-        # 기존 (*= 1.5) -> 수정 (*= 0.5): 25% 하락 허용 -> 12.5% 하락만 허용
+        current_decay = self.decay_rate
         if profit_rate >= 0.01:
             current_decay *= 0.5 
             
         relative_threshold = pos.buy_score * (1 - current_decay)
-        
-        # 절대 기준선을 Alert(75) -> Interest Threshold로 완화
-        # 잦은 조기 털림 방지
         absolute_threshold = self.curr_interest_th
-
-        # 둘 중 더 낮은 값을 적용하여 웬만하면 버티되, 
-        # 수익권이거나 점수가 심각하게 망가지면 매도
         final_sell_threshold = min(relative_threshold, absolute_threshold)
 
         if pos.current_score < final_sell_threshold:
             return f"Score Decay (-{current_decay*100:.1f}%)"
+            
         return None
     
     def _get_momentum(self, stock_code: str, current_score: float) -> float:
-        """점수 변화량(모멘텀) 측정"""
-        scores = self.history.get(stock_code, [])
+        """[Physics] 속도의 변화량 즉, 가속도(Momentum)를 측정합니다."""
+        scores = self.history.setdefault(stock_code, [])
         if not scores:
-            self.history[stock_code] = [current_score]
+            scores.append(current_score)
             return 0.0
+            
         avg_prev_score = sum(scores) / len(scores)
         momentum = round(current_score - avg_prev_score, 1)
         scores.append(current_score)
-        self.history[stock_code] = scores[-5:] # 최근 5개 점수만 유지
+        self.history[stock_code] = scores[-5:] 
         return momentum
 
-    def _check_universal_filters(self, metrics: SupplyData) -> Tuple[bool, str]:
-        """
-        [Stage 2 Filters] 3-Factor 타점 검증
-        - 이미 Alpha(입장권)를 통과한 종목에 한해, 치명적인 결함이 있는지 검사
-        """
-        details = metrics.score_detail
-        if not details: return False, ""
-            
-        supply_score = details.get('supply', 0.0)
-        vwap_score = details.get('vwap', 0.0)
-        trend_score = details.get('trend', 0.0)
-
-        # 1. 수급 실종 (Fake Pump)
-        # 차트가 아무리 좋아도 당장 쏴줄 '돈'이 안 들어오면 가짜 상승
-        if supply_score < 40.0:
-            return True, f"수급 부족 (Supply: {supply_score:.1f})"
-
-        # 2. 밸런스 붕괴 (단일 지표 맹신 방지)
-        # 기하평균이 알아서 깎아주지만, 명시적인 하한선 설정
-        if vwap_score < 30.0:
-             return True, f"VWAP 지지력 상실"
-        if trend_score < 20.0:
-             return True, f"추세선(EMA5) 이탈"
-
-        return False, ""
-        
     def evaluate(self, metrics: SupplyData) -> Dict:
         """
-        [Final Verdict] 2-Stage 진입 판독기 (Aggressive Trigger)
+        [Final Verdict] 물리적 모멘텀 기반 진입 판독기
         """
         stock_code = metrics.stock_code
-        total_score, score_detail = metrics.total_score, metrics.score_detail
-        alpha_score = score_detail.get('alpha',0)
+        total_score = metrics.total_score
         
         momentum = self._get_momentum(stock_code, total_score)
         
         status = "관망"
         is_buy_signal = False
-        
-        # 주 동인 식별 (alpha 제외)
-        svt_details = {k: v for k, v in score_detail.items() if k != 'alpha'}
-        primary_driver = max(svt_details, key=lambda k: svt_details[k]) if svt_details else "none"
 
-        # ------------------------------------------------------------------
-        # [Stage 1] 입장권 검사 (Qualifier)
-        # ------------------------------------------------------------------
-        # 기본 모멘텀(Alpha)이 70점(관심선) 아래면 타점이 아무리 좋아도 무시
-        if alpha_score < self.curr_interest_th:
-            status = f"관망 (Alpha 미달: {alpha_score:.1f})"
-            is_buy_signal = False
-            
-        else:
-            # ------------------------------------------------------------------
-            # [Stage 2] 결함 검사 및 타점 트리거 (Trigger)
-            # ------------------------------------------------------------------
-            is_filtered, filter_reason = self._check_universal_filters(metrics)
-
-            if is_filtered:
-                status = f"관망 ({filter_reason})"
-                is_buy_signal = False
+        # 총점(물리적 속도)이 임계값을 돌파했는가?
+        if total_score >= self.curr_strict_th:
+            if momentum < 0:
+                # 관성으로 인해 속도는 높지만 저항(Gravity/Drag)에 부딪혀 감속 중인 상태
+                status = "⚠️고점경계 (감속 중)" 
             else:
-                # 총점(S.V.T)이 엄격한 진입 기준을 넘었는가?
-                if total_score >= self.curr_strict_th:
-                    if momentum < 0:
-                        status = "⚠️고점경계" # 점수는 높지만 속도가 줄어드는 중
-                    else:
-                        status = "🔥강력추천"
-                        is_buy_signal = True
+                status = "🔥강력추천 (가속 돌파)"
+                is_buy_signal = True
                 
-                # 진입 기준은 못 넘었지만 예비 신호
-                elif total_score >= self.curr_alert_th:
-                    if momentum >= self.momentum_threshold:
-                        status = "🚀수급폭발" # 기세가 미친듯이 치고 올라옴
-                    else:
-                        status = "👀관심"
+        elif total_score >= self.curr_alert_th:
+            if momentum >= self.momentum_threshold:
+                status = "🚀수급폭발 (초기 추진력 확보)" 
+            else:
+                status = "👀관심"
 
         return {
-                "score": total_score,          # UI 및 매니저에 표시될 최종 점수
+                "score": total_score,
                 "momentum": momentum,
                 "status": status,
-                'score_detail': score_detail,
                 "regime": self._current_regime,
                 "is_buy_signal": is_buy_signal,
-                "primary_driver": primary_driver,
-                "price": metrics.price,
+                "price": metrics.cur_prc,
                 "stock_code": stock_code,
-                "atr_percent": metrics.atr_percent
+                "atr_percent": getattr(metrics, 'atr_percent', 0.5)
             }

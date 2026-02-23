@@ -28,10 +28,9 @@ class SupplyData:
     vwap: float = 0.0            # VWAP
     prev_vwap: float = 0.0       # 이전 VWAP
     
-    alpha_score: float = 0.0     # 가속도 점수
     trend_rsi: float = 50.0      # 추세 RSI
     vol_factor: float = 1.0      # 거래량 팩터
-    atr_percent: float = 3.0     # 변동성 지표
+    atr_percent: float = 0.5     # 변동성 지표
     
     # 이동평균선 (EMA)
     ema5: float = 0.0
