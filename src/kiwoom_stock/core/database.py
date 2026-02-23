@@ -99,7 +99,7 @@ class TradeLogger:
             finally:
                 self._async_queue.task_done()
 
-    def async_log_physical_state(self, stock_code: str, forces_dict: Dict[str, float]):
+    async def async_log_physical_state(self, stock_code: str, forces_dict: Dict[str, float]):
         """[수정] 단일 속도 대신 전체 힘 딕셔너리를 큐에 넣습니다."""
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
         self._async_queue.put((stock_code, forces_dict, timestamp_str))

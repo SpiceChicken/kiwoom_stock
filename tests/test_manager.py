@@ -22,7 +22,16 @@ def test_process_buy_order(manager):
         "price": 80000.0,
         "score": 88.5,
         "regime": "안정적 강세장",
-        "score_detail": {"alpha": 90, "supply": 80, "vwap": 90, "trend": 90}
+        "score_detail": {
+            "thrust": 1.25,
+            "gravity": -0.85,
+            "drag": -0.15,
+            "magnetic": 0.40,
+            "jerk": 0.80,
+            "impulse": 0.0,
+            "net_force": 1.45,
+            "current_velocity": 2.50
+        }
     }
     
     # When

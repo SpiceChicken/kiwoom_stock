@@ -19,7 +19,7 @@ class MarketAnalyzer:
     """
     def __init__(self, client, market_config: Dict, state_tracker: PhysicalStateTracker):
         self.collector = MarketDataCollector(client)
-        self.state_tracker = state_tracker  # [Physics] 주입받은 물리 엔진 트래커
+        self.state_tracker = state_tracker
         
         self.market_proxy_code = market_config.get("proxy_code", "069500")
         self.market_rsi = 50.0
@@ -71,6 +71,7 @@ class MarketAnalyzer:
             for stock_code in stock_codes:
                 if stock_code not in self.supply_cache:
                     self.supply_cache[stock_code] = SupplyData(stock_code=stock_code)
+                    self.supply_cache[stock_code].total_score = 0.0
 
                 data = self.supply_cache[stock_code]
                 chart_5m = self.collector.fetch_minute_chart(stock_code, tic="5")
@@ -82,16 +83,20 @@ class MarketAnalyzer:
                 self._update_volatility_data(data, chart_5m) 
                 self._update_rsi_data(data, chart_5m) 
                 
-                order_book = self._fetch_safe_order_book(stock_code) 
-                impulse_vol = self._fetch_safe_instant_volume(stock_code)
+                # 🛡️ [Rate Limit 방어벽] 
+                if getattr(data, 'total_score', 0.0) >= 75.0:
+                    order_book = self._fetch_safe_order_book(stock_code) 
+                    impulse_vol = self._fetch_safe_instant_volume(stock_code)
+                else:
+                    order_book = {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
+                    impulse_vol = 0.0
 
-                # 리턴값을 받아서 분리.
                 tracker_result = self.state_tracker.process_tick(
                     stock_code=stock_code,
                     strength=data.strength,
                     current_price=data.cur_prc,
                     vwap=data.vwap,
-                    atr_percent=getattr(data, 'atr_percent', 0.5), # 퍼센트 단위 유지
+                    atr_percent=getattr(data, 'atr_percent', 0.5),
                     vol_ratio=data.vol_ratio,
                     rsi=getattr(data, 'trend_rsi', 50.0),
                     tot_sel_req=order_book.get('tot_sel_req', 0.0),
@@ -100,13 +105,12 @@ class MarketAnalyzer:
                 )
                 
                 data.total_score = tracker_result["total_score"]
-                data.score_detail = tracker_result["forces"] # 모든 개별 벡터 힘 보관
+                data.score_detail = tracker_result["forces"]
 
             self.last_supply_update = datetime.now()
         except Exception as e:
             logger.error(f"데이터 파이프라인 오류: {e}")
 
-    # --- Data Update Helpers ---
     def _fetch_safe_order_book(self, code: str) -> Dict[str, float]:
         """[New] [ka10004] 주식호가요청 - 자기력(Magnetic Force) 계산용"""
         try:
@@ -119,39 +123,21 @@ class MarketAnalyzer:
             return {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
 
     def _fetch_safe_instant_volume(self, code: str) -> float:
-        """[New] [ka10052] 거래원순간거래량요청 - 충격량(Impulse) 계산용"""
-        try:
-            # collector 내부에 fetch_instant_volume이 있다고 가정 (없을 경우 0.0 반환)
-            vol_data = getattr(self.collector, 'fetch_instant_volume', lambda c: {})(code)
-            return float(vol_data.get('mont_trde_qty', 0.0))
-        except Exception:
-            return 0.0
-
-    def _fetch_safe_instant_volume(self, code: str) -> float:
-        """
-        [Physics 파이프라인] 순간 충격량(Impulse) 추출
-        - 정제된 틱 데이터를 기반으로 단일 최대 체결 대금(Max Instant Amount)을 찾아 억 단위로 반환합니다.
-        """
+        """[Physics] 순간 충격량(Impulse) 추출 - 완벽 정제본"""
         try:
             ticks = self.collector.fetch_recent_ticks(code)
-            
-            # 틱 데이터가 없으면 0.0 반환 (max 함수의 ValueError 방지)
             if not ticks:
                 return 0.0
                 
-            # 이미 collector 단에서 숫자형으로 완벽히 정제되었으므로, 
-            # 불필요한 예외처리 없이 가장 큰 단일 체결 대금을 즉시 계산하여 억 단위로 환산합니다.
             max_amount_100m = max(
-                (abs(tick.get('cur_prc', 0)) * abs(tick.get('cntr_trde_qty', 0))) / 100_000_000.0
+                (abs(float(tick.get('cur_prc', 0))) * abs(float(tick.get('cntr_trde_qty', 0)))) / 100_000_000.0
                 for tick in ticks
             )
-            
             return float(max_amount_100m)
-            
         except Exception as e:
             logger.warning(f"[{code}] 순간 충격량 추출 실패: {e}")
             return 0.0
-    
+
     def _update_strength_data(self, data: SupplyData, code: str):
         """[New] 현재 체결강도와 5분 전 체결강도(Jerk 산출용)를 동시에 수집합니다."""
         # [ka10046] 체결강도추이시간별요청 대체 구현부

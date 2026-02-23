@@ -61,10 +61,9 @@ def sample_supply_data():
         cur_prc=80500.0,
         vwap=80000.0,
         prev_vwap=79000.0,
-        alpha_score=85.0,
         trend_rsi=65.0, 
         vol_factor=1.5,
-        atr_percent=2.0,
+        atr_percent=0.5,
         ema5=80200.0,
         ema20=79500.0,
         ema60=78000.0,
@@ -77,9 +76,20 @@ def sample_supply_data():
     data.price_series = [78000, 78500, 79000, 79500, 80000, 80500]
     data.volume_series = [1000, 1200, 1500, 1300, 2000, 2500]
 
-    # Strategy 테스트용으로 쓸 때 (이미 분석이 끝난 상태를 가정)
-    data.score_detail = {'alpha': 90.0, 'supply': 80.0, 'vwap': 95.0, 'trend': 85.0}
-    data.total_score = 87.5  # 가중 기하평균 대략 계산값
+    # 물리 엔진의 Vector Forces 딕셔너리로 교체
+    data.score_detail = {
+        "thrust": 1.25,
+        "gravity": -0.85,
+        "drag": -0.15,
+        "magnetic": 0.40,
+        "jerk": 0.80,
+        "impulse": 0.0,
+        "net_force": 1.45,
+        "current_velocity": 2.50
+    }
+    
+    # current_velocity(2.50)를 시그모이드(calculate_physical_score)에 통과시킨 근사치 점수 주입
+    data.total_score = 92.4
     
     return data
 
@@ -90,11 +100,8 @@ def sample_position():
         stock_code="005930",
         stock_name="삼성전자",
         buy_price=80000.0,
-        buy_score=90.0,
-        alpha_score=85.0,
-        supply_score=80.0,
-        vwap_score=95.0,
-        trend_score=90.0,
+        buy_score=85.0,        # 진입 당시의 물리적 스코어
+        current_score=88.0,    # 현재 스코어 (테스트 편의상 추가)        
         buy_time="2026-02-08 10:00:00",
         buy_regime="STABLE_BULL",
         status="OPEN",
