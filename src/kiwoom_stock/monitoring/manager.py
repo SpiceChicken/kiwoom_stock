@@ -31,7 +31,7 @@ class Position:
     sell_reason: Optional[str] = None
     current_score: Optional[float] = None
     # DB에는 없지만, 프로그램 실행 중(Runtime)에만 사용하는 메모리 변수
-    atr_percent: Optional[float] = None
+    atr_percent: float = 0.5
     
     @property
     def calc_profit_rate(self) -> float:

@@ -151,7 +151,6 @@ class TradingEngine:
                     continue
                 
                 # 1-2. Engine이 직접 Strategy를 호출하여 매도 사유 판별
-                # 물리 엔진 상세 데이터 호환성 처리 (forces 또는 score_detail)
                 forces = verdict.get('forces', {})
                 
                 exit_reason = self.strategy.get_exit_reason(pos, verdict['price'], forces)

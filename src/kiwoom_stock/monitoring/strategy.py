@@ -81,7 +81,7 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신
         # -------------------------------------------------------------------
-        state = self._kinetic_state.setdefault(stock_code, {'max_v': 0.0, 'neg_count': 0})
+        state = self._kinetic_state.setdefault(stock_code, {'max_v': 0.0, 'forces': []})
         
         current_velocity = forces.get('current_velocity', 0.0)
         net_force = forces.get('net_force', 0.0)
