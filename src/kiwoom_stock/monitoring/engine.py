@@ -33,7 +33,7 @@ class TradingEngine:
         self.state_tracker = PhysicalStateTracker(self.db)
         self.analyzer = MarketAnalyzer(client, config.get("market", {}), self.state_tracker)
         self.strategy = TradingStrategy(config.get("strategy", {}))
-        self.stock_mgr = StockManager(client, self.db, self.strategy, config.get("filters", {}))
+        self.stock_mgr = StockManager(client, self.db, config.get("filters", {}))
         self.notifier = Notifier(self.stock_mgr.stock_names, config)
         
         self.executor = ThreadPoolExecutor(max_workers=config.get("max_workers", 8))
@@ -133,26 +133,49 @@ class TradingEngine:
 
     def _process_decisions(self, verdicts: List[Dict]):
         """[Decision] 전략 결과를 바탕으로 매수/매도/관망 결정"""
-        for v in verdicts:
+        for verdict in verdicts:
             # 상태 로깅
-            self._log_status(v)
-
-            # 1. 매도(청산) 검사 - 보유 중인 경우만
-            # strategy.py 리팩토링 반영: curr_strong_th -> curr_strict_th (엄격 기준 적용)
-            if reason := self.stock_mgr.evaluate_position(v, self.strategy.curr_strict_th):
-                self._execute_order('SELL', v, reason)
+            self._log_status(verdict)
             
-            # 2. 매수(진입) 검사 - 미보유 시
-            elif self._should_enter(v):
-                self._execute_order('BUY', v)
+            stock_code = verdict['stock_code']
 
-    def _should_enter(self, v: Dict) -> bool:
+            # =================================================================
+            # 1. 매도(청산) 검사 - 보유 중인 경우만
+            # =================================================================
+            if stock_code in self.stock_mgr.active_positions:
+                
+                # 1-1. Manager에게는 '순수 데이터 갱신'만 지시하고 객체를 돌려받음
+                # (이전에 함께 수정한 manager.py의 update_position_data 활용)
+                pos = self.stock_mgr.update_position_data(verdict)
+                if not pos:
+                    continue
+                
+                # 1-2. Engine이 직접 Strategy를 호출하여 매도 사유 판별
+                forces = verdict.get('forces', {})
+                
+                exit_reason = self.strategy.get_exit_reason(pos, verdict['price'], forces)
+                
+                # 1-3. 매도 사유가 발생했다면 매도 집행
+                if exit_reason:
+                    self._execute_order('SELL', verdict, exit_reason)
+                    
+                    # (옵션) 매도 완료 후 Strategy 내부의 동적 상태 캐시 정리
+                    if hasattr(self.strategy, '_kinetic_state'):
+                        self.strategy._kinetic_state.pop(stock_code, None)
+            
+            # =================================================================
+            # 2. 매수(진입) 검사 - 미보유 시
+            # =================================================================
+            elif self._should_enter(verdict):
+                self._execute_order('BUY', verdict)
+
+    def _should_enter(self, verdict: Dict) -> bool:
         """[Filter] 진입 조건 종합 검증 (시간, 중복, 신호)"""
         return (
             self.strategy.is_trading_window() and
-            v['is_buy_signal'] and
-            v['stock_code'] not in self.stock_mgr.active_positions and
-            self.stock_mgr.is_not_recent_exit(v['stock_code'])
+            verdict['is_buy_signal'] and
+            verdict['stock_code'] not in self.stock_mgr.active_positions and
+            self.stock_mgr.is_not_recent_exit(verdict['stock_code'])
         )
 
     def _execute_order(self, side: str, verdict: Dict, reason: Optional[str] = None):
@@ -183,16 +206,16 @@ class TradingEngine:
         for code in list(self.stock_mgr.active_positions.keys()):
             self.stock_mgr.sell_stock(code, "KILL-SWITCH")
 
-    def _log_status(self, v: Dict):
+    def _log_status(self, verdict: Dict):
         """Notifier로 상태 전송"""
         try:
             self.notifier.collect_status({
-                "name": self.stock_mgr.stock_names.get(v['stock_code'], v['stock_code']),
-                "price": v["price"],
-                "score": v['score'],
-                "momentum": v['momentum'],
-                "reason": v['status'],
-                "forces": v.get('forces', {})  # [수정] 물리 엔진의 7대 벡터 힘 데이터 전달
+                "name": self.stock_mgr.stock_names.get(verdict['stock_code'], verdict['stock_code']),
+                "price": verdict["price"],
+                "score": verdict['score'],
+                "momentum": verdict['momentum'],
+                "reason": verdict['status'],
+                "forces": verdict.get('forces', {})  # [수정] 물리 엔진의 7대 벡터 힘 데이터 전달
             })
         except Exception:
             pass
