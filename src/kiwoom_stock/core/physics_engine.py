@@ -33,6 +33,9 @@ def _calculate_thrust_force(execution_strength_pct: float, vol_ratio: float, nor
     
     # 거래대비가 높을수록 가속도 증폭 (단, 극단적 이상치 방지를 위해 Log 스케일 적용)
     vol_multiplier = max(1.0, math.log10(max(1.0, vol_ratio)) + 1.0)
+
+    # [Fix] 최대 증폭 2배 제한 (과도한 갭상승/폭발 제어)
+    vol_multiplier = min(2.0, vol_multiplier)  
     
     return base_thrust * vol_multiplier
 
@@ -84,14 +87,14 @@ def _calculate_jerk_force(current_strength: float, prev_strength_5m: float, norm
     jerk_val = current_strength - prev_strength_5m
     return math.tanh(jerk_val / norm_constant)
 
-def _calculate_impulse(instant_volume: float, norm_constant: float = 1000.0) -> float:
+def _calculate_impulse(max_instant_amt_100m: float, norm_constant: float = 10.0) -> float:
     """
     [물리적 의도: Impulse] 순간적인 대량 거래(충격량).
     - J = F * dt 로, 속도 벡터에 직접적인 스칼라 합산을 부여합니다.
     """
-    if instant_volume <= 0: return 0.0
+    if max_instant_amt_100m <= 0: return 0.0
     # 최대 5.0 단위의 순간 속도 부스트
-    return math.tanh(instant_volume / norm_constant) * 5.0 
+    return math.tanh(max_instant_amt_100m / norm_constant) * 5.0
 
 # =========================================================
 # Integration (합력 및 속도 산출)
@@ -113,19 +116,26 @@ def calculate_net_velocity(
 ) -> Dict[str, float]:
     """
     [물리적 의도: V_t = V_{t-1} + F_net + J]
-    [수정] 모든 벡터 힘(Forces)을 딕셔너리로 묶어서 반환합니다.
     """
+    # 1. 벡터 힘 (Forces) 계산
     thrust = _calculate_thrust_force(strength, vol_ratio)
     gravity = _calculate_gravity_force(current_price, vwap, atr_percent)
+    
+    # [Fix] 추진력(Thrust)이 없을 때는 중력이 위로 끌어올리지 못하게(양수 불가) 차단 (한화생명 억지 진입 방지)
+    if thrust <= 0.0:
+        gravity = min(0.0, gravity)
+        
     drag = _calculate_drag_force(previous_velocity, rsi, friction_coefficient)
     magnetic = _calculate_magnetic_force(tot_sel_req, tot_buy_req)
     jerk = _calculate_jerk_force(strength, prev_strength_5m)
     
+    # 2. 합력 및 속도 산출
     net_force = thrust + gravity + drag + magnetic + jerk
     
     impulse = _calculate_impulse(max_instant_amt_100m)
     current_velocity = previous_velocity + net_force + impulse
     
+    # 3. 상세 지표 반환
     return {
         "thrust": float(round(thrust, 4)),
         "gravity": float(round(gravity, 4)),

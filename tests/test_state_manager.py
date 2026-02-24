@@ -19,27 +19,40 @@ def test_time_decay_crash_recovery():
     assert round(recovered_velocity, 2) == 3.68
 
 def test_time_freeze_defense_volume_unchanged():
-    """[병목/로직 타격] 거래량 동결 시 가속도 중첩 방지 검증"""
+    """[병목/로직 타격] 거래량 동결 시 가속도 중첩 방지 및 관성 감쇠(Drag) 검증"""
     mock_db = MagicMock()
     tracker = PhysicalStateTracker(mock_db)
     
-    # 첫 틱 (거래량 100)
+    # 워커 스레드 모킹 (DB 로깅 차단 여부 검증용)
+    tracker._db_executor = MagicMock()
+
+    # 첫 틱 (거래량 100) -> 정상 작동
     res1 = tracker.process_tick(
-        stock_code="005930", strength=110, current_price=50000, vwap=50000, atr_percent=1.5,
-        vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_instant_amt_100m=10,
-        current_volume=100.0 # 패치된 변수
-    )
-    
-    # 두 번째 틱 (시간은 흘렀으나 거래량 100으로 동일)
-    res2 = tracker.process_tick(
         stock_code="005930", strength=110, current_price=50000, vwap=50000, atr_percent=1.5,
         vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_instant_amt_100m=10,
         current_volume=100.0
     )
     
-    # Assert: 거래량이 변하지 않았으므로 물리 엔진을 건너뛰고 이전 점수 유지, Forces 빈 딕셔너리 반환
-    assert res1["total_score"] == res2["total_score"]
-    assert res2["forces"] == {}
+    # 동결이 아니므로 DB 로깅 작업이 워커 큐에 submit 되어야 함
+    assert tracker._db_executor.submit.called
+    tracker._db_executor.submit.reset_mock()
+
+    # 두 번째 틱 (시간은 흘렀으나 거래량 100으로 동일 -> 동결 상태 진입)
+    res2 = tracker.process_tick(
+        stock_code="005930", strength=110, current_price=50000, vwap=50000, atr_percent=1.5,
+        vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_instant_amt_100m=10,
+        current_volume=100.0
+    )
+
+    # Assert 1: 거래량이 멈춰 추진력이 0이 되었으므로, 관성에 마찰력(Drag)이 작용해 점수가 미세하게 깎여야 함
+    assert res2["total_score"] < res1["total_score"], "동결 상태에서는 마찰력에 의해 점수가 감쇠해야 합니다."
+    
+    # Assert 2: 동결 시 엔진 내부에서 충격량(Impulse) 등 액티브한 힘이 강제로 0으로 셧다운 되었는지 검증
+    # (엔진 로직에 따라 약간 다를 수 있으나, thrust 계열의 입력이 0.0으로 차단되었음을 확인)
+    assert res2["forces"].get("impulse", 0.0) == 0.0
+    
+    # Assert 3: DB 도배 방지벽 작동 확인 (동결 상태에서는 DB 로깅이 스킵되어야 함)
+    assert not tracker._db_executor.submit.called, "동결 상태의 틱은 DB 워커에 submit 되면 안 됩니다."
 
 def test_jerk_5min_delay_queue():
     """[상태 타격] 5분(300초) 전 체결강도 큐 정상 배출 검증"""

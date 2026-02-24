@@ -123,7 +123,10 @@ class MarketAnalyzer:
             return {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
 
     def _fetch_safe_instant_volume(self, code: str) -> float:
-        """[Physics] 순간 충격량(Impulse) 추출 - 완벽 정제본"""
+        """
+        [Task 1] 순간 충격량(Impulse) 파이프라인
+        - 단일 틱 체결대금이 1억 원(100,000,000) 이상인 경우에만 1억 단위로 스케일링
+        """
         try:
             ticks = self.collector.fetch_recent_ticks(code)
             if not ticks:

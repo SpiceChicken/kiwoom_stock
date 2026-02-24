@@ -1,3 +1,5 @@
+# [PATCH] tools/trade_validator.py (전체 덮어쓰기)
+
 import sqlite3
 import pandas as pd
 import os
@@ -6,7 +8,6 @@ from rich.console import Console
 from rich.table import Table
 
 def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
-    # 1. 데이터 로드
     if not os.path.exists(db_path):
         print(f"❌ 에러: {db_path} 파일을 찾을 수 없습니다.")
         return
@@ -20,45 +21,62 @@ def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
         console.print("[yellow]조회된 종료 거래 데이터가 없습니다.[/]")
         return
 
-    # 2. 분석 결과 리스트 생성 (CSV 및 표 출력용)
+    # 구 DB 구조(S.V.T)인 경우 충돌 방지
+    if 'thrust' not in df.columns:
+        console.print("[red]❌ 구버전 스키마(S.V.T)가 감지되었습니다. 기존 trades.db를 삭제 후 새로 구동하십시오.[/]")
+        return
+
     analysis_results = []
-    
-    table = Table(title="[bold white]개별 종목 로직 효용성 정밀 진단[/]", show_lines=True)
+    table = Table(title="[bold white]물리 엔진 동역학 타점 정밀 진단 (7대 벡터 모두 표시)[/]", show_lines=True)
     table.add_column("종목 (레짐)", style="cyan")
     table.add_column("수익률", justify="right")
-    table.add_column("주요 지표 점수", justify="center")
-    table.add_column("로직 판정", justify="left")
+    table.add_column("7대 물리 벡터 (Forces)", justify="center")
+    table.add_column("타점 판정", justify="left")
 
     for _, row in df.iterrows():
-        # 지표별 점수 추출
-        scores = {
-            "Alpha": row['alpha_score'],
-            "Supply": row['supply_score'],
-            "VWAP": row['vwap_score'],
-            "Trend": row['trend_score']
+        # 1. 7대 물리 벡터 모두 추출
+        forces = {
+            "Thrust": row['thrust'],
+            "Gravity": row['gravity'],
+            "Drag": row['drag'],
+            "Magnetic": row['magnetic'],
+            "Jerk": row['jerk'],
+            "Impulse": row['impulse']
         }
-        primary_driver = max(scores, key=scores.get)
+        net_force = row['net_force']
+        
+        # 2. 가장 강하게 작용한 양의 벡터(상승 주동력) 추출
+        positive_forces = {k: v for k, v in forces.items() if v > 0}
+        primary_driver = max(positive_forces, key=positive_forces.get) if positive_forces else "None"
+        
         profit = row['profit_rate']
         
-        # 판정 로직
+        # 3. 판정 로직: Net Force(합력)가 1.0 이상인 강력한 물리적 돌파 자리였는가?
         if profit > 2.0:
-            judgement = "🎯 적중" if scores[primary_driver] >= 80 else "🤔 요행"
+            judgement = "🎯 정밀타격" if net_force >= 1.0 else "🤔 요행(가속부족)"
         elif profit < -2.0:
-            judgement = "❌ 오판" if scores[primary_driver] >= 80 else "⚠️ 경고"
+            judgement = "❌ 엔진과열(오판)" if net_force >= 1.0 else "⚠️ 억지진입(동력부족)"
         else:
-            judgement = "➖ 보합"
+            judgement = "➖ 보합(마찰 상쇄)"
 
-        # 표 출력용 데이터 추가
+        # 4. 표 출력용 데이터 포매팅 (모든 값 표시, 가독성을 위해 줄바꿈 적용)
         res_color = "red" if profit > 0 else "blue"
-        score_summary = f"A:{scores['Alpha']:.0f} S:{scores['Supply']:.0f} V:{scores['VWAP']:.0f} T:{scores['Trend']:.0f}"
+        
+        # T:추세 / G:중력(저항) / D:마찰력 / M:호가흡입 / J:가속도 / I:순간충격
+        score_summary = (
+            f"[bold white]Net Force: {net_force:+.2f}[/]\n"
+            f"T:{forces['Thrust']:+.2f}  G:{forces['Gravity']:+.2f}  D:{forces['Drag']:+.2f}\n"
+            f"M:{forces['Magnetic']:+.2f}  J:{forces['Jerk']:+.2f}  I:{forces['Impulse']:+.2f}"
+        )
+        
         table.add_row(
             f"{row['stock_name']}\n({row['buy_regime']})",
             f"[{res_color}]{profit:+.2f}%[/{res_color}]",
             score_summary,
-            judgement
+            f"{judgement}\n(Main: {primary_driver})"
         )
 
-        # CSV 저장용 데이터 구성
+        # 5. CSV 저장용 데이터 구성 (pandas to_dict()가 이미 7개 컬럼을 모두 가져옵니다)
         row_dict = row.to_dict()
         row_dict['primary_driver'] = primary_driver
         row_dict['judgement'] = judgement
@@ -66,13 +84,11 @@ def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
 
     console.print(table)
 
-    # 3. CSV 파일 저장
     if export_csv:
         result_df = pd.DataFrame(analysis_results)
-        # 파일명에 날짜 포함
-        filename = f"trade_analysis_{datetime.now().strftime('%Y%m%d')}.csv"
+        filename = f"physics_trade_analysis_{datetime.now().strftime('%Y%m%d')}.csv"
         result_df.to_csv(filename, index=False, encoding='utf-8-sig')
-        console.print(f"\n[bold green]✅ 분석 결과가 CSV로 저장되었습니다: {filename}[/]")
+        console.print(f"\n[bold green]✅ 물리 엔진 7대 벡터 분석 결과가 CSV로 전체 저장되었습니다: {filename}[/]")
 
 if __name__ == "__main__":
     analyze_trade_efficiency()

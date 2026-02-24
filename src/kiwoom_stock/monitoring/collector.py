@@ -82,15 +82,11 @@ class MarketDataCollector:
 
     def fetch_order_book(self, code: str) -> Dict[str, Any]:
         try:
-            items = self.client.market.get_order_book(code)
+            item = self.client.market.get_order_book(code)
 
-            # 실제 응답 구조에 따라 필드명이 다를 수 있으므로 안전하게 처리
-            sell_total = clean_numeric(items.get('tot_sel_req', "0"))
-            buy_total = clean_numeric(items.get('tot_buy_req', "0"))
-            
             return {
-                'sell_total': sell_total,
-                'buy_total': buy_total
+                key: clean_numeric(value) for key, value in item.items()
+                if not re.search(r'[가-힣a-zA-Z]', str(value))
             }
         except Exception as e:
             logger.error(f"호가 잔량 데이터 수집 실패: {e}")
