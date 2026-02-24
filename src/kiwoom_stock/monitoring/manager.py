@@ -51,10 +51,9 @@ class StockManager:
     [Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리
     
     """
-    def __init__(self, client, db, strategy, filter_config: Dict):
+    def __init__(self, client, db, filter_config: Dict):
         self.client = client
         self.db = db
-        self.strategy = strategy
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
         self.max_stocks = filter_config.get("max_stocks", 50)
         self.cooldown_minutes = filter_config.get("cooldown_minutes", 10)
@@ -106,7 +105,7 @@ class StockManager:
         except Exception as e:
             logger.error(f"종목 갱신 실패: {e}")
 
-    def evaluate_position(self, verdict: Dict, strong_threshold):
+    def update_position_data(self, verdict: Dict):
         """
         [Manager] 보유 종목의 상태를 최신화하고 매도 사유(Exit Reason)가 있는지 평가합니다.
         
@@ -126,10 +125,7 @@ class StockManager:
         # verdict에 'atr_percent'가 없으면 기본값 1.5 사용
         pos.atr_percent = verdict['atr_percent']
         
-        # [추상화 호출] 판정은 평가기에게 맡깁니다.
-        sell_reason = self.strategy.get_exit_reason(pos, strong_threshold)
-
-        return sell_reason
+        return pos
 
     def get_total_pnl_status(self, realized_pnl: float) -> float:
         """
