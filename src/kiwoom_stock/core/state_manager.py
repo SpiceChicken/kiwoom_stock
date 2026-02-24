@@ -64,22 +64,29 @@ class PhysicalStateTracker:
         tot_buy_req: float, max_instant_amt_100m: float, current_volume: float = 0.0
     ) -> Dict[str, Any]:
         
-        # 1. 거래량 동결 방어벽
+        # 1. 거래량 동결 여부 판독 (시간 정지 방어)
         last_vol = self._last_volume.get(stock_code, -1.0)
+        is_frozen = False
         if last_vol == current_volume and current_volume >= 0.0:
-            velocity = self._l1_cache.get(stock_code, 0.0)
-            return {"total_score": calculate_physical_score(velocity), "forces": {}}
-        
+            is_frozen = True  # 거래량이 멈춰있음을 플래그로 저장
+            
         self._last_volume[stock_code] = current_volume
         
-        # 초기 속도 주입
+        # 멈춰있더라도 함수를 빠져나가지 않고 엔진(Thrust/Impulse)만 강제로 끕니다. 
+        # 이렇게 해야 이전 속도(관성)가 마찰력(Drag)을 받아 서서히 0으로 감쇠합니다.
+        if is_frozen:
+            strength = 0.0
+            vol_ratio = 0.0
+            max_instant_amt_100m = 0.0
+        
+        # 2. 초기 속도 주입 (첫 감시 종목은 RSI 기반으로 초기 관성 세팅)
         if stock_code not in self._l1_cache:
-            initial_velocity = (rsi - 50.0) / 10.0
-            self._l1_cache[stock_code] = max(0.0, initial_velocity)
+            self._l1_cache[stock_code] = max(0.0, (rsi - 50.0) / 10.0)
             
         previous_velocity = self._l1_cache[stock_code]
         prev_strength_5m = self._get_and_update_prev_strength(stock_code, strength)
         
+        # 3. 물리 엔진 호출
         forces_dict = calculate_net_velocity(
             strength=strength, current_price=current_price, vwap=vwap,
             atr_percent=atr_percent, previous_velocity=previous_velocity,
@@ -91,8 +98,9 @@ class PhysicalStateTracker:
         current_velocity = forces_dict["current_velocity"]
         self._l1_cache[stock_code] = current_velocity
 
-        # 2. [방어 로직] 런타임 에러(no running event loop) 원천 차단
-        # ThreadPoolExecutor를 통해 메인 엔진의 동기 틱을 전혀 방해하지 않고 비동기 DB 로그를 발사(Fire & Forget)
-        self._db_executor.submit(self._background_async_log, stock_code, forces_dict)
+        # 4. DB 도배 방지: 실거래가 발생했을 때만 백그라운드 로깅 수행
+        if not is_frozen:
+            # 이전에 구현한 DB 내장 비동기 큐 메서드를 호출합니다.
+            self._db_executor.submit(self._background_async_log, stock_code, forces_dict)
             
         return {"total_score": calculate_physical_score(current_velocity), "forces": forces_dict}

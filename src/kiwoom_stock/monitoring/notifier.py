@@ -78,7 +78,7 @@ class Notifier:
             momentum = item.get('momentum', 0.0)
             reason = item.get('reason', '')
             # CSV 포맷: 스냅샷시간,레짐,종목명,점수,모멘텀,상태
-            log_line = (f"{snapshot_time},{regime},{name},{price}"
+            log_line = (f"{snapshot_time},{regime},{name},{price},"
                         f"{forces.get('thrust', 0.0)},{forces.get('gravity', 0.0)},{forces.get('drag', 0.0)},"
                         f"{forces.get('magnetic', 0.0)},{forces.get('jerk', 0.0)},{forces.get('impulse', 0.0)},{forces.get('net_force', 0.0)},"
                         f"{score:.1f},{momentum:.1f},{reason}")
