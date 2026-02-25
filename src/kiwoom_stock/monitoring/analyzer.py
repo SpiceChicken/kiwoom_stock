@@ -89,10 +89,8 @@ class MarketAnalyzer:
                 
                 if data.strength > 100.0 or current_velocity > 0.0:
                     order_book = self._fetch_safe_order_book(stock_code) 
-                    impulse_vol = self._fetch_safe_instant_volume(stock_code, data.mac * 100_000_000.0)
                 else:
                     order_book = {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
-                    impulse_vol = 0.0
 
                 tracker_result = self.state_tracker.process_tick(
                     stock_code=stock_code,
@@ -104,7 +102,8 @@ class MarketAnalyzer:
                     rsi=getattr(data, 'trend_rsi', 50.0),
                     tot_sel_req=order_book.get('tot_sel_req', 0.0),
                     tot_buy_req=order_book.get('tot_buy_req', 0.0),
-                    max_amount=impulse_vol
+                    total_volume=data.trde_qty,
+                    market_cap=(data.mac * 100_000_000.0)
                 )
                 
                 data.total_score = tracker_result["total_score"]
@@ -124,43 +123,6 @@ class MarketAnalyzer:
             }
         except Exception:
             return {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
-
-    def _fetch_safe_instant_volume(self, code: str, market_cap: float) -> float:
-        """
-        [Task 1] 로그 스케일링 동적 충격량 (Logarithmic Dynamic Impulse)
-        - 베버-페히너의 법칙을 적용하여 시가총액 대비 부드러운 곡선 허들을 생성합니다.
-        """
-        try:
-            ticks = self.collector.fetch_recent_ticks(code)
-            if not ticks or market_cap < 100_000_000_000:  
-                # 시총 정보가 없거나 1000억 미만 소형주는 기본 1천만원 컷오프
-                dynamic_cutoff = 10_000_000.0
-            else:
-                # -----------------------------------------------------------------
-                # 🌌 Log-Scale 수식: 시총이 10배(자릿수 1개) 커질 때마다 허들은 2배씩 증가
-                # (market_cap이 1,000억(10^11)일 때 log 값은 11)
-                # -----------------------------------------------------------------
-                log_scale = math.log10(market_cap) - 11.0
-                dynamic_cutoff = 10_000_000.0 * (3.5 ** log_scale)
-
-            # 가장 큰 단일 틱 체결대금(원) 계산
-            max_tick_amount = max(
-                abs(float(tick.get('cur_prc', 0))) * abs(float(tick.get('cntr_trde_qty', 0)))
-                for tick in ticks
-            )
-            
-            # 단일 틱 대금이 계산된 로그 기반 컷오프를 돌파했는가?
-            if max_tick_amount >= dynamic_cutoff:
-                # 타격의 강도를 스케일링하여 반환 (돌파 금액 / 기준 컷오프)
-                # 예: 컷오프가 2천만 원인데 4천만 원이 터지면 2.0(배)의 강력한 Impulse 반환
-                impulse_power = max_tick_amount / dynamic_cutoff
-                return float(impulse_power)
-            else:
-                return 0.0
-                
-        except Exception as e:
-            logger.warning(f"[{code}] 동적 충격량 추출 실패: {e}")
-            return 0.0
 
     def _update_strength_data(self, data: SupplyData, code: str):
         """[New] 현재 체결강도와 5분 전 체결강도(Jerk 산출용)를 동시에 수집합니다."""
