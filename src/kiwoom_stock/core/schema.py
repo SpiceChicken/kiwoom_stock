@@ -46,6 +46,7 @@ class SupplyData:
     # 기타 메타데이터
     trde_qty: int = 0
     cur_prc: float = 0.0
+    mac: float = 100000.0
     
     # 하위 데이터 객체
     pgm_data: PgmData = field(default_factory=PgmData)

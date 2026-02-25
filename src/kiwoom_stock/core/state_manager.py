@@ -61,7 +61,7 @@ class PhysicalStateTracker:
     def process_tick(
         self, stock_code: str, strength: float, current_price: float, vwap: float, 
         atr_percent: float, vol_ratio: float, rsi: float, tot_sel_req: float, 
-        tot_buy_req: float, max_instant_amt_100m: float, current_volume: float = 0.0
+        tot_buy_req: float, max_amount: float, current_volume: float = 0.0
     ) -> Dict[str, Any]:
         
         # 1. 거래량 동결 여부 판독 (시간 정지 방어)
@@ -77,7 +77,7 @@ class PhysicalStateTracker:
         if is_frozen:
             strength = 0.0
             vol_ratio = 0.0
-            max_instant_amt_100m = 0.0
+            max_amount = 0.0
         
         # 2. 초기 속도 주입 (첫 감시 종목은 RSI 기반으로 초기 관성 세팅)
         if stock_code not in self._l1_cache:
@@ -92,7 +92,7 @@ class PhysicalStateTracker:
             atr_percent=atr_percent, previous_velocity=previous_velocity,
             vol_ratio=vol_ratio, rsi=rsi, tot_sel_req=tot_sel_req,
             tot_buy_req=tot_buy_req, prev_strength_5m=prev_strength_5m,
-            max_instant_amt_100m=max_instant_amt_100m
+            max_amount=max_amount
         )
         
         current_velocity = forces_dict["current_velocity"]

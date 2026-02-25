@@ -62,7 +62,7 @@ def get_neutral_physics_params():
         "tot_sel_req": 1000,
         "tot_buy_req": 1000,
         "prev_strength_5m": 100.0,
-        "max_instant_amt_100m": 0.0
+        "max_amount": 0.0
     }
 
 class TestPhysicsForcesLogic:
@@ -117,17 +117,17 @@ class TestPhysicsForcesLogic:
         params = get_neutral_physics_params()
 
         # 1. 노이즈 거래 (0.5억 = 5천만 원) -> 엔진에 따라 0이거나 매우 미미한 값이어야 함
-        params["max_instant_amt_100m"] = 0.5
+        params["max_amount"] = 0.5
         res_noise = calculate_net_velocity(**params)
         # 2. 유의미한 고래 타격 (20억)
-        params["max_instant_amt_100m"] = 20.0
+        params["max_amount"] = 20.0
         res_whale = calculate_net_velocity(**params)
         
         assert res_whale["impulse"] > res_noise["impulse"], "20억 체결이 5천만 원보다 큰 충격량을 발생시켜야 합니다."
         assert res_whale["impulse"] > 0, "유의미한 대금 체결 시 Impulse는 양수여야 합니다."
 
         # 3. 극한의 폭발 방어 (1000억 체결 시 Clamping이 걸리는지 확인)
-        params["max_instant_amt_100m"] = 1000.0
+        params["max_amount"] = 1000.0
         res_extreme = calculate_net_velocity(**params)
         
         # 엔진 내부 로직(tanh 등)에 의해 최대치가 제한되어 있어야 함 (보통 5.0 미만)

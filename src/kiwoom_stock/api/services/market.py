@@ -89,9 +89,7 @@ class MarketService:
         * 최근 체결 내역을 분석하여 '고래(Whale)'의 흔적을 찾음
         """
         data = self.base.request("/api/dostk/stkinfo", "ka10003", {
-            "stk_cd": stock_code,
-            "inqr_typ": "0", # 0:전체, 1:체결, 2:미체결
-            "cnt": "20"      # 최근 20건
+            "stk_cd": stock_code
         })
 
         return data.get('cntr_infr', {})

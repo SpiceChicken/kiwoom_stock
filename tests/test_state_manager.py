@@ -29,7 +29,7 @@ def test_time_freeze_defense_volume_unchanged():
     # 첫 틱 (거래량 100) -> 정상 작동
     res1 = tracker.process_tick(
         stock_code="005930", strength=110, current_price=50000, vwap=50000, atr_percent=1.5,
-        vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_instant_amt_100m=10,
+        vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_amount=10,
         current_volume=100.0
     )
     
@@ -40,7 +40,7 @@ def test_time_freeze_defense_volume_unchanged():
     # 두 번째 틱 (시간은 흘렀으나 거래량 100으로 동일 -> 동결 상태 진입)
     res2 = tracker.process_tick(
         stock_code="005930", strength=110, current_price=50000, vwap=50000, atr_percent=1.5,
-        vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_instant_amt_100m=10,
+        vol_ratio=1.2, rsi=60, tot_sel_req=10000, tot_buy_req=5000, max_amount=10,
         current_volume=100.0
     )
 

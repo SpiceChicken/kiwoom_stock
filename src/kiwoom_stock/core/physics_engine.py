@@ -87,14 +87,14 @@ def _calculate_jerk_force(current_strength: float, prev_strength_5m: float, norm
     jerk_val = current_strength - prev_strength_5m
     return math.tanh(jerk_val / norm_constant)
 
-def _calculate_impulse(max_instant_amt_100m: float, norm_constant: float = 10.0) -> float:
+def _calculate_impulse(max_amount: float, norm_constant: float = 10.0) -> float:
     """
     [물리적 의도: Impulse] 순간적인 대량 거래(충격량).
     - J = F * dt 로, 속도 벡터에 직접적인 스칼라 합산을 부여합니다.
     """
-    if max_instant_amt_100m <= 0: return 0.0
+    if max_amount <= 0: return 0.0
     # 최대 5.0 단위의 순간 속도 부스트
-    return math.tanh(max_instant_amt_100m / norm_constant) * 5.0
+    return math.tanh(max_amount / norm_constant) * 5.0
 
 # =========================================================
 # Integration (합력 및 속도 산출)
@@ -111,7 +111,7 @@ def calculate_net_velocity(
     tot_sel_req: float,
     tot_buy_req: float,
     prev_strength_5m: float,
-    max_instant_amt_100m: float,
+    max_amount: float,
     friction_coefficient: float = 0.1
 ) -> Dict[str, float]:
     """
@@ -132,7 +132,7 @@ def calculate_net_velocity(
     # 2. 합력 및 속도 산출
     net_force = thrust + gravity + drag + magnetic + jerk
     
-    impulse = _calculate_impulse(max_instant_amt_100m)
+    impulse = _calculate_impulse(max_amount)
     current_velocity = previous_velocity + net_force + impulse
     
     # 3. 상세 지표 반환
