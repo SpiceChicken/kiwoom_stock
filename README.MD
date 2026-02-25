@@ -4,12 +4,12 @@
 
 파편화된 if-else 휴리스틱과 기계적 손절(Score Decay)의 한계를 극복하기 위해, '관성(Inertia)'과 '합력(Net Force)' 개념을 도입하여 세력의 개미털기(Shake-out) 구간을 버텨내고 진정한 주도주를 정밀 타격합니다.
 
-**Major Update: Threshold-Free & Dynamic Kinetic Exit**:
+**Major Update: Threshold-Free & Tick-Volume Kinetic Engine**:
 
 1. **Threshold-Free Architecture**: 고정된 점수 임계값(Threshold)에 의존하던 기존의 if-else 룰을 전면 폐기하고, 물리적 힘(Force)의 역전과 관성 감쇠 비율만으로 매매를 결정합니다.
 2. **Kinetic Trailing Stop**: 15시 27분까지 무조건 버티는 시간 기반 청산을 폐기하고, 엔진이 꺼지는 순간(합력 < 0) 즉각 이익을 실현하는 물리적 동적 청산 로직을 도입했습니다.
-3. **6-Dimensional Forces**: 체결강도, VWAP, 호가잔량, 틱 체결대금 등을 추진력, 중력, 자기력, 져크(Jerk), 충격량(Impulse) 등 6대 물리적 벡터로 변환하여 입체적 타점을 도출합니다.
-4. **Physical Reason Logging**: 매도 및 관망 사유(`get_exit_reason`)를 "단순 임계값 미달"이 아닌 "엔진 꺼짐", "과도한 항력(마찰)", "중력 역전" 등 직관적인 물리적 상태로 개편하여 사후 분석의 퀄리티를 높였습니다.
+3. **6-Dimensional Forces**: 체결강도, VWAP, 호가잔량, 그리고 **단일 틱(Tick) 체결대금** 등을 추진력, 중력, 자기력, 져크(Jerk), 충격량(Impulse) 등 6대 물리적 벡터로 변환하여 입체적 타점을 도출합니다.
+4. **Physical Reason Logging**: 매도 및 관망 사유(`get_exit_reason`)를 "단순 임계값 미달"이 아닌 "엔진 소진", "과도한 항력(마찰)", "중력 역전" 등 직관적인 물리적 상태로 개편하여 사후 분석의 퀄리티를 높였습니다.
 
 ---
 
@@ -32,7 +32,7 @@
 3. **항력 (Drag):** RSI 과열 지표를 마찰열로 계산합니다. 주가가 급등할수록 차익실현 매물(공기 저항)이 거세져 속도가 무한히 발산하는 것을 막습니다.
 4. **자기력 (Magnetic Force):** 매도 호가창에 물량이 압도적으로 쌓여있을 때(매도벽) 발생하는 위쪽 호가로의 '진공 흡입력'을 수치화합니다.
 5. **져크 (Jerk / 가속도의 미분):** 5분 전 체결강도와 현재 체결강도를 비교하여 수급이 가속 중인지 감속 중인지 추세를 파악해 '가짜 돌파(Bull Trap)'를 방지합니다.
-6. **충격량 (Impulse):** 1억 원 이상의 단일 틱 체결대금이 터질 때, 이를 물체에 가해지는 '타격(망치)'으로 해석하여 속도 벡터에 즉각적인 스칼라 부스트를 가합니다.
+6. **충격량 (Impulse / 틱 체결대금):** API 추가 호출 없이 이전 누적 거래량과 현재 누적 거래량의 차이(Tick Volume)를 계산하여, **1억 원 이상의 단일 틱 체결대금이 터질 때** 이를 물체에 가해지는 '타격(망치)'으로 해석하여 속도 벡터에 즉각적인 부스트를 가합니다.
 
 ---
 
@@ -67,10 +67,10 @@ Kiwoom-Stock/
 │   └── kiwoom_stock/
 │       ├── core/
 │       │   ├── physics_engine.py  # 6대 물리적 힘 및 Sigmoid 스코어링 연산
-│       │   ├── state_manager.py   # 관성 상태 캐싱, 비동기 DB 백업, 크래시 복구
+│       │   ├── state_manager.py   # 관성 상태 캐싱, 틱 체결대금(Impulse) 추출 로직
 │       │   └── config.py          # 동적 설정 로더
 │       ├── monitoring/
-│       │   ├── strategy.py        # [Update] Kinetic Trailing Stop 및 상태 판별 로직
+│       │   ├── strategy.py        # Kinetic Trailing Stop 및 상태 판별 로직
 │       │   └── manager.py         # 포지션 관리 및 Selective Overnight 처리
 ├── logs/                   # 실행 로그 (status.log - 물리적 Exit Reason 포함)
 ├── data/                   # 분석 데이터 (SQLite DB 및 CSV 사후 검증용)
@@ -105,4 +105,4 @@ poetry run python main.py
 
 ## 📊 사후 분석 및 검증 (Backtest Reporting)
 
-`tools/backtest_reporter.py`를 실행하면, DB에 저장된 물리 엔진의 상세 벡터(Thrust, Gravity, Drag, Magnetic, Jerk, Impulse) 추이와 $V_t$ 변화량을 바탕으로 MFE(최대 허용 수익) 및 MAE(최대 허용 손실)를 Rich 기반의 깔끔한 터미널 UI로 분석할 수 있습니다. 매도 사유 또한 "엔진 소진", "중력 이탈" 등으로 명확히 표시되어 전략의 직관적 피드백이 가능합니다.
+`tools/backtest_reporter.py`를 실행하면, DB에 저장된 물리 엔진의 상세 벡터(Thrust, Gravity, Drag, Magnetic, Jerk, Impulse) 추이와 $V_t$ 변화량을 바탕으로 MFE(최대 허용 수익) 및 MAE(최대 허용 손실)를 Rich 기반의 깔끔한 터미널 UI로 분석할 수 있습니다. 매도 사유 또한 "엔진 소진", "중력 역전" 등으로 명확히 표시되어 전략의 직관적 피드백이 가능합니다.
