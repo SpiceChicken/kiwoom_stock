@@ -1,5 +1,6 @@
 import statistics
 import logging
+import math
 from datetime import datetime
 from collections import deque
 from typing import List, Dict
@@ -84,9 +85,11 @@ class MarketAnalyzer:
                 self._update_rsi_data(data, chart_5m) 
                 
                 # 🛡️ [Rate Limit 방어벽] 
-                if getattr(data, 'total_score', 0.0) >= 75.0:
+                current_velocity = getattr(data, 'forces', {}).get('current_velocity', 0.0)
+                
+                if data.strength > 100.0 or current_velocity > 0.0:
                     order_book = self._fetch_safe_order_book(stock_code) 
-                    impulse_vol = self._fetch_safe_instant_volume(stock_code)
+                    impulse_vol = self._fetch_safe_instant_volume(stock_code, data.mac * 100_000_000.0)
                 else:
                     order_book = {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
                     impulse_vol = 0.0
@@ -101,7 +104,7 @@ class MarketAnalyzer:
                     rsi=getattr(data, 'trend_rsi', 50.0),
                     tot_sel_req=order_book.get('tot_sel_req', 0.0),
                     tot_buy_req=order_book.get('tot_buy_req', 0.0),
-                    max_instant_amt_100m=impulse_vol
+                    max_amount=impulse_vol
                 )
                 
                 data.total_score = tracker_result["total_score"]
@@ -122,23 +125,41 @@ class MarketAnalyzer:
         except Exception:
             return {'tot_sel_req': 0.0, 'tot_buy_req': 0.0}
 
-    def _fetch_safe_instant_volume(self, code: str) -> float:
+    def _fetch_safe_instant_volume(self, code: str, market_cap: float) -> float:
         """
-        [Task 1] 순간 충격량(Impulse) 파이프라인
-        - 단일 틱 체결대금이 1억 원(100,000,000) 이상인 경우에만 1억 단위로 스케일링
+        [Task 1] 로그 스케일링 동적 충격량 (Logarithmic Dynamic Impulse)
+        - 베버-페히너의 법칙을 적용하여 시가총액 대비 부드러운 곡선 허들을 생성합니다.
         """
         try:
             ticks = self.collector.fetch_recent_ticks(code)
-            if not ticks:
-                return 0.0
-                
-            max_amount_100m = max(
-                (abs(float(tick.get('cur_prc', 0))) * abs(float(tick.get('cntr_trde_qty', 0)))) / 100_000_000.0
+            if not ticks or market_cap < 100_000_000_000:  
+                # 시총 정보가 없거나 1000억 미만 소형주는 기본 1천만원 컷오프
+                dynamic_cutoff = 10_000_000.0
+            else:
+                # -----------------------------------------------------------------
+                # 🌌 Log-Scale 수식: 시총이 10배(자릿수 1개) 커질 때마다 허들은 2배씩 증가
+                # (market_cap이 1,000억(10^11)일 때 log 값은 11)
+                # -----------------------------------------------------------------
+                log_scale = math.log10(market_cap) - 11.0
+                dynamic_cutoff = 10_000_000.0 * (3.5 ** log_scale)
+
+            # 가장 큰 단일 틱 체결대금(원) 계산
+            max_tick_amount = max(
+                abs(float(tick.get('cur_prc', 0))) * abs(float(tick.get('cntr_trde_qty', 0)))
                 for tick in ticks
             )
-            return float(max_amount_100m)
+            
+            # 단일 틱 대금이 계산된 로그 기반 컷오프를 돌파했는가?
+            if max_tick_amount >= dynamic_cutoff:
+                # 타격의 강도를 스케일링하여 반환 (돌파 금액 / 기준 컷오프)
+                # 예: 컷오프가 2천만 원인데 4천만 원이 터지면 2.0(배)의 강력한 Impulse 반환
+                impulse_power = max_tick_amount / dynamic_cutoff
+                return float(impulse_power)
+            else:
+                return 0.0
+                
         except Exception as e:
-            logger.warning(f"[{code}] 순간 충격량 추출 실패: {e}")
+            logger.warning(f"[{code}] 동적 충격량 추출 실패: {e}")
             return 0.0
 
     def _update_strength_data(self, data: SupplyData, code: str):
@@ -170,6 +191,7 @@ class MarketAnalyzer:
         data.vol_ratio = float(basic.get('trde_pre', 0.0))
         data.trde_qty = int(basic.get('trde_qty', 0))
         data.cur_prc = float(basic.get('cur_prc', 0))
+        data.mac = float(basic.get('mac', 0))
 
     def _update_chart_data(self, code: str, tic: str):
         chart = self.collector.fetch_minute_chart(code, tic)
