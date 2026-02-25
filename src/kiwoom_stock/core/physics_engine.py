@@ -20,24 +20,26 @@ def _rational_penalty(excess: float, hardness: float = 2.0) -> float:
 # Physical Forces (단위 힘 계산)
 # =========================================================
 
-def _calculate_thrust_force(execution_strength_pct: float, vol_ratio: float, norm_constant: float = 50.0) -> float:
+def _calculate_thrust_force(execution_strength_pct: float, vol_ratio: float, interval_amount_krw: float, reference_mass: float, norm_constant: float = 50.0) -> float:
     """
     [물리적 의도: Thrust & Mass]
     - 체결강도가 100%를 초과하는 잉여 에너지를 기본 추진력(Base Thrust)으로 삼습니다.
     - 거래대비(vol_ratio)를 물체의 '질량(Mass) 혹은 엔진 부스터'로 취급하여 추진력을 증폭시킵니다.
+    - 틱 거래량이 극도로 적은 허위 체결강도 필터링
     """
     if execution_strength_pct <= 100.0:
         return 0.0
     
+    # [Mass 검증] 10초간 거래대금이 1천만 원 미만인 경우, 질량($m$)이 부족한 빈 껍데기 가속도로 취급하여 페널티 부과
+    mass_penalty = 1.0
+    min_required_mass = reference_mass * 0.10
+    if interval_amount_krw < min_required_mass:
+        mass_penalty = interval_amount_krw / min_required_mass if min_required_mass > 0 else 0.0
+    
     base_thrust = math.tanh((execution_strength_pct - 100.0) / norm_constant)
+    vol_multiplier = min(2.0, max(1.0, math.log10(max(1.0, vol_ratio)) + 1.0))
     
-    # 거래대비가 높을수록 가속도 증폭 (단, 극단적 이상치 방지를 위해 Log 스케일 적용)
-    vol_multiplier = max(1.0, math.log10(max(1.0, vol_ratio)) + 1.0)
-
-    # [Fix] 최대 증폭 2배 제한 (과도한 갭상승/폭발 제어)
-    vol_multiplier = min(2.0, vol_multiplier)  
-    
-    return base_thrust * vol_multiplier
+    return base_thrust * vol_multiplier * mass_penalty
 
 def _calculate_gravity_force(current_price_krw: float, vwap_krw: float, atr_percent: float) -> float:
     """
@@ -76,49 +78,49 @@ def _calculate_magnetic_force(tot_sel_req: float, tot_buy_req: float, c_constant
     # 매도잔량이 많을수록 양수(+), 매수잔량이 많을수록 음수(-) 반환
     return c_constant * math.tanh((tot_sel_req - tot_buy_req) / total_req)
 
-def _calculate_jerk_force(current_strength: float, prev_strength_5m: float, norm_constant: float = 20.0) -> float:
+def _calculate_jerk_force(current_strength: float, prev_strength_5m: float, interval_amount_krw: float, reference_mass: float, norm_constant: float = 20.0) -> float:
     """
     [물리적 의도: Jerk (가속도의 미분)]
     - 체결강도(가속도) 자체가 증가하고 있는지(양의 Jerk) 감소하고 있는지(음의 Jerk) 판별.
+    - 가짜 숏커버링(Bull Trap) 판별
     """
     if prev_strength_5m <= 1e-9: 
         return 0.0
     
     jerk_val = current_strength - prev_strength_5m
+    
+    # [Bull Trap 검증] 가속도가 증가(Positive Jerk)하는데 거래대금이 5백만 원 미만으로 메말랐다면 세력의 덫으로 간주
+    if jerk_val > 0 and interval_amount_krw < (reference_mass * 0.05):
+        return 0.0
+        
     return math.tanh(jerk_val / norm_constant)
 
-def _calculate_impulse(max_amount: float, norm_constant: float = 10.0) -> float:
+def _calculate_impulse(interval_impulse: float, norm_constant: float = 10.0) -> float:
     """
     [물리적 의도: Impulse] 순간적인 대량 거래(충격량).
     - J = F * dt 로, 속도 벡터에 직접적인 스칼라 합산을 부여합니다.
     """
-    if max_amount <= 0: return 0.0
+    if interval_impulse <= 0: return 0.0
     # 최대 5.0 단위의 순간 속도 부스트
-    return math.tanh(max_amount / norm_constant) * 5.0
+    return math.tanh(interval_impulse / norm_constant) * 5.0
 
 # =========================================================
 # Integration (합력 및 속도 산출)
 # =========================================================
 
 def calculate_net_velocity(
-    strength: float,
-    current_price: float,
-    vwap: float,
-    atr_percent: float,
-    previous_velocity: float,
-    vol_ratio: float,
-    rsi: float,
-    tot_sel_req: float,
-    tot_buy_req: float,
-    prev_strength_5m: float,
-    max_amount: float,
+    strength: float, current_price: float, vwap: float, atr_percent: float, previous_velocity: float,
+    vol_ratio: float, rsi: float, tot_sel_req: float, tot_buy_req: float, prev_strength_5m: float,
+    interval_impulse: float = 0.0, 
+    interval_amount_krw: float = 0.0, 
+    reference_mass: float = 10_000_000.0,
     friction_coefficient: float = 0.1
 ) -> Dict[str, float]:
     """
     [물리적 의도: V_t = V_{t-1} + F_net + J]
     """
     # 1. 벡터 힘 (Forces) 계산
-    thrust = _calculate_thrust_force(strength, vol_ratio)
+    thrust = _calculate_thrust_force(strength, vol_ratio, interval_amount_krw, reference_mass)
     gravity = _calculate_gravity_force(current_price, vwap, atr_percent)
     
     # [Fix] 추진력(Thrust)이 없을 때는 중력이 위로 끌어올리지 못하게(양수 불가) 차단 (한화생명 억지 진입 방지)
@@ -127,24 +129,19 @@ def calculate_net_velocity(
         
     drag = _calculate_drag_force(previous_velocity, rsi, friction_coefficient)
     magnetic = _calculate_magnetic_force(tot_sel_req, tot_buy_req)
-    jerk = _calculate_jerk_force(strength, prev_strength_5m)
+    jerk = _calculate_jerk_force(strength, prev_strength_5m, interval_amount_krw, reference_mass)
     
     # 2. 합력 및 속도 산출
     net_force = thrust + gravity + drag + magnetic + jerk
-    
-    impulse = _calculate_impulse(max_amount)
+    impulse = _calculate_impulse(interval_impulse)
     current_velocity = previous_velocity + net_force + impulse
     
     # 3. 상세 지표 반환
     return {
-        "thrust": float(round(thrust, 4)),
-        "gravity": float(round(gravity, 4)),
-        "drag": float(round(drag, 4)),
-        "magnetic": float(round(magnetic, 4)),
-        "jerk": float(round(jerk, 4)),
-        "impulse": float(round(impulse, 4)),
-        "net_force": float(round(net_force, 4)),
-        "current_velocity": float(round(current_velocity, 4))
+        "thrust": float(round(thrust, 4)), "gravity": float(round(gravity, 4)),
+        "drag": float(round(drag, 4)), "magnetic": float(round(magnetic, 4)),
+        "jerk": float(round(jerk, 4)), "impulse": float(round(impulse, 4)),
+        "net_force": float(round(net_force, 4)), "current_velocity": float(round(current_velocity, 4))
     }
 
 def calculate_physical_score(current_velocity: float) -> float:

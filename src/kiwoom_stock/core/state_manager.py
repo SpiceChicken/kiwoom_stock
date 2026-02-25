@@ -61,23 +61,41 @@ class PhysicalStateTracker:
     def process_tick(
         self, stock_code: str, strength: float, current_price: float, vwap: float, 
         atr_percent: float, vol_ratio: float, rsi: float, tot_sel_req: float, 
-        tot_buy_req: float, max_amount: float, current_volume: float = 0.0
+        tot_buy_req: float, total_volume: float = 0.0, market_cap: float = 1_000_000_000_000.0
     ) -> Dict[str, Any]:
         
         # 1. 거래량 동결 여부 판독 (시간 정지 방어)
         last_vol = self._last_volume.get(stock_code, -1.0)
         is_frozen = False
-        if last_vol == current_volume and current_volume >= 0.0:
+        interval_volume = 0.0
+
+        if last_vol == total_volume and total_volume >= 0.0:
             is_frozen = True  # 거래량이 멈춰있음을 플래그로 저장
+        elif last_vol >= 0.0:
+            interval_volume = total_volume - last_vol
             
-        self._last_volume[stock_code] = current_volume
+        self._last_volume[stock_code] = total_volume
         
-        # 멈춰있더라도 함수를 빠져나가지 않고 엔진(Thrust/Impulse)만 강제로 끕니다. 
-        # 이렇게 해야 이전 속도(관성)가 마찰력(Drag)을 받아 서서히 0으로 감쇠합니다.
+        if market_cap < 100_000_000_000:
+            dynamic_cutoff = 10_000_000.0
+        else:
+            log_scale = math.log10(market_cap) - 11.0
+            dynamic_cutoff = 10_000_000.0 * (3.5 ** log_scale)
+
+        interval_impulse = 0.0
+        interval_amount_krw = 0.0
+        
+        if not is_frozen and interval_volume > 0:
+            interval_amount_krw = interval_volume * current_price
+            
+            # 단일 틱 센서를 폐기했으므로, 2.5배 억지 가중치 없이 컷오프 그대로 사용!
+            if interval_amount_krw >= dynamic_cutoff:
+                interval_impulse = interval_amount_krw / dynamic_cutoff
+
         if is_frozen:
             strength = 0.0
             vol_ratio = 0.0
-            max_amount = 0.0
+            interval_impulse = 0.0
         
         # 2. 초기 속도 주입 (첫 감시 종목은 RSI 기반으로 초기 관성 세팅)
         if stock_code not in self._l1_cache:
@@ -86,21 +104,20 @@ class PhysicalStateTracker:
         previous_velocity = self._l1_cache[stock_code]
         prev_strength_5m = self._get_and_update_prev_strength(stock_code, strength)
         
-        # 3. 물리 엔진 호출
         forces_dict = calculate_net_velocity(
             strength=strength, current_price=current_price, vwap=vwap,
             atr_percent=atr_percent, previous_velocity=previous_velocity,
             vol_ratio=vol_ratio, rsi=rsi, tot_sel_req=tot_sel_req,
             tot_buy_req=tot_buy_req, prev_strength_5m=prev_strength_5m,
-            max_amount=max_amount
+            interval_impulse=interval_impulse,
+            interval_amount_krw=interval_amount_krw,
+            reference_mass=dynamic_cutoff  # 🟢 컷오프를 기준 질량으로 전달!
         )
         
         current_velocity = forces_dict["current_velocity"]
         self._l1_cache[stock_code] = current_velocity
 
-        # 4. DB 도배 방지: 실거래가 발생했을 때만 백그라운드 로깅 수행
         if not is_frozen:
-            # 이전에 구현한 DB 내장 비동기 큐 메서드를 호출합니다.
             self._db_executor.submit(self._background_async_log, stock_code, forces_dict)
             
         return {"total_score": calculate_physical_score(current_velocity), "forces": forces_dict}

@@ -149,46 +149,55 @@ class TradingStrategy:
         return momentum
 
     def evaluate(self, metrics: SupplyData) -> Dict:
-        """
-        [Final Verdict] 물리적 모멘텀 기반 진입 판독기
-        """
+        """[진입 판단] 동적 탈출 속도(Dynamic Escape Velocity) 기반 순수 물리 진입"""
+        
         stock_code, total_score = metrics.stock_code, metrics.total_score
         forces = getattr(metrics, 'forces', {})
-
+        
         # 물리 엔진 파라미터 추출
         thrust = forces.get('thrust', 0.0)
-        net_force = forces.get('net_force', 0.0)
+        current_velocity = forces.get('current_velocity', 0.0)
+        impulse = forces.get('impulse', 0.0)
+        magnetic = forces.get('magnetic', 0.0)
         
         momentum = self._get_momentum(stock_code, total_score)
         
-        status = "관망"
         is_buy_signal = False
+        status = "관망"
 
         # -------------------------------------------------------------------
-        # 조건 1: thrust > 0 
-        #   -> 체결강도가 100%를 초과하여 매수세가 엔진을 점화했는가?
-        # 조건 2: net_force > 0 
-        #   -> 추진력이 중력(VWAP)과 마찰(RSI)을 완벽히 이겨내고 위로 향하는가?
-        # 조건 3: momentum > 0 
-        #   -> 최근 5주기 평균 대비 가속이 붙고 있는가?
+        # 🚀 투트랙(Two-Track) 순수 동역학 진입 로직
         # -------------------------------------------------------------------
-        if thrust > 0.0 and net_force > 0.0:
-            if momentum > 0.0:
+        # 대전제: 엔진이 켜져 있고(thrust > 0) 위로 가속이 붙기 시작할 것(momentum > 0)
+        if thrust > 0.0 and momentum > 0.0:
+            
+            # [Track 1] 우주 공간 (정배열 추세): 
+            # 이미 물 위로 올라와 상승 관성(velocity > 0)을 탔다면 가벼운 수급만으로도 돌파 매수!
+            if current_velocity > 0.0:
                 is_buy_signal = True
-                status = "🔥로켓발진 (Ignition)"
+                status = "🔥추세돌파 (Uptrend)"
+                
+            # [Track 2] 심해 탈출 (역배열 V자 반등):
+            # 아직 물 속(velocity <= 0)이지만, 방금 우리가 고쳐놓은 '1.6억 이상 대포알(Impulse)'이나
+            # '매도호가 진공 흡입(Magnetic)' 센서가 켜졌다면 세력의 찐타점으로 인정하고 바닥 매수!
+            elif impulse > 0.0 or magnetic > 0.0:
+                is_buy_signal = True
+                status = "🚀바닥반등 (Reversal Boost)"
+                
             else:
-                status = "⚠️저항돌파중 (Struggling)"
+                status = "👀예열중 (Warming Up)"
+                
         elif thrust > 0.0:
-            status = "👀수급유입 (Engine On)"
+            status = "⚠️엔진점화 (Ignition only)"
 
         return {
-                "score": total_score,
-                "momentum": momentum,
-                "status": status,
-                "regime": self._current_regime,
-                "is_buy_signal": is_buy_signal,
-                "price": metrics.cur_prc,
-                "stock_code": stock_code,
-                "atr_percent": getattr(metrics, 'atr_percent', 0.5),
-                "forces": getattr(metrics, 'forces', {})
-            }
+            "score": total_score,
+            "momentum": momentum,
+            "status": status,
+            "regime": self._current_regime,
+            "is_buy_signal": is_buy_signal,
+            "price": metrics.cur_prc,
+            "stock_code": stock_code,
+            "atr_percent": getattr(metrics, 'atr_percent', 0.5),
+            "forces": forces 
+        }
