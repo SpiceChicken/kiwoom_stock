@@ -122,20 +122,19 @@ class TradingStrategy:
         # [Rule 1] 엔진 완전 소진 (Engine Dead): 속도/관성이 마이너스로 추락
         if current_velocity < 0.0:
             return "Kinetic Exit (Engine Dead: Velocity < 0)"
-
-        # [Rule 2] 연속적 하방 압력 (Kinetic Breakdown):
-        forces_list = state['forces']
         
         # Track A: 플래시 덤프 (Flash Dump) 방어
-        # 30초(최근 3틱) 내에 세력이 시장가로 무자비하게 던지는 폭포수 패턴
-        recent_3 = forces_list[-3:] if len(forces_list) >= 3 else forces_list
-        if len(recent_3) == 3 and all(f <= 0 for f in recent_3) and sum(recent_3) <= -3.0:
+        # 최대 30초(최근 3틱) 이내의 범위에서, 틱 개수(1~3)와 무관하게 누적 합이 -3.0 이하면 즉각 로스컷!
+        recent_3 = state['forces'][-3:] 
+        
+        # 💡 [수정] len == 3 조건을 완전히 삭제! 
+        if all(f <= 0 for f in recent_3) and sum(recent_3) <= -3.0:
             return f"Kinetic Exit (Flash Dump: {sum(recent_3):.2f})"
 
-        # Track B: 블리딩 (Bleeding) 방어 (유저 아이디어 적용)
-        # 60초(최근 6틱) 동안 간간이 매수가 들어오긴 하지만, 전체적인 합력이 강한 음수인 패턴 (서서히 가라앉는 배)
-        if len(forces_list) == 6 and sum(forces_list) <= -4.5:
-            return f"Kinetic Exit (Bleeding: {sum(forces_list):.2f})"
+        # Track B: 블리딩 (Bleeding) 방어
+        # 서서히 가라앉는 배는 최소 60초(6틱)의 누적된 흐름을 확인한 후 판단 (이곳은 len == 6 유지)
+        if len(state['forces']) == 6 and sum(state['forces']) <= -4.5:
+            return f"Kinetic Exit (Bleeding: {sum(state['forces']):.2f})"
             
         # [Rule 3] 가격 기반 트레일링 스탑 (Price-based Trailing Stop): 고점 대비 1.5% 하락
         if state['max_price'] > 0:
@@ -200,7 +199,7 @@ class TradingStrategy:
         # 🚀 투트랙(Two-Track) 순수 동역학 진입 로직
         # -------------------------------------------------------------------
         # 대전제: 엔진이 켜져 있고(thrust > 0) 위로 가속이 붙기 시작할 것(momentum > 0)
-        if thrust > 0.0 and momentum > 0.0:
+        elif thrust > 0.0 and momentum > 0.0:
             
             # [Track 1] 우주 공간 (정배열 추세): 
             # 이미 물 위로 올라와 상승 관성(velocity > 0)을 탔다면 가벼운 수급만으로도 돌파 매수!
