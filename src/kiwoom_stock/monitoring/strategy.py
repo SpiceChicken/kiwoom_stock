@@ -69,7 +69,7 @@ class TradingStrategy:
 
     def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
         """
-        물리적 힘(forces)을 통째로 받아 동적 상태를 업데이트하고 청산을 판단합니다.
+        [청산 판단] 물리적 힘(forces)과 가격 동역학을 결합한 헤비 엑시트(Heavy Exit) 룰 적용
         """
         now_time = datetime.now().time()
         stock_code = pos.stock_code
@@ -79,31 +79,34 @@ class TradingStrategy:
             return None
 
         # -------------------------------------------------------------------
-        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신
+        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신 (max_price 기반)
         # -------------------------------------------------------------------
-        state = self._kinetic_state.setdefault(stock_code, {'max_v': 0.0, 'forces': []})
+        # max_v 삭제 및 max_price 추가 (초기값: 매수가)
+        buy_price = getattr(pos, 'buy_price', current_price)
+        if buy_price <= 0: buy_price = current_price
+        
+        state = self._kinetic_state.setdefault(stock_code, {'max_price': buy_price, 'forces': []})
         
         current_velocity = forces.get('current_velocity', 0.0)
         net_force = forces.get('net_force', 0.0)
         thrust = forces.get('thrust', 0.0)
         magnetic = forces.get('magnetic', 0.0)
 
-        # 상태 업데이트
-        if current_velocity > state['max_v']:
-            state['max_v'] = current_velocity
+        # 고점 가격 트래킹 업데이트
+        if current_price > state['max_price']:
+            state['max_price'] = current_price
             
-        # 최근 3회의 합력(Net Force)을 리스트에 저장 (Sliding Window)
+        # 최근 6회의 합력(Net Force)을 리스트에 저장 (Sliding Window)
         state['forces'].append(net_force)
-        if len(state['forces']) > 3:
-            state['forces'].pop(0)
+        if len(state['forces']) > 6:
+            state['forces'].pop(0)  # 최대 6틱(60초)의 물리량 보존
 
         # -------------------------------------------------------------------
         # 1. Selective Swing (15:20 이후 찐 주도주 홀딩 예외 룰)
         # -------------------------------------------------------------------
         if now_time >= time(15, 20):
-            # 엔진 점수(현재 속도의 시그모이드) 추정 또는 current_velocity 직접 사용
             if current_velocity >= 3.0 and thrust > 2.0 and magnetic > 0:
-                pos.status = "OVERNIGHT"  # 상태만 변경하고 보유
+                pos.status = "OVERNIGHT" 
                 return None 
 
         # -------------------------------------------------------------------
@@ -113,20 +116,37 @@ class TradingStrategy:
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 3. Kinetic Trailing Stop (물리적 트레일링 스탑)
+        # 3. 🛡️ Heavy Exit Rules (동적 청산 룰 전면 개편)
         # -------------------------------------------------------------------
-        # A. 속도 감쇠: 최고 속도 대비 15% 이상 추진력이 꺾이면 즉시 차익 실현
-        if state['max_v'] > 0 and current_velocity < (state['max_v'] * 0.85):
-            return "Kinetic Exit (Velocity Drop)"
+        
+        # [Rule 1] 엔진 완전 소진 (Engine Dead): 속도/관성이 마이너스로 추락
+        if current_velocity < 0.0:
+            return "Kinetic Exit (Engine Dead: Velocity < 0)"
+
+        # [Rule 2] 연속적 하방 압력 (Kinetic Breakdown):
+        forces_list = state['forces']
+        
+        # Track A: 플래시 덤프 (Flash Dump) 방어
+        # 30초(최근 3틱) 내에 세력이 시장가로 무자비하게 던지는 폭포수 패턴
+        recent_3 = forces_list[-3:] if len(forces_list) >= 3 else forces_list
+        if len(recent_3) == 3 and all(f <= 0 for f in recent_3) and sum(recent_3) <= -3.0:
+            return f"Kinetic Exit (Flash Dump: {sum(recent_3):.2f})"
+
+        # Track B: 블리딩 (Bleeding) 방어 (유저 아이디어 적용)
+        # 60초(최근 6틱) 동안 간간이 매수가 들어오긴 하지만, 전체적인 합력이 강한 음수인 패턴 (서서히 가라앉는 배)
+        if len(forces_list) == 6 and sum(forces_list) <= -4.5:
+            return f"Kinetic Exit (Bleeding: {sum(forces_list):.2f})"
             
-        # B. 누적 합력 평가: 최근 3분간의 합력 총합이 확실한 음수(-3.0 이하)일 때 이탈
-        if len(state['forces']) == 3 and sum(state['forces']) <= -3.0:
-            return f"Kinetic Exit (Cum. Force: {sum(state['forces']):.2f})"
+        # [Rule 3] 가격 기반 트레일링 스탑 (Price-based Trailing Stop): 고점 대비 1.5% 하락
+        if state['max_price'] > 0:
+            drawdown = (current_price / state['max_price'] - 1) * 100
+            if drawdown <= -1.5:
+                return f"Trailing Stop ({drawdown:.2f}%)"
 
         # -------------------------------------------------------------------
-        # 4. 기존 ATR 기반 Dynamic Stop-Loss 로직
+        # 4. 기존 ATR 기반 Dynamic Stop-Loss 로직 유지
         # -------------------------------------------------------------------
-        profit_rate = (current_price / pos.buy_price - 1) * 100
+        profit_rate = (current_price / buy_price - 1) * 100
         current_atr = getattr(pos, 'atr_percent', 0.5)
         dynamic_stop = -(current_atr * 3.0) 
         
@@ -159,11 +179,22 @@ class TradingStrategy:
         current_velocity = forces.get('current_velocity', 0.0)
         impulse = forces.get('impulse', 0.0)
         magnetic = forces.get('magnetic', 0.0)
+        jerk = forces.get('jerk', 0.0)
+        gravity = forces.get('gravity', 0.0)
         
         momentum = self._get_momentum(stock_code, total_score)
         
         is_buy_signal = False
         status = "관망"
+
+        # -------------------------------------------------------------------
+        # 🛡️ [Trap Shield] 진입 방어 규칙 (세력의 덫 원천 차단)
+        # -------------------------------------------------------------------
+        if thrust >= 1.5 and gravity <= -0.9:
+            status = "🌋고점과열 차단 (Climax Shield)"
+            
+        elif jerk <= -0.1:
+            status = "🧊가속도 둔화 차단 (Jerk Filter)"
 
         # -------------------------------------------------------------------
         # 🚀 투트랙(Two-Track) 순수 동역학 진입 로직
