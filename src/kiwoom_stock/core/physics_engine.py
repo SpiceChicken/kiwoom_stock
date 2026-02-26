@@ -54,13 +54,17 @@ def _calculate_gravity_force(current_price_krw: float, vwap_krw: float, atr_perc
     sigma_price_krw = safe_vwap * safe_atr
     gap_krw = current_price_krw - safe_vwap
     
-    return -math.tanh(gap_krw / sigma_price_krw)
+    return min(0.0, -math.tanh(gap_krw / sigma_price_krw))
 
 def _calculate_drag_force(previous_velocity: float, rsi: float, friction_coefficient: float = 0.1) -> float:
     """
     [물리적 의도: Drag (Friction)] 공기 저항 및 RSI 과열 마찰.
     - RSI가 70을 초과하면 차익 실현 매물이 나오는 '마찰열' 현상을 수식에 반영하여 항력을 제곱비례로 키웁니다.
+    - 이전 속도가 0 이하(하락 추세)일 경우, 저항력을 0으로 강제하여 역방향 가속을 차단합니다.
     """
+    if previous_velocity <= 0.0:
+        return 0.0
+        
     overheat_factor = max(0.0, (rsi - 70.0) / 30.0)
     drag_multiplier = 1.0 + (overheat_factor ** 2)
     
@@ -95,12 +99,17 @@ def _calculate_jerk_force(current_strength: float, prev_strength_5m: float, inte
         
     return math.tanh(jerk_val / norm_constant)
 
-def _calculate_impulse(interval_impulse: float, norm_constant: float = 10.0) -> float:
+def _calculate_impulse(interval_impulse: float, current_price: float, previous_price: float, norm_constant: float = 10.0) -> float:
     """
     [물리적 의도: Impulse] 순간적인 대량 거래(충격량).
     - J = F * dt 로, 속도 벡터에 직접적인 스칼라 합산을 부여합니다.
     """
     if interval_impulse <= 0: return 0.0
+
+    # 방향성 충격량: 틱 대금이 크더라도 가격이 오르지 못했다면 매도 폭탄!
+    if current_price <= previous_price:
+        return 0.0
+
     # 최대 5.0 단위의 순간 속도 부스트
     return math.tanh(interval_impulse / norm_constant) * 5.0
 
@@ -111,6 +120,7 @@ def _calculate_impulse(interval_impulse: float, norm_constant: float = 10.0) -> 
 def calculate_net_velocity(
     strength: float, current_price: float, vwap: float, atr_percent: float, previous_velocity: float,
     vol_ratio: float, rsi: float, tot_sel_req: float, tot_buy_req: float, prev_strength_5m: float,
+    previous_price: float = 0.0,
     interval_impulse: float = 0.0, 
     interval_amount_krw: float = 0.0, 
     reference_mass: float = 10_000_000.0,
@@ -122,10 +132,6 @@ def calculate_net_velocity(
     # 1. 벡터 힘 (Forces) 계산
     thrust = _calculate_thrust_force(strength, vol_ratio, interval_amount_krw, reference_mass)
     gravity = _calculate_gravity_force(current_price, vwap, atr_percent)
-    
-    # [Fix] 추진력(Thrust)이 없을 때는 중력이 위로 끌어올리지 못하게(양수 불가) 차단 (한화생명 억지 진입 방지)
-    if thrust <= 0.0:
-        gravity = min(0.0, gravity)
         
     drag = _calculate_drag_force(previous_velocity, rsi, friction_coefficient)
     magnetic = _calculate_magnetic_force(tot_sel_req, tot_buy_req)
@@ -133,7 +139,9 @@ def calculate_net_velocity(
     
     # 2. 합력 및 속도 산출
     net_force = thrust + gravity + drag + magnetic + jerk
-    impulse = _calculate_impulse(interval_impulse)
+
+    # Impulse 계산 시 방향성 판별을 위해 현재가와 직전가 전달
+    impulse = _calculate_impulse(interval_impulse, current_price, previous_price)
     current_velocity = previous_velocity + net_force + impulse
     
     # 3. 상세 지표 반환

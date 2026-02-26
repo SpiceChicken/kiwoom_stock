@@ -38,6 +38,13 @@ def main():
     if not targets:
         print("오늘 거래된 종목이 없습니다. 스크립트를 종료합니다.")
         return
+
+    today_str = datetime.now().strftime("%Y%m%d")
+    directory_path = os.path.join("etc", today_str)
+
+    # 디렉토리 없으면 생성
+    if not os.path.exists(directory_path):
+        os.makedirs(directory_path)
     
     for code, name in targets.items():
         print(f"\n📥 [{name}({code})] 1분봉 데이터 수집 시작...")
@@ -63,7 +70,7 @@ def main():
         filename = f"{name}_{code}_1min_{today_str}.csv"
                 
         # 안전하게 디렉토리 경로와 파일명을 결합
-        file_path = os.path.join("etc", filename)
+        file_path = os.path.join(directory_path, filename)
         
         # 한글 깨짐 방지를 위해 utf-8-sig 인코딩 사용
         df.to_csv(file_path, index=False, encoding='utf-8-sig')

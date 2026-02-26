@@ -15,6 +15,7 @@ class PhysicalStateTracker:
         self._l1_cache: Dict[str, float] = {}
         self._strength_history: Dict[str, List[Tuple[datetime, float]]] = {}
         self._last_volume: Dict[str, float] = {} # [추가] 거래량 추적용 캐시
+        self._last_price: Dict[str, float] = {} # [추가] 직전 가격 추적용 캐시
         self.db = db_logger
         
         # [방어 로직] 메인 스레드 블로킹을 막기 위한 전용 백그라운드 워커 1개 배정
@@ -75,6 +76,10 @@ class PhysicalStateTracker:
             interval_volume = total_volume - last_vol
             
         self._last_volume[stock_code] = total_volume
+
+        # 🟢 직전 가격(Previous Price) 로드 및 갱신
+        previous_price = self._last_price.get(stock_code, current_price)
+        self._last_price[stock_code] = current_price
         
         if market_cap < 100_000_000_000:
             dynamic_cutoff = 10_000_000.0
@@ -109,6 +114,7 @@ class PhysicalStateTracker:
             atr_percent=atr_percent, previous_velocity=previous_velocity,
             vol_ratio=vol_ratio, rsi=rsi, tot_sel_req=tot_sel_req,
             tot_buy_req=tot_buy_req, prev_strength_5m=prev_strength_5m,
+            previous_price=previous_price,
             interval_impulse=interval_impulse,
             interval_amount_krw=interval_amount_krw,
             reference_mass=dynamic_cutoff  # 🟢 컷오프를 기준 질량으로 전달!
