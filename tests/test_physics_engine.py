@@ -1,6 +1,6 @@
 import pytest
 import math
-from kiwoom_stock.core.physics_engine import calculate_net_velocity, calculate_physical_score
+from kiwoom_stock.core.physics_engine import calculate_net_velocity
 
 def get_neutral_physics_params():
     """다른 물리적 힘을 0에 가깝게 통제한 Zero-Constant 기본 파라미터 셋"""

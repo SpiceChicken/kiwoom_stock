@@ -113,8 +113,6 @@ class TradingStrategy:
         # 💡 [수정 2] 속도가 0 미만으로 살짝 빠졌다고 팔지 않고, -2.0 이하의 진짜 심해로 처박힐 때만 매도
         if current_velocity <= -2.0:
             return "Kinetic Exit (Engine Dead: V <= -2.0)"
-
-        # 🗑️ [수정 3] 중력(-1.0) 때문에 횡보장에서도 억울하게 털리던 Flash Dump / Bleeding 로직 완전 삭제!
             
         # [Rule 3] 가격 기반 트레일링 스탑 (Price-based Trailing Stop): 고점 대비 1.5% 하락
         if state.get('max_price', 0) > 0:
@@ -137,7 +135,7 @@ class TradingStrategy:
     def evaluate(self, metrics: SupplyData) -> Dict:
         """[진입 판단] 동적 탈출 속도(Dynamic Escape Velocity) 기반 순수 물리 진입"""
         
-        stock_code, total_score = metrics.stock_code, metrics.total_score
+        stock_code = metrics.stock_code
         forces = getattr(metrics, 'forces', {})
         
         # 물리 엔진 파라미터 추출
@@ -174,7 +172,6 @@ class TradingStrategy:
         elif thrust > 0.0:
             status = "⚠️엔진점화 (Ignition only)"
 
-        # 🗑️ 반환 딕셔너리에서 score, momentum 키 완전 삭제
         return {
             "status": status,
             "regime": getattr(self._current_regime, 'name', str(self._current_regime)),

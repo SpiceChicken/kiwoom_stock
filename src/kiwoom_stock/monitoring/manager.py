@@ -12,7 +12,6 @@ class Position:
     stock_code: str
     stock_name: str
     buy_price: float
-    buy_score: float
     buy_time: str
     buy_regime: str
     status: str = 'OPEN'
@@ -29,7 +28,6 @@ class Position:
     profit_rate: Optional[float] = None
     sell_time: Optional[str] = None
     sell_reason: Optional[str] = None
-    current_score: Optional[float] = None
     # DB에는 없지만, 프로그램 실행 중(Runtime)에만 사용하는 메모리 변수
     atr_percent: float = 0.5
     
@@ -118,7 +116,6 @@ class StockManager:
         pos = self.active_positions[stock_code]
 
         pos.sell_price = verdict['price']
-        pos.current_score = verdict['score']
 
         # [New] ATR 정보를 Position 객체에 임시 저장 (메모리 전용)
         # DB 스키마에 없어도 객체 속성으로는 동적 할당 가능
@@ -152,7 +149,6 @@ class StockManager:
                 "stock_code": stock_code,
                 "stock_name": self.stock_names[stock_code],
                 "buy_price": verdict.get('price'),
-                "buy_score": verdict.get('score'),
 
                 # 개별 물리적 힘 매핑 (없을 경우 0.0)
                 "thrust": forces.get('thrust', 0.0),
@@ -189,7 +185,6 @@ class StockManager:
             # 2. DB 기록용 데이터 생성
             pos = self.active_positions[stock_code]
             pos.sell_price = verdict['price']
-            pos.current_score = verdict['score']
             pos.sell_reason = reason
 
             # 3. DB 기록 및 내부 포지션 업데이트

@@ -21,14 +21,13 @@ def test_update_position_data_pure_update():
     
     mock_pos = Position(
         id=1, stock_code="005930", stock_name="삼성전자", buy_price=50000, 
-        buy_score=80.0, buy_time="2026-02-10", buy_regime="BULL"
+        buy_time="2026-02-10", buy_regime="BULL"
     )
     manager.active_positions = {"005930": mock_pos}
     
     verdict = {
         "stock_code": "005930",
         "price": 51000,
-        "score": 90.0,
         "atr_percent": 2.0,
     }
     
@@ -37,5 +36,4 @@ def test_update_position_data_pure_update():
     # Assert: 순수하게 속성값만 갱신되었는지 확인
     assert updated_pos is not None
     assert updated_pos.sell_price == 51000
-    assert updated_pos.current_score == 90.0
     assert updated_pos.atr_percent == 2.0

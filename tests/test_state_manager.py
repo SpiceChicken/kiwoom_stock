@@ -26,7 +26,6 @@ def test_time_freeze_defense_volume_unchanged():
     )
 
     # 엔진이 꺼지고 마찰력만 남았으므로 점수는 반드시 떨어져야 함
-    assert res2["total_score"] < res1["total_score"], "동결 상태에서는 마찰력에 의해 점수가 감쇠해야 합니다."
     assert res2["forces"].get("impulse", 0.0) == 0.0
 
 def test_time_freeze_and_weber_fechner_law():
@@ -49,11 +48,3 @@ def test_time_freeze_and_weber_fechner_law():
         total_volume=110.0, market_cap=50_000_000_000.0
     )
     assert res_small["forces"]["impulse"] == 0.0
-    
-    # 3. 거래량 동결 -> 감쇠 발생
-    res_frozen = tracker.process_tick(
-        stock_code="005930", strength=150, current_price=50000, vwap=50000, 
-        atr_percent=1.5, vol_ratio=1.2, rsi=60, tot_sel_req=1000, tot_buy_req=1000, 
-        total_volume=110.0, market_cap=50_000_000_000.0
-    )
-    assert res_frozen["total_score"] < res_small["total_score"]
