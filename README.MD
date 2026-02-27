@@ -1,15 +1,16 @@
-# 🚀 Kiwoom All-Weather Intelligent Monitoring System (Physical Dynamics Edition)
+# 🚀 Kiwoom All-Weather Intelligent Monitoring System (Physical Dynamics Edition v2.0)
 
 본 프로젝트는 키움증권 REST API를 기반으로 주가의 움직임을 질량을 가진 물체의 운동($F=ma$)으로 치환하여 분석하는 **차세대 물리적 퀀트 트레이딩 시스템(Physics-based Quant System)**입니다.
 
 파편화된 if-else 휴리스틱과 기계적 손절(Score Decay)의 한계를 극복하기 위해, '관성(Inertia)'과 '합력(Net Force)' 개념을 도입하여 세력의 개미털기(Shake-out) 구간을 버텨내고 진정한 주도주를 정밀 타격합니다.
 
-**🔥 Major Update: Trap Defense & Heavy Trailing Stop**:
+**🔥 Major Update v2.0: Fully Dynamic Dual-Defense & Kinematic Paradigm Shift**
 
-1. **Bull-Trap Shield (진입 방어막)**: 고점 피날레(Climax) 구간이나 매도 폭탄이 떨어지는 가짜 돌파를 차단하기 위해 `Gravity`와 `Jerk`, 방향성 `Impulse`에 하드 록(Hard Lock) 제약을 걸었습니다.
-2. **Heavy Trailing Stop (동적 청산 개편)**: 속도(Velocity)가 조금만 줄어도 냅다 팔아버리던 잦은 매매 로직을 폐기했습니다. 대신 **실제 가격의 고점(Max Price)**을 추적하며, 진짜 추세가 꺾일 때(-1.5%)만 기계적으로 이익을 실현하여 수수료 출혈을 막고 수익을 극대화합니다.
-3. **Threshold-Free Architecture**: 고정된 점수 임계값(Threshold)에 의존하던 기존의 if-else 룰을 전면 폐기하고, 물리적 힘(Force)의 역전과 관성 감쇠 비율만으로 매매를 결정합니다.
-4. **Physical Reason Logging**: 매도 및 관망 사유(`get_exit_reason`)를 "엔진 소진(V<0)", "연속 하방 압력(Breakdown)", "최고가 대비 하락(Trailing Stop)" 등 직관적인 물리적 상태로 개편하여 사후 분석의 퀄리티를 높였습니다.
+1. **쿨다운 철폐 및 순수 역학 엔진 복원 (Time-Constraint Free)**: 잦은 매매를 막기 위한 땜질식 처방이었던 '10분 진입 냉각기'를 전면 삭제했습니다. 방어망이 견고해짐에 따라, 물리적 힘(Force)이 조건에 부합한다면 시간에 구애받지 않고 진입/유지하는 순수 역학 트레이딩 원칙을 복원했습니다.
+2. **완전 동적 이중 방어망 (Fully Dynamic Dual-Defense)**: 고정된 상수(-1.5%)가 대형주의 진동을 견디지 못하던 한계를 극복했습니다. 진입 직후에는 넉넉한 **`초기 생존망(-ATR*3.0)`**으로 세력의 흔들기를 버텨내고, 의미 있는 수익권 도달 시에만 **`이익 보존망(-ATR*1.5)`**이 켜지며 추세가 꺾일 때 동적으로 익절합니다.
+3. **대포알 우대 정책 (Impulse-based Multiplier)**: 진입 시점에 틱 체결대금이 폭발하는 진짜 스마트 머니(`Impulse >= 3.0`)가 들어왔다면, 이익 보존망(Trailing Stop)의 폭을 `ATR * 1.5`에서 **`ATR * 2.0`**으로 확장하여 대시세의 흔들기를 끝까지 버텨냅니다.
+4. **가짜 수급 조기 탈출 (Fake-Breakout Bail-out)**: 대규모 자금 없이 알고리즘 매수로 체결강도(Thrust)만 인위적으로 끌어올린 세력의 꼬시기 덫을 감지합니다. 진입 직후 `수익률 <= 0.0 AND Jerk <= -0.5 AND Thrust < 1.0` 달성 시, 초기 손절망까지 기다리지 않고 즉시 시장가로 탈출(Bail-out)하여 손익비를 극대화합니다.
+5. **Bull-Trap Shield (진입 방어막)**: 고점 피날레(Climax) 구간이나 매도 폭탄이 떨어지는 가짜 돌파를 차단하기 위해 `Gravity`와 `Jerk`, 방향성 `Impulse`에 하드 록(Hard Lock) 제약을 걸었습니다.
 
 ---
 
@@ -38,13 +39,14 @@
 
 ## ⚡ 시스템 아키텍처 (System Architecture)
 
-### 1. 묵직한 동적 청산 전략 (Heavy Dynamic Exit)
+### 1. 묵직한 동적 청산 전략 (Fully Dynamic Exit)
 
-변동성에 흔들리지 않고 진짜 추세를 끝까지 발라먹기 위해 3가지 조건 중 하나라도 만족 시 즉각 탈출합니다.
+변동성에 흔들리지 않고 진짜 추세를 끝까지 발라먹기 위해 4가지 단계적 조건에 따라 즉각 탈출합니다.
 
+* **Bail-out (조기 탈출):** 진입 직후 수익이 나지 않는 상태에서 속도와 추진력이 급감할 때 초기 손절망 전 즉시 컷오프.
 * **Engine Dead:** 속도($V_t$)가 마이너스로 추락하여 상승 관성이 완전히 소멸했을 때.
-* **Kinetic Breakdown:** 최근 3분간 누적된 합력($F_{net}$)이 -3.0 이하로 강한 하방 매도세가 쏟아질 때.
-* **Price-based Trailing Stop:** 진입 후 달성한 최고가(Max Price) 대비 현재가가 **-1.5% 이상 하락**하여 실제 가격 추세가 깨졌을 때.
+* **Initial ATR Stop Loss (초기 생존망):** 진입 직후 세력의 흔들기를 버티는 구간으로, 매수가 대비 `-(ATR * 3.0)` 하락 시 강제 손절.
+* **Dynamic ATR Trailing Stop (이익 보존망):** 최고가 갱신 후, 진짜 추세가 꺾일 때만(`-(ATR * 1.5 ~ 2.0)` 하락) 동적으로 이익을 실현하여 수수료 출혈을 막고 수익을 극대화.
 
 ### 2. 하이브리드 상태 관리 (Hybrid State Management)
 
@@ -71,7 +73,7 @@ Kiwoom-Stock/
 │       │   ├── state_manager.py   # 관성 상태 캐싱, 이전 가격/거래량 추적을 통한 Impulse 파싱
 │       │   └── config.py          # 동적 설정 로더
 │       ├── monitoring/
-│       │   ├── strategy.py        # Bull-Trap 방어막(Shield) 및 Heavy Trailing Stop 로직
+│       │   ├── strategy.py        # 동적 이중 방어망, 대포알 우대 정책, Bail-out 로직 구현
 │       │   └── manager.py         # 포지션 관리 및 Selective Overnight 처리
 ├── logs/                   # 실행 로그 (status.log - 물리적 Exit Reason 포함)
 ├── data/                   # 분석 데이터 (SQLite DB 및 CSV 사후 검증용)
@@ -106,4 +108,4 @@ poetry run python main.py
 
 ## 📊 사후 분석 및 검증 (Backtest Reporting)
 
-`tools/backtest_reporter.py`를 실행하면, DB에 저장된 물리 엔진의 상세 벡터(Thrust, Gravity, Drag, Magnetic, Jerk, Impulse) 추이와 $V_t$ 변화량을 바탕으로 MFE(최대 허용 수익) 및 MAE(최대 허용 손실)를 터미널 UI로 분석할 수 있습니다. 매도 사유 또한 "엔진 소진", "연속 하방 압력" 등으로 명확히 표시되어 전략의 직관적 피드백이 가능합니다.
+`tools/backtest_reporter.py`를 실행하면, DB에 저장된 물리 엔진의 상세 벡터(Thrust, Gravity, Drag, Magnetic, Jerk, Impulse) 추이와 $V_t$ 변화량을 바탕으로 MFE(최대 허용 수익) 및 MAE(최대 허용 손실)를 터미널 UI로 분석할 수 있습니다. 매도 사유 또한 "엔진 소진", "연속 하방 압력", "Trailing Stop" 등으로 명확히 표시되어 전략의 직관적 피드백이 가능합니다.
