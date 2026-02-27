@@ -204,8 +204,7 @@ class TradingEngine:
         return (
             self.strategy.is_trading_window() and
             verdict['is_buy_signal'] and
-            verdict['stock_code'] not in self.stock_mgr.active_positions and
-            self.stock_mgr.is_not_recent_exit(verdict['stock_code'])
+            verdict['stock_code'] not in self.stock_mgr.active_positions
         )
 
     def _execute_order(self, side: str, verdict: Dict, reason: Optional[str] = None):

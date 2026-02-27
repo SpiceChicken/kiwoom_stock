@@ -66,70 +66,87 @@ class TradingStrategy:
 
     def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
         """
-        [청산 판단] 초민감도 제거 및 묵직한 가격/관성 기반 헤비 엑시트(Heavy Exit) 룰 적용
+        [청산 판단] ATR 기반 이중 동적 방어망 & 거래량 즉사 회피(Bail-out) 적용
         """
         now_time = datetime.now().time()
         stock_code = pos.stock_code
         
-        # 이미 오버나잇으로 확정된 종목은 당일 청산 로직 무시
         if pos.status == "OVERNIGHT":
             return None
 
         # -------------------------------------------------------------------
-        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신 (max_price만 추적)
+        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신
         # -------------------------------------------------------------------
         buy_price = getattr(pos, 'buy_price', current_price)
         if buy_price <= 0: buy_price = current_price
         
-        state = self._kinetic_state.setdefault(stock_code, {'max_price': buy_price})
-        
+        # 💡 [상태 추적기 고도화] 매수가가 변경되면(새로운 포지션) 진입 시간/위력 기록
+        state = self._kinetic_state.get(stock_code, {})
+        if state.get('buy_price') != buy_price:
+            state = {
+                'buy_price': buy_price,
+                'max_price': buy_price,
+                'entry_impulse': forces.get('impulse', 0.0) # 진입 시점의 대포알 위력
+            }
+            self._kinetic_state[stock_code] = state
+            
         current_velocity = forces.get('current_velocity', 0.0)
         thrust = forces.get('thrust', 0.0)
         magnetic = forces.get('magnetic', 0.0)
+        jerk = forces.get('jerk', 0.0)
+        impulse = forces.get('impulse', 0.0)
 
         # 고점 가격 트래킹 업데이트
         if current_price > state['max_price']:
             state['max_price'] = current_price
 
         # -------------------------------------------------------------------
-        # 1. Selective Swing (15:20 이후 찐 주도주 홀딩 예외 룰)
+        # 1. 예외 룰 및 강제 청산 룰
         # -------------------------------------------------------------------
         if now_time >= time(15, 20):
             if current_velocity >= 3.0 and thrust > 2.0 and magnetic > 0:
                 pos.status = "OVERNIGHT" 
                 return None 
 
-        # -------------------------------------------------------------------
-        # 2. Time-based Exit (장 마감 강제 청산 - 예외 룰 통과 못한 종목)
-        # -------------------------------------------------------------------
         if not getattr(self, 'debug_mode', False) and now_time >= getattr(self, 'forced_exit_time', time(15, 27)):
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 3. 🛡️ Heavy Exit Rules (초민감도 제거 완료)
+        # 2. 물리 엔진 완전 소진 (Engine Dead)
         # -------------------------------------------------------------------
-        
-        # [Rule 1] 엔진 완전 소진 (Engine Dead 조건 완화)
-        # 💡 [수정 2] 속도가 0 미만으로 살짝 빠졌다고 팔지 않고, -2.0 이하의 진짜 심해로 처박힐 때만 매도
         if current_velocity <= -2.0:
             return "Kinetic Exit (Engine Dead: V <= -2.0)"
-            
-        # [Rule 3] 가격 기반 트레일링 스탑 (Price-based Trailing Stop): 고점 대비 1.5% 하락
-        if state.get('max_price', 0) > 0:
-            drawdown = (current_price / state['max_price'] - 1) * 100
-            if drawdown <= -1.5:
-                return f"Trailing Stop ({drawdown:.2f}%)"
 
         # -------------------------------------------------------------------
-        # 4. 기존 ATR 기반 Dynamic Stop-Loss 로직 유지
+        # 3. 🛡️ ATR 기반 이중 동적 방어망 & 🏃‍♂️ 조기 탈출 (Bail-out)
         # -------------------------------------------------------------------
-        profit_rate = (current_price / buy_price - 1) * 100
         current_atr = getattr(pos, 'atr_percent', 0.5)
-        dynamic_stop = -(current_atr * 3.0) 
+        max_price = state.get('max_price', buy_price)
         
-        if profit_rate <= dynamic_stop:
-            return f"Stop Loss ({profit_rate:.2f}%)"
+        profit_rate = (current_price / buy_price - 1) * 100            
+        max_profit_rate = (max_price / buy_price - 1) * 100            
+        drawdown_from_max = (current_price / max_price - 1) * 100      
+        
+        # 손실권인데 가속도가 급격히 마이너스로 처박히고 추진력이 꺼지면 즉시 컷오프!
+        if profit_rate <= 0.0 and jerk <= -0.5 and thrust < 1.0:
+            return f"Bail-out (Negative Jerk: {profit_rate:.2f}%)"
+
+        # 🚀 [이익 보존망 (Dynamic ATR Trailing Stop)]
+        if max_profit_rate >= (current_atr * 1.0):
             
+            # 🔥 [Rule 3] 방어망 확장: "대포알(Impulse) 우대 정책"
+            # 진입 시 Impulse 3.0 이상의 진짜 돈이 들어온 종목은 흔들기를 견디기 위해 2.0배로 룸 확장!
+            multiplier = 2.0 if state['entry_impulse'] >= 3.0 else 1.5
+            trailing_limit = -(current_atr * multiplier)
+            
+            if drawdown_from_max <= trailing_limit:
+                return f"Trailing Stop (Peak: +{max_profit_rate:.2f}%, Drop: {drawdown_from_max:.2f}%)"
+
+        # 🛡️ [초기 생존망 (Initial ATR Stop Loss)]
+        stop_loss_limit = -(current_atr * 3.0)
+        if profit_rate <= stop_loss_limit:
+            return f"Stop Loss ({profit_rate:.2f}%)"
+
         return None
 
     def evaluate(self, metrics: SupplyData) -> Dict:
@@ -154,12 +171,18 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         if thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
+
+        elif thrust >= 1.5 and gravity == 0.0:
+            status = "⚓수면 아래 폭발 (Submarine Trap)"
+
+        elif thrust >= 1.0 and impulse < 1.0:
+            status = "💨빈 껍데기 가속도 차단 (Fake Breakout)"
             
         # -------------------------------------------------------------------
         # 🚀 순수 동역학 진입 로직
         # -------------------------------------------------------------------
-        # 💡 대전제 변경: thrust > 0.0 이고 가속도(Jerk)가 위로 향할 것!
-        elif thrust > 0.0 and jerk > 0.0:
+        # 💡 thrust > 0.5 이고 가속도(Jerk)가 위로 향할 것!
+        elif thrust > 0.5 and jerk > 0.0:
             if current_velocity > 0.0:
                 is_buy_signal = True
                 status = "🔥추세돌파 (Uptrend)"
