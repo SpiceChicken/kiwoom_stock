@@ -55,4 +55,3 @@ class SupplyData:
     # [New] 스무딩 된 세부 점수 저장용
     # analyzer.py에서 계산된 smoothed_metrics가 여기에 저장됩니다.
     forces: Dict[str, float] = field(default_factory=dict)
-    total_score: float = 0.0

@@ -238,8 +238,6 @@ class TradingEngine:
             self.notifier.collect_status({
                 "name": self.stock_mgr.stock_names.get(verdict['stock_code'], verdict['stock_code']),
                 "price": verdict["price"],
-                "score": verdict['score'],
-                "momentum": verdict['momentum'],
                 "reason": verdict['status'],
                 "forces": verdict.get('forces', {}) 
             })

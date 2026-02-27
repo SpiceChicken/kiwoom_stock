@@ -151,10 +151,3 @@ def calculate_net_velocity(
         "jerk": float(round(jerk, 4)), "impulse": float(round(impulse, 4)),
         "net_force": float(round(net_force, 4)), "current_velocity": float(round(current_velocity, 4))
     }
-
-def calculate_physical_score(current_velocity: float) -> float:
-    """
-    [물리적 의도: Score 산출] 
-    재활용한 시그모이드 함수를 통해 속도를 0~100 사이의 Score로 변환합니다.
-    """
-    return float(round(_sigmoid(current_velocity) * 100.0, 2))

@@ -16,7 +16,6 @@ class TradingStrategy:
     
     def __init__(self, strategy_config: Dict):
         self.settings = strategy_config
-        self.momentum_threshold = strategy_config.get("momentum_threshold", 5.0) # 스코어 변화량 임계치
         self.debug_mode = strategy_config.get("debug_mode", False)
 
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
@@ -27,11 +26,9 @@ class TradingStrategy:
         self._current_regime = MarketRegime.UNKNOWN
         self._cached_config: Dict[str, Any] = {}
 
-        self.decay_rate = strategy_config.get("score_decay_rate", 0.25)
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.03)
         self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.03)
 
-        self.history: Dict[str, List[float]] = {}
         self.total_loss_limit: float = float(strategy_config.get("total_loss_limit", -5))
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
@@ -136,19 +133,6 @@ class TradingStrategy:
             return f"Stop Loss ({profit_rate:.2f}%)"
             
         return None
-    
-    def _get_momentum(self, stock_code: str, current_score: float) -> float:
-        """[Physics] 속도의 변화량 즉, 가속도(Momentum)를 측정합니다."""
-        scores = self.history.setdefault(stock_code, [])
-        if not scores:
-            scores.append(current_score)
-            return 0.0
-            
-        avg_prev_score = sum(scores) / len(scores)
-        momentum = round(current_score - avg_prev_score, 1)
-        scores.append(current_score)
-        self.history[stock_code] = scores[-5:] 
-        return momentum
 
     def evaluate(self, metrics: SupplyData) -> Dict:
         """[진입 판단] 동적 탈출 속도(Dynamic Escape Velocity) 기반 순수 물리 진입"""
@@ -163,51 +147,37 @@ class TradingStrategy:
         magnetic = forces.get('magnetic', 0.0)
         jerk = forces.get('jerk', 0.0)
         gravity = forces.get('gravity', 0.0)
-        
-        momentum = self._get_momentum(stock_code, total_score)
-        
+                
         is_buy_signal = False
         status = "관망"
 
         # -------------------------------------------------------------------
-        # 🛡️ [Trap Shield] 진입 방어 규칙 (세력의 덫 원천 차단)
+        # 🛡️ [Trap Shield] 진입 방어 규칙
         # -------------------------------------------------------------------
         if thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
             
-        elif jerk <= -0.1:
-            status = "🧊가속도 둔화 차단 (Jerk Filter)"
-
         # -------------------------------------------------------------------
-        # 🚀 투트랙(Two-Track) 순수 동역학 진입 로직
+        # 🚀 순수 동역학 진입 로직
         # -------------------------------------------------------------------
-        # 대전제: 엔진이 켜져 있고(thrust > 0) 위로 가속이 붙기 시작할 것(momentum > 0)
-        elif thrust > 0.0 and momentum > 0.0:
-            
-            # [Track 1] 우주 공간 (정배열 추세): 
-            # 이미 물 위로 올라와 상승 관성(velocity > 0)을 탔다면 가벼운 수급만으로도 돌파 매수!
+        # 💡 대전제 변경: thrust > 0.0 이고 가속도(Jerk)가 위로 향할 것!
+        elif thrust > 0.0 and jerk > 0.0:
             if current_velocity > 0.0:
                 is_buy_signal = True
                 status = "🔥추세돌파 (Uptrend)"
-                
-            # [Track 2] 심해 탈출 (역배열 V자 반등):
-            # 아직 물 속(velocity <= 0)이지만, 방금 우리가 고쳐놓은 '1.6억 이상 대포알(Impulse)'이나
-            # '매도호가 진공 흡입(Magnetic)' 센서가 켜졌다면 세력의 찐타점으로 인정하고 바닥 매수!
             elif impulse > 0.0 or magnetic > 0.0:
                 is_buy_signal = True
                 status = "🚀바닥반등 (Reversal Boost)"
-                
             else:
                 status = "👀예열중 (Warming Up)"
                 
         elif thrust > 0.0:
             status = "⚠️엔진점화 (Ignition only)"
 
+        # 🗑️ 반환 딕셔너리에서 score, momentum 키 완전 삭제
         return {
-            "score": total_score,
-            "momentum": momentum,
             "status": status,
-            "regime": self._current_regime,
+            "regime": getattr(self._current_regime, 'name', str(self._current_regime)),
             "is_buy_signal": is_buy_signal,
             "price": metrics.cur_prc,
             "stock_code": stock_code,
