@@ -69,7 +69,7 @@ class TradingStrategy:
 
     def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
         """
-        [청산 판단] 물리적 힘(forces)과 가격 동역학을 결합한 헤비 엑시트(Heavy Exit) 룰 적용
+        [청산 판단] 초민감도 제거 및 묵직한 가격/관성 기반 헤비 엑시트(Heavy Exit) 룰 적용
         """
         now_time = datetime.now().time()
         stock_code = pos.stock_code
@@ -79,27 +79,20 @@ class TradingStrategy:
             return None
 
         # -------------------------------------------------------------------
-        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신 (max_price 기반)
+        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신 (max_price만 추적)
         # -------------------------------------------------------------------
-        # max_v 삭제 및 max_price 추가 (초기값: 매수가)
         buy_price = getattr(pos, 'buy_price', current_price)
         if buy_price <= 0: buy_price = current_price
         
-        state = self._kinetic_state.setdefault(stock_code, {'max_price': buy_price, 'forces': []})
+        state = self._kinetic_state.setdefault(stock_code, {'max_price': buy_price})
         
         current_velocity = forces.get('current_velocity', 0.0)
-        net_force = forces.get('net_force', 0.0)
         thrust = forces.get('thrust', 0.0)
         magnetic = forces.get('magnetic', 0.0)
 
         # 고점 가격 트래킹 업데이트
         if current_price > state['max_price']:
             state['max_price'] = current_price
-            
-        # 최근 6회의 합력(Net Force)을 리스트에 저장 (Sliding Window)
-        state['forces'].append(net_force)
-        if len(state['forces']) > 6:
-            state['forces'].pop(0)  # 최대 6틱(60초)의 물리량 보존
 
         # -------------------------------------------------------------------
         # 1. Selective Swing (15:20 이후 찐 주도주 홀딩 예외 룰)
@@ -116,28 +109,18 @@ class TradingStrategy:
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 3. 🛡️ Heavy Exit Rules (동적 청산 룰 전면 개편)
+        # 3. 🛡️ Heavy Exit Rules (초민감도 제거 완료)
         # -------------------------------------------------------------------
         
-        # [Rule 1] 엔진 완전 소진 (Engine Dead): 속도/관성이 마이너스로 추락
-        if current_velocity < 0.0:
-            return "Kinetic Exit (Engine Dead: Velocity < 0)"
-        
-        # Track A: 플래시 덤프 (Flash Dump) 방어
-        # 최대 30초(최근 3틱) 이내의 범위에서, 틱 개수(1~3)와 무관하게 누적 합이 -3.0 이하면 즉각 로스컷!
-        recent_3 = state['forces'][-3:] 
-        
-        # 💡 [수정] len == 3 조건을 완전히 삭제! 
-        if all(f <= 0 for f in recent_3) and sum(recent_3) <= -3.0:
-            return f"Kinetic Exit (Flash Dump: {sum(recent_3):.2f})"
+        # [Rule 1] 엔진 완전 소진 (Engine Dead 조건 완화)
+        # 💡 [수정 2] 속도가 0 미만으로 살짝 빠졌다고 팔지 않고, -2.0 이하의 진짜 심해로 처박힐 때만 매도
+        if current_velocity <= -2.0:
+            return "Kinetic Exit (Engine Dead: V <= -2.0)"
 
-        # Track B: 블리딩 (Bleeding) 방어
-        # 서서히 가라앉는 배는 최소 60초(6틱)의 누적된 흐름을 확인한 후 판단 (이곳은 len == 6 유지)
-        if len(state['forces']) == 6 and sum(state['forces']) <= -4.5:
-            return f"Kinetic Exit (Bleeding: {sum(state['forces']):.2f})"
+        # 🗑️ [수정 3] 중력(-1.0) 때문에 횡보장에서도 억울하게 털리던 Flash Dump / Bleeding 로직 완전 삭제!
             
         # [Rule 3] 가격 기반 트레일링 스탑 (Price-based Trailing Stop): 고점 대비 1.5% 하락
-        if state['max_price'] > 0:
+        if state.get('max_price', 0) > 0:
             drawdown = (current_price / state['max_price'] - 1) * 100
             if drawdown <= -1.5:
                 return f"Trailing Stop ({drawdown:.2f}%)"
