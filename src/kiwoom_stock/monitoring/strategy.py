@@ -171,6 +171,12 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         if thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
+
+        elif thrust >= 1.5 and gravity == 0.0:
+            status = "⚓수면 아래 폭발 (Submarine Trap)"
+
+        elif thrust >= 1.0 and impulse < 1.0:
+            status = "💨빈 껍데기 가속도 차단 (Fake Breakout)"
             
         # -------------------------------------------------------------------
         # 🚀 순수 동역학 진입 로직
