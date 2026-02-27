@@ -26,7 +26,7 @@ def test_analyzer_zero_constant_mapping(analyzer):
     analyzer.collector.fetch_tick_strength.return_value = [{'cntr_str': '120.0'}] 
     analyzer.collector.fetch_order_book.return_value = {'tot_sel_req': 50000, 'tot_buy_req': 5000}
     
-    analyzer.state_tracker.process_tick.return_value = {"total_score": 90.0, "forces": {"magnetic": 1.2}}
+    analyzer.state_tracker.process_tick.return_value = {"forces": {"magnetic": 1.2}}
 
     # 실행
     analyzer.update_priority_supply([code])

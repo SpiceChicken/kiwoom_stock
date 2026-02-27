@@ -187,7 +187,7 @@ class TradingEngine:
                 pos = self.stock_mgr.update_position_data(verdict)
                 if not pos: continue
                 
-                forces = verdict.get('score_detail', verdict.get('forces', {})) 
+                forces = verdict.get('forces', {}) 
                 exit_reason = self.strategy.get_exit_reason(pos, verdict['price'], forces)
                 
                 if exit_reason:
@@ -238,8 +238,6 @@ class TradingEngine:
             self.notifier.collect_status({
                 "name": self.stock_mgr.stock_names.get(verdict['stock_code'], verdict['stock_code']),
                 "price": verdict["price"],
-                "score": verdict['score'],
-                "momentum": verdict['momentum'],
                 "reason": verdict['status'],
                 "forces": verdict.get('forces', {}) 
             })

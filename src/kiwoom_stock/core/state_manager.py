@@ -6,7 +6,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Any
 from kiwoom_stock.core.database import TradeLogger
-from kiwoom_stock.core.physics_engine import calculate_net_velocity, calculate_physical_score
+from kiwoom_stock.core.physics_engine import calculate_net_velocity
 
 logger = logging.getLogger(__name__)
 
@@ -126,4 +126,4 @@ class PhysicalStateTracker:
         if not is_frozen:
             self._db_executor.submit(self._background_async_log, stock_code, forces_dict)
             
-        return {"total_score": calculate_physical_score(current_velocity), "forces": forces_dict}
+        return {"forces": forces_dict}

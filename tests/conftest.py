@@ -88,9 +88,6 @@ def sample_supply_data():
         "current_velocity": 2.50
     }
     
-    # current_velocity(2.50)를 시그모이드(calculate_physical_score)에 통과시킨 근사치 점수 주입
-    data.total_score = 92.4
-    
     return data
 
 @pytest.fixture
@@ -100,8 +97,6 @@ def sample_position():
         stock_code="005930",
         stock_name="삼성전자",
         buy_price=80000.0,
-        buy_score=85.0,        # 진입 당시의 물리적 스코어
-        current_score=88.0,    # 현재 스코어 (테스트 편의상 추가)        
         buy_time="2026-02-08 10:00:00",
         buy_regime="STABLE_BULL",
         status="OPEN",

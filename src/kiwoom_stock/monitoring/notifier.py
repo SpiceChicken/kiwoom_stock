@@ -43,15 +43,6 @@ class Notifier:
         except Exception as e:
             logger.error(f"Slack Block Kit 전송 실패: {e}")
 
-    def notify_momentum(self, res: Dict):
-        """수급 폭발 알림"""
-        name = self.stock_names.get(res['stock_code'], res['stock_code'])
-        msg = f"🚀 [수급 폭발] {name}({res['stock_code']}) 점수 급상승! ({res['momentum']:+})"
-        
-        print(msg)
-        logger.info(msg)
-        self._send_slack(msg)
-
     def start_status_session(self):
         """루프 시작 시 데이터 저장소 초기화"""
         self.status_data = []
@@ -74,14 +65,12 @@ class Notifier:
             
             name = item.get('name', '')
             price = item.get('price', 0)
-            score = item.get('score', 0.0)
-            momentum = item.get('momentum', 0.0)
             reason = item.get('reason', '')
             # CSV 포맷: 스냅샷시간,레짐,종목명,점수,모멘텀,상태
             log_line = (f"{snapshot_time},{regime},{name},{price},"
                         f"{forces.get('thrust', 0.0)},{forces.get('gravity', 0.0)},{forces.get('drag', 0.0)},"
                         f"{forces.get('magnetic', 0.0)},{forces.get('jerk', 0.0)},{forces.get('impulse', 0.0)},{forces.get('net_force', 0.0)},"
-                        f"{score:.1f},{momentum:.1f},{reason}")
+                        f"{reason}")
             status_logger.info(log_line)
 
     def notify_buy(self, buy_data: Dict):
@@ -96,7 +85,6 @@ class Notifier:
                 "type": "section",
                 "fields": [
                     {"type": "mrkdwn", "text": f"*매수가:*\n{buy_data['buy_price']:,.0f}원"},
-                    {"type": "mrkdwn", "text": f"*점수:*\n{buy_data['buy_score']:.1f}점"},
                     {"type": "mrkdwn", "text": f"*레짐:*\n{buy_data['buy_regime']}"},
                     {"type": "mrkdwn", "text": f"*시간:*\n{datetime.now().strftime('%H:%M:%S')}"}
                 ]
@@ -105,7 +93,7 @@ class Notifier:
         ]
         self._send_slack_blocks(blocks)
 
-        log_line = f"BUY_SIGNAL:{buy_data['stock_name']},buy_score:{buy_data['buy_score']},Price:{buy_data['buy_price']}"
+        log_line = f"BUY_SIGNAL:{buy_data['stock_name']},Price:{buy_data['buy_price']}"
         logger.info(log_line)
 
 

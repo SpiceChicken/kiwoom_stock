@@ -72,7 +72,6 @@ class MarketAnalyzer:
             for stock_code in stock_codes:
                 if stock_code not in self.supply_cache:
                     self.supply_cache[stock_code] = SupplyData(stock_code=stock_code)
-                    self.supply_cache[stock_code].total_score = 0.0
 
                 data = self.supply_cache[stock_code]
                 chart_5m = self.collector.fetch_minute_chart(stock_code, tic="5")
@@ -106,7 +105,6 @@ class MarketAnalyzer:
                     market_cap=(data.mac * 100_000_000.0)
                 )
                 
-                data.total_score = tracker_result["total_score"]
                 data.forces = tracker_result["forces"]
 
             self.last_supply_update = datetime.now()

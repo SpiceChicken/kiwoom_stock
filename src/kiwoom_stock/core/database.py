@@ -29,7 +29,6 @@ class TradeLogger:
             stock_code TEXT,
             stock_name TEXT,
             buy_price REAL,
-            buy_score REAL,
             thrust REAL,
             gravity REAL,
             drag REAL,
@@ -135,13 +134,13 @@ class TradeLogger:
         """상세 점수를 포함하여 매수 기록"""
         query = """
         INSERT INTO trades (
-            stock_code, stock_name, buy_price, buy_score, 
+            stock_code, stock_name, buy_price,
             thrust, gravity, drag, magnetic, jerk, impulse, net_force,
             buy_time, buy_regime
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
-            data.get('stock_code'), data.get('stock_name'), data.get('buy_price'), data.get('buy_score'),
+            data.get('stock_code'), data.get('stock_name'), data.get('buy_price'),
             data.get('thrust', 0.0), data.get('gravity', 0.0), data.get('drag', 0.0), 
             data.get('magnetic', 0.0), data.get('jerk', 0.0), data.get('impulse', 0.0), data.get('net_force', 0.0),
             data.get('buy_time'), data.get('buy_regime')
