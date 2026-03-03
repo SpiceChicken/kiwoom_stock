@@ -112,13 +112,7 @@ class TradingStrategy:
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 2. 물리 엔진 완전 소진 (Engine Dead)
-        # -------------------------------------------------------------------
-        if current_velocity <= -2.0:
-            return "Kinetic Exit (Engine Dead: V <= -2.0)"
-
-        # -------------------------------------------------------------------
-        # 3. 🛡️ ATR 기반 이중 동적 방어망 & 🏃‍♂️ 조기 탈출 (Bail-out)
+        # 2. 🛡️ ATR 기반 이중 동적 방어망 & 🏃‍♂️ 조기 탈출 (Bail-out)
         # -------------------------------------------------------------------
         current_atr = getattr(pos, 'atr_percent', 0.5)
         max_price = state.get('max_price', buy_price)
