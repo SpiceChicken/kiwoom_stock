@@ -137,7 +137,7 @@ class TradeLogger:
             stock_code, stock_name, buy_price,
             thrust, gravity, drag, magnetic, jerk, impulse, net_force,
             buy_time, buy_regime
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
             data.get('stock_code'), data.get('stock_name'), data.get('buy_price'),
