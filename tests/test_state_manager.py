@@ -48,3 +48,26 @@ def test_time_freeze_and_weber_fechner_law():
         total_volume=110.0, market_cap=50_000_000_000.0
     )
     assert res_small["forces"]["impulse"] == 0.0
+
+def test_downtrend_impulse_block_integration():
+    """[파이프라인 타격] StateManager가 직전 가격을 정확히 추적하여 하락 틱의 Impulse를 차단하는가?"""
+    mock_db = MagicMock()
+    tracker = PhysicalStateTracker(mock_db)
+    tracker._db_executor = MagicMock()
+
+    # 1. 첫 틱 (가격 50000, 거래량 100)
+    tracker.process_tick(
+        stock_code="005930", strength=100, current_price=50000, vwap=50000, 
+        atr_percent=1.5, vol_ratio=1.0, rsi=50, tot_sel_req=1000, tot_buy_req=1000, 
+        total_volume=100.0, market_cap=50_000_000_000.0
+    )
+    
+    # 2. 두 번째 틱 (대량 거래 터짐, 하지만 가격은 49000으로 하락)
+    res_down = tracker.process_tick(
+        stock_code="005930", strength=150, current_price=49000, vwap=50000, 
+        atr_percent=1.5, vol_ratio=2.0, rsi=40, tot_sel_req=1000, tot_buy_req=1000, 
+        total_volume=200.0, market_cap=50_000_000_000.0
+    )
+    
+    # 거래량이 100 늘어 컷오프를 뚫었음에도, 가격이 하락했으므로 Impulse는 철저히 0.0이어야 함
+    assert res_down["forces"]["impulse"] == 0.0
