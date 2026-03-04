@@ -28,7 +28,8 @@ def test_update_position_data_pure_update():
     verdict = {
         "stock_code": "005930",
         "price": 51000,
-        "atr_percent": 2.0,
+        "atr_percent": 0.5,
+        "down_atr_percent": 0.5
     }
     
     updated_pos = manager.update_position_data(verdict)
@@ -36,4 +37,5 @@ def test_update_position_data_pure_update():
     # Assert: 순수하게 속성값만 갱신되었는지 확인
     assert updated_pos is not None
     assert updated_pos.sell_price == 51000
-    assert updated_pos.atr_percent == 2.0
+    assert updated_pos.atr_percent == 0.5
+    assert updated_pos.down_atr_percent == 0.5

@@ -66,7 +66,7 @@ class TradingStrategy:
 
     def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
         """
-        [청산 판단] ATR 기반 이중 동적 방어망 & 거래량 즉사 회피(Bail-out) 적용
+        [청산 판단] Down-ATR 기반 방어망 및 순수 물리(Zero-Time) Bail-out 적용
         """
         now_time = datetime.now().time()
         stock_code = pos.stock_code
@@ -80,13 +80,12 @@ class TradingStrategy:
         buy_price = getattr(pos, 'buy_price', current_price)
         if buy_price <= 0: buy_price = current_price
         
-        # 💡 [상태 추적기 고도화] 매수가가 변경되면(새로운 포지션) 진입 시간/위력 기록
         state = self._kinetic_state.get(stock_code, {})
         if state.get('buy_price') != buy_price:
             state = {
                 'buy_price': buy_price,
                 'max_price': buy_price,
-                'entry_impulse': forces.get('impulse', 0.0) # 진입 시점의 대포알 위력
+                'entry_impulse': forces.get('impulse', 0.0) # 진입 시점의 대포알 위력만 기록
             }
             self._kinetic_state[stock_code] = state
             
@@ -94,7 +93,6 @@ class TradingStrategy:
         thrust = forces.get('thrust', 0.0)
         magnetic = forces.get('magnetic', 0.0)
         jerk = forces.get('jerk', 0.0)
-        impulse = forces.get('impulse', 0.0)
 
         # 고점 가격 트래킹 업데이트
         if current_price > state['max_price']:
@@ -112,32 +110,44 @@ class TradingStrategy:
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 2. 🛡️ ATR 기반 이중 동적 방어망 & 🏃‍♂️ 조기 탈출 (Bail-out)
+        # 2. 🛡️ 변동성 기준을 '비대칭 하방 변동성(Down-ATR)'으로 전면 교체
         # -------------------------------------------------------------------
         current_atr = getattr(pos, 'atr_percent', 0.5)
+        current_down_atr = getattr(pos, 'down_atr_percent', 0.5)
         max_price = state.get('max_price', buy_price)
-        
+
         profit_rate = (current_price / buy_price - 1) * 100            
         max_profit_rate = (max_price / buy_price - 1) * 100            
-        drawdown_from_max = (current_price / max_price - 1) * 100      
-        
-        # 손실권인데 가속도가 급격히 마이너스로 처박히고 추진력이 꺼지면 즉시 컷오프!
-        if profit_rate <= 0.0 and jerk <= -0.5 and thrust < 1.0:
+        drawdown_from_max = (current_price / max_price - 1) * 100 
+
+        # -------------------------------------------------------------------
+        # 3. 🏃‍♂️ 조기 탈출 (Bail-out) - 시간(Time) 유예 완전 폐기
+        # -------------------------------------------------------------------
+        # [Rule A] 가속도가 극단적으로 꺾이면(-1.0), Thrust(가짜 체결강도) 무시하고 즉각 탈출 (Flash Crash)
+        if profit_rate <= -1.5 and jerk <= -1.0:
+            return f"Bail-out (Flash Crash Detected: {profit_rate:.2f}%)"
+            
+        # [Rule B] 일반적인 가속도 역분사 탈출
+        elif jerk <= -0.5 and thrust < 1.0:
             return f"Bail-out (Negative Jerk: {profit_rate:.2f}%)"
 
-        # 🚀 [이익 보존망 (Dynamic ATR Trailing Stop)]
-        if max_profit_rate >= (current_atr * 1.0):
+        # -------------------------------------------------------------------
+        # 4. 🚀 이익 보존망 (Dynamic Down-ATR Trailing Stop)
+        # -------------------------------------------------------------------
+        if max_profit_rate >= (current_atr * 1.5):
+            # 진입 시점의 대포알 여부(entry_impulse)로 방어막 두께 결정
+            is_smart_money = state.get('entry_impulse', 0.0) >= 3.0
+            multiplier = 3.0 if is_smart_money else 2.0
             
-            # 🔥 [Rule 3] 방어망 확장: "대포알(Impulse) 우대 정책"
-            # 진입 시 Impulse 3.0 이상의 진짜 돈이 들어온 종목은 흔들기를 견디기 위해 2.0배로 룸 확장!
-            multiplier = 2.0 if state['entry_impulse'] >= 3.0 else 1.5
-            trailing_limit = -(current_atr * multiplier)
+            trailing_limit = -(current_down_atr * multiplier)
             
             if drawdown_from_max <= trailing_limit:
                 return f"Trailing Stop (Peak: +{max_profit_rate:.2f}%, Drop: {drawdown_from_max:.2f}%)"
 
-        # 🛡️ [초기 생존망 (Initial ATR Stop Loss)]
-        stop_loss_limit = -(current_atr * 3.0)
+        # -------------------------------------------------------------------
+        # 5. 🛡️ 초기 생존망 (Initial Down-ATR Stop Loss)
+        # -------------------------------------------------------------------
+        stop_loss_limit = -(current_down_atr * 5.0)
         if profit_rate <= stop_loss_limit:
             return f"Stop Loss ({profit_rate:.2f}%)"
 
@@ -196,5 +206,6 @@ class TradingStrategy:
             "price": metrics.cur_prc,
             "stock_code": stock_code,
             "atr_percent": getattr(metrics, 'atr_percent', 0.5),
+            "down_atr_percent": getattr(metrics, 'down_atr_percent', 0.5),
             "forces": forces 
         }

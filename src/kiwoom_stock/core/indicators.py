@@ -219,18 +219,15 @@ def calculate_atr(highs: List[float], lows: List[float], closes: List[float], pe
         
     return round(atr, 2)
 
-def calculate_atr_percent(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+def calculate_atr_percent(highs: List[float], lows: List[float], closes: List[float], current_price: float, period: int = 14) -> float:
     """
     [ATR %] 주가 대비 변동성 비율 (Volatility Percentage)
+    :param current_price: 명시적 현재가
     :return: (ATR / 현재가) * 100
     """
-    if not closes:
-        return 0.5 # 기본값
-        
-    atr = calculate_atr(highs, lows, closes, period)
-    current_price = closes[-1]
-    
-    if current_price == 0:
+    if not closes or current_price == 0:
         return 0.0
         
+    atr = calculate_atr(highs, lows, closes, period)
+            
     return round((atr / current_price) * 100, 2)

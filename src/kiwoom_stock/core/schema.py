@@ -31,6 +31,7 @@ class SupplyData:
     trend_rsi: float = 50.0      # 추세 RSI
     vol_factor: float = 1.0      # 거래량 팩터
     atr_percent: float = 0.5     # 변동성 지표
+    down_atr_percent: float = 0.5 # 하방 변동성 지표
     
     # 이동평균선 (EMA)
     ema5: float = 0.0

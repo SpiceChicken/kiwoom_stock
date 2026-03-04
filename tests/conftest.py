@@ -100,7 +100,8 @@ def sample_position():
         buy_time="2026-02-08 10:00:00",
         buy_regime="STABLE_BULL",
         status="OPEN",
-        atr_percent=1.5
+        atr_percent=0.5,
+        down_atr_percent=0.5
     )
 
 @pytest.fixture

@@ -30,6 +30,7 @@ class Position:
     sell_reason: Optional[str] = None
     # DB에는 없지만, 프로그램 실행 중(Runtime)에만 사용하는 메모리 변수
     atr_percent: float = 0.5
+    down_atr_percent: float = 0.5
     
     @property
     def calc_profit_rate(self) -> float:
@@ -118,8 +119,9 @@ class StockManager:
 
         # [New] ATR 정보를 Position 객체에 임시 저장 (메모리 전용)
         # DB 스키마에 없어도 객체 속성으로는 동적 할당 가능
-        # verdict에 'atr_percent'가 없으면 기본값 1.5 사용
+        # verdict에 'atr_percent'가 없으면 기본값 0.5 사용
         pos.atr_percent = verdict['atr_percent']
+        pos.down_atr_percent = verdict['down_atr_percent']
         
         return pos
 
