@@ -112,7 +112,8 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         # 2. 🛡️ 변동성 기준을 '비대칭 하방 변동성(Down-ATR)'으로 전면 교체
         # -------------------------------------------------------------------
-        current_down_atr = getattr(pos, 'down_atr_percent', 0.5) 
+        current_atr = getattr(pos, 'atr_percent', 0.5)
+        current_down_atr = getattr(pos, 'down_atr_percent', 0.5)
         max_price = state.get('max_price', buy_price)
 
         profit_rate = (current_price / buy_price - 1) * 100            
@@ -133,10 +134,11 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         # 4. 🚀 이익 보존망 (Dynamic Down-ATR Trailing Stop)
         # -------------------------------------------------------------------
-        if max_profit_rate >= (current_down_atr * 1.0):
+        if max_profit_rate >= (current_atr * 1.5):
             # 진입 시점의 대포알 여부(entry_impulse)로 방어막 두께 결정
             is_smart_money = state.get('entry_impulse', 0.0) >= 3.0
-            multiplier = 2.0 if is_smart_money else 1.5
+            multiplier = 3.0 if is_smart_money else 2.0
+            
             trailing_limit = -(current_down_atr * multiplier)
             
             if drawdown_from_max <= trailing_limit:
@@ -145,7 +147,7 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         # 5. 🛡️ 초기 생존망 (Initial Down-ATR Stop Loss)
         # -------------------------------------------------------------------
-        stop_loss_limit = -(current_down_atr * 3.0)
+        stop_loss_limit = -(current_down_atr * 5.0)
         if profit_rate <= stop_loss_limit:
             return f"Stop Loss ({profit_rate:.2f}%)"
 
