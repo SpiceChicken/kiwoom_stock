@@ -171,7 +171,27 @@ class MarketAnalyzer:
 
     def _update_volatility_data(self, data: SupplyData, chart_5m: List[Dict]):
         if not chart_5m: return
+        
+        opens = [float(d['open_pric']) for d in chart_5m]
         highs = [float(d['high_pric']) for d in chart_5m]
         lows = [float(d['low_pric']) for d in chart_5m]
         closes = [float(d['cur_prc']) for d in chart_5m]
-        data.atr_percent = ind.calculate_atr_percent(highs, lows, closes, period=14)
+        
+        # 1. 일반 ATR (기존 로직 유지)
+        data.atr_percent = ind.calculate_atr_percent(
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            period=14,
+            current_price=data.cur_prc)
+        
+        # 2. Down-ATR (순수 하방 변동성) 
+        fake_closes = opens[1:] + [opens[-1]] 
+        
+        data.down_atr_percent = ind.calculate_atr_percent(
+            highs=opens, 
+            lows=lows, 
+            closes=fake_closes, 
+            period=14,
+            current_price=closes[-1]  
+        )
