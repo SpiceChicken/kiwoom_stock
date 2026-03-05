@@ -66,7 +66,7 @@ class TradingStrategy:
 
     def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
         """
-        [청산 판단] Down-ATR 기반 방어망 및 순수 물리(Zero-Time) Bail-out 적용
+        [청산 판단] V2.3 하이브리드 듀얼 방어망 & 순수 동역학 조기 탈출
         """
         now_time = datetime.now().time()
         stock_code = pos.stock_code
@@ -75,7 +75,7 @@ class TradingStrategy:
             return None
 
         # -------------------------------------------------------------------
-        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신
+        # 1. 상태 관리 제로화: 오직 진입가와 최고가만 추적 (과거 데이터 추적 삭제)
         # -------------------------------------------------------------------
         buy_price = getattr(pos, 'buy_price', current_price)
         if buy_price <= 0: buy_price = current_price
@@ -84,8 +84,8 @@ class TradingStrategy:
         if state.get('buy_price') != buy_price:
             state = {
                 'buy_price': buy_price,
-                'max_price': buy_price,
-                'entry_impulse': forces.get('impulse', 0.0) # 진입 시점의 대포알 위력만 기록
+                'max_price': buy_price
+                # 🗑️ entry_impulse 등 시간/과거 데이터 추적 변수 완전 삭제
             }
             self._kinetic_state[stock_code] = state
             
@@ -94,12 +94,12 @@ class TradingStrategy:
         magnetic = forces.get('magnetic', 0.0)
         jerk = forces.get('jerk', 0.0)
 
-        # 고점 가격 트래킹 업데이트
+        # 고점 갱신
         if current_price > state['max_price']:
             state['max_price'] = current_price
 
         # -------------------------------------------------------------------
-        # 1. 예외 룰 및 강제 청산 룰
+        # 예외 룰 및 강제 청산 (유지)
         # -------------------------------------------------------------------
         if now_time >= time(15, 20):
             if current_velocity >= 3.0 and thrust > 2.0 and magnetic > 0:
@@ -110,10 +110,11 @@ class TradingStrategy:
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 2. 🛡️ 변동성 기준을 '비대칭 하방 변동성(Down-ATR)'으로 전면 교체
+        # 2. 하이브리드 듀얼 방어망 지표 로드
         # -------------------------------------------------------------------
-        current_atr = getattr(pos, 'atr_percent', 0.5)
-        current_down_atr = getattr(pos, 'down_atr_percent', 0.5)
+        current_atr = getattr(pos, 'atr_percent', 0.5)            # 일반 ATR (위아래 넉넉한 룸 제공)
+        current_down_atr = getattr(pos, 'down_atr_percent', 0.5)  # Down-ATR (순수 하방 리스크)
+        current_up_atr = max(0.1, current_atr - current_down_atr)
         max_price = state.get('max_price', buy_price)
 
         profit_rate = (current_price / buy_price - 1) * 100            
@@ -121,33 +122,31 @@ class TradingStrategy:
         drawdown_from_max = (current_price / max_price - 1) * 100 
 
         # -------------------------------------------------------------------
-        # 3. 🏃‍♂️ 조기 탈출 (Bail-out) - 시간(Time) 유예 완전 폐기
+        # 3. 조기 탈출 (Bail-out) - 순수 동역학 규칙 (시간 유예 완전 삭제)
         # -------------------------------------------------------------------
-        # [Rule A] 가속도가 극단적으로 꺾이면(-1.0), Thrust(가짜 체결강도) 무시하고 즉각 탈출 (Flash Crash)
+        # [조건 A] Flash Crash (폭포수 붕괴 감지)
         if profit_rate <= -1.5 and jerk <= -1.0:
             return f"Bail-out (Flash Crash Detected: {profit_rate:.2f}%)"
             
-        # [Rule B] 일반적인 가속도 역분사 탈출
+        # [조건 B] Negative Jerk (일반 가속도 역분사 감지)
         elif jerk <= -0.5 and thrust < 1.0:
             return f"Bail-out (Negative Jerk: {profit_rate:.2f}%)"
 
         # -------------------------------------------------------------------
-        # 4. 🚀 이익 보존망 (Dynamic Down-ATR Trailing Stop)
+        # 4. [룰 1] 이익 보존망 (Trailing Stop) - 대시세 탑승용 (일반 ATR 적용)
         # -------------------------------------------------------------------
-        if max_profit_rate >= (current_atr * 1.5):
-            # 진입 시점의 대포알 여부(entry_impulse)로 방어막 두께 결정
-            is_smart_money = state.get('entry_impulse', 0.0) >= 3.0
-            multiplier = 3.0 if is_smart_money else 2.0
-            
-            trailing_limit = -(current_down_atr * multiplier)
+        # 승급/가중치 로직 전면 삭제. 상승폭이 포함된 일반 ATR의 1.5배 상수로 고정
+        if max_profit_rate >= (current_up_atr * 3.5):
+            trailing_limit = -(current_up_atr * 3.0) 
             
             if drawdown_from_max <= trailing_limit:
                 return f"Trailing Stop (Peak: +{max_profit_rate:.2f}%, Drop: {drawdown_from_max:.2f}%)"
 
         # -------------------------------------------------------------------
-        # 5. 🛡️ 초기 생존망 (Initial Down-ATR Stop Loss)
+        # 5. [룰 2] 초기 생존망 (Stop Loss) - 폭락 방어용 (Down-ATR 적용)
         # -------------------------------------------------------------------
-        stop_loss_limit = -(current_down_atr * 5.0)
+        # 하방 리스크만 담긴 얇은 방어막을 5.0배 스케일업하여 휩쏘 방지
+        stop_loss_limit = -(current_down_atr * 5.0) 
         if profit_rate <= stop_loss_limit:
             return f"Stop Loss ({profit_rate:.2f}%)"
 

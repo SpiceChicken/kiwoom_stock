@@ -41,20 +41,25 @@ def _calculate_thrust_force(execution_strength_pct: float, vol_ratio: float, int
     
     return base_thrust * vol_multiplier * mass_penalty
 
+import math
+
 def _calculate_gravity_force(current_price_krw: float, vwap_krw: float, atr_percent: float) -> float:
     """
-    [물리적 의도: Gravity] 
-    - atr_percent: 1.5 등 퍼센트 단위로 입력받음.
+    [물리적 의도: Absolute Gravity (이격도 기반 절대 중력)]
+    - 주가가 당일 평균가(VWAP)에서 멀어질수록 진입을 방해하는 하방 압력(저항)이 연속적으로 강해진다.
+    - 위로 멀어질 때: 고점 과열에 의한 중력 (Overheating)
+    - 아래로 멀어질 때: 하락 추세 관성에 의한 늪 저항 (Falling Knife / Dead-cat Bounce 필터링)
+    - 상수와 if-else 분기를 완벽히 제거한 순수 동역학 함수.
     """
     safe_vwap = max(vwap_krw, 1e-9)
-    # [수정] 백분율을 실제 비율로 변환 (1.5 -> 0.015)
     actual_atr_ratio = atr_percent / 100.0 
     safe_atr = max(actual_atr_ratio, 1e-5)
     
     sigma_price_krw = safe_vwap * safe_atr
     gap_krw = current_price_krw - safe_vwap
     
-    return min(0.0, -math.tanh(gap_krw / sigma_price_krw))
+    # [V2.3] 양방향 이격에 대해 동일한 형태의 Tanh 저항력(0.0 ~ -1.0)을 연속적으로 산출
+    return -math.tanh(abs(gap_krw) / sigma_price_krw)
 
 def _calculate_drag_force(previous_velocity: float, rsi: float, friction_coefficient: float = 0.1) -> float:
     """
