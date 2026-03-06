@@ -32,12 +32,18 @@ def main():
     # 💡 하드코딩 대신 DB에서 동적으로 타겟 딕셔너리 생성
     targets = db.get_today_traded_targets()
 
-    print(f"오늘 거래된 종목 개수: {len(targets)}개")
-    print(f"종목 타겟 목록: {targets}")
-    
     if not targets:
         print("오늘 거래된 종목이 없습니다. 스크립트를 종료합니다.")
         return
+
+    targets = {
+        (r['stock_code'], r['stock_name'])
+        for r in targets
+        if r['stock_code'] and r['stock_name']
+    }
+
+    print(f"오늘 거래된 종목 개수: {len(targets)}개")
+    print(f"종목 타겟 목록: {targets}")
 
     today_str = datetime.now().strftime("%Y%m%d")
     directory_path = os.path.join("etc", today_str)
@@ -46,7 +52,7 @@ def main():
     if not os.path.exists(directory_path):
         os.makedirs(directory_path)
     
-    for code, name in targets.items():
+    for code, name in targets:
         print(f"\n📥 [{name}({code})] 1분봉 데이터 수집 시작...")
         
         # 3. Collector를 통한 1분봉 API 호출 (tic="1")

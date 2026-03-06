@@ -215,7 +215,7 @@ class TradeLogger:
         
         # DISTINCT를 사용하여 동일한 종목이 여러 번 거래되었더라도 한 번만 가져옵니다.
         query = """
-            SELECT DISTINCT stock_code, stock_name 
+            SELECT DISTINCT *
             FROM trades 
             WHERE buy_time LIKE ? OR sell_time LIKE ?
         """
@@ -224,8 +224,7 @@ class TradeLogger:
             cursor = self.conn.execute(query, (f"{today_str}%", f"{today_str}%"))
             rows = cursor.fetchall()
             
-            # 검색된 row를 { stock_code: stock_name } 형태의 딕셔너리로 변환
-            return {row['stock_code']: row['stock_name'] for row in rows}
+            return rows
         except Exception as e:
             print(f"오늘 거래 종목 타겟 추출 실패: {e}")
             return {}
