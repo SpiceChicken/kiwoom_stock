@@ -6,24 +6,21 @@ import os
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
+from kiwoom_stock.core.database import TradeLogger
 
 def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
     if not os.path.exists(db_path):
         print(f"❌ 에러: {db_path} 파일을 찾을 수 없습니다.")
         return
 
-    conn = sqlite3.connect(db_path)
-    df = pd.read_sql_query("SELECT * FROM trades WHERE status = 'CLOSED'", conn)
-    conn.close()
-
     console = Console()
-    if df.empty:
-        console.print("[yellow]조회된 종료 거래 데이터가 없습니다.[/]")
-        return
+    db = TradeLogger()
 
-    # 구 DB 구조(S.V.T)인 경우 충돌 방지
-    if 'thrust' not in df.columns:
-        console.print("[red]❌ 구버전 스키마(S.V.T)가 감지되었습니다. 기존 trades.db를 삭제 후 새로 구동하십시오.[/]")
+    # 💡 하드코딩 대신 DB에서 동적으로 타겟 딕셔너리 생성
+    targets = db.get_today_traded_targets()
+
+    if not targets:
+        print("오늘 거래된 종목이 없습니다. 스크립트를 종료합니다.")
         return
 
     analysis_results = []
@@ -33,7 +30,7 @@ def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
     table.add_column("7대 물리 벡터 (Forces)", justify="center")
     table.add_column("타점 판정", justify="left")
 
-    for _, row in df.iterrows():
+    for row in targets:
         # 1. 7대 물리 벡터 모두 추출
         forces = {
             "Thrust": row['thrust'],
@@ -77,7 +74,7 @@ def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
         )
 
         # 5. CSV 저장용 데이터 구성 (pandas to_dict()가 이미 7개 컬럼을 모두 가져옵니다)
-        row_dict = row.to_dict()
+        row_dict = dict(row)
         row_dict['primary_driver'] = primary_driver
         row_dict['judgement'] = judgement
         analysis_results.append(row_dict)

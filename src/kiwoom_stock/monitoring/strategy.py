@@ -66,7 +66,7 @@ class TradingStrategy:
 
     def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
         """
-        [청산 판단] V2.3 하이브리드 듀얼 방어망 & 순수 동역학 조기 탈출
+        [청산 판단] V2.4 비대칭 스마트 통합 방어망 (시간 제약 완전 폐기, 순수 역학)
         """
         now_time = datetime.now().time()
         stock_code = pos.stock_code
@@ -75,17 +75,17 @@ class TradingStrategy:
             return None
 
         # -------------------------------------------------------------------
-        # 1. 상태 관리 제로화: 오직 진입가와 최고가만 추적 (과거 데이터 추적 삭제)
+        # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신
         # -------------------------------------------------------------------
         buy_price = getattr(pos, 'buy_price', current_price)
         if buy_price <= 0: buy_price = current_price
         
+        # 💡 상태 관리 극소화: 오직 buy_price와 max_price만 추적 (시간 변수 전면 삭제)
         state = self._kinetic_state.get(stock_code, {})
         if state.get('buy_price') != buy_price:
             state = {
                 'buy_price': buy_price,
                 'max_price': buy_price
-                # 🗑️ entry_impulse 등 시간/과거 데이터 추적 변수 완전 삭제
             }
             self._kinetic_state[stock_code] = state
             
@@ -94,12 +94,12 @@ class TradingStrategy:
         magnetic = forces.get('magnetic', 0.0)
         jerk = forces.get('jerk', 0.0)
 
-        # 고점 갱신
+        # 고점 가격 트래킹 업데이트
         if current_price > state['max_price']:
             state['max_price'] = current_price
 
         # -------------------------------------------------------------------
-        # 예외 룰 및 강제 청산 (유지)
+        # 1. 예외 룰 및 강제 청산 룰
         # -------------------------------------------------------------------
         if now_time >= time(15, 20):
             if current_velocity >= 3.0 and thrust > 2.0 and magnetic > 0:
@@ -110,45 +110,39 @@ class TradingStrategy:
             return "Day Trade Close"
 
         # -------------------------------------------------------------------
-        # 2. 하이브리드 듀얼 방어망 지표 로드
+        # 2. 비대칭 스마트 방어망 (Universal Shield) 변수 산출
         # -------------------------------------------------------------------
-        current_atr = getattr(pos, 'atr_percent', 0.5)            # 일반 ATR (위아래 넉넉한 룸 제공)
-        current_down_atr = getattr(pos, 'down_atr_percent', 0.5)  # Down-ATR (순수 하방 리스크)
-        current_up_atr = max(0.1, current_atr - current_down_atr)
+        current_atr = getattr(pos, 'atr_percent', 0.5)
+        current_down_atr = getattr(pos, 'down_atr_percent', 0.5)
         max_price = state.get('max_price', buy_price)
-
+        
         profit_rate = (current_price / buy_price - 1) * 100            
         max_profit_rate = (max_price / buy_price - 1) * 100            
-        drawdown_from_max = (current_price / max_price - 1) * 100 
+        drawdown_from_max = (current_price / max_price - 1) * 100      
+
+        # 💡 Up-ATR 단일 변수로 룸 산출
+        up_atr = max(0.1, current_atr - current_down_atr)
+        drop_limit = -(up_atr * 3.0)
 
         # -------------------------------------------------------------------
-        # 3. 조기 탈출 (Bail-out) - 순수 동역학 규칙 (시간 유예 완전 삭제)
+        # 3. 🏃‍♂️ 조기 탈출 (Bail-out) 순수 동역학 규칙
         # -------------------------------------------------------------------
-        # [조건 A] Flash Crash (폭포수 붕괴 감지)
+        # Flash Crash (폭포수 붕괴) 감지
         if profit_rate <= -1.5 and jerk <= -1.0:
             return f"Bail-out (Flash Crash Detected: {profit_rate:.2f}%)"
             
-        # [조건 B] Negative Jerk (일반 가속도 역분사 감지)
+        # Negative Jerk (일반 역분사) 감지
         elif jerk <= -0.5 and thrust < 1.0:
             return f"Bail-out (Negative Jerk: {profit_rate:.2f}%)"
 
         # -------------------------------------------------------------------
-        # 4. [룰 1] 이익 보존망 (Trailing Stop) - 대시세 탑승용 (일반 ATR 적용)
+        # 4. 🛡️ 초기 손절 및 이익 보존 대통합 (Universal Shield)
         # -------------------------------------------------------------------
-        # 승급/가중치 로직 전면 삭제. 상승폭이 포함된 일반 ATR의 1.5배 상수로 고정
-        if max_profit_rate >= (current_up_atr * 3.5):
-            trailing_limit = -(current_up_atr * 3.0) 
-            
-            if drawdown_from_max <= trailing_limit:
+        if drawdown_from_max <= drop_limit:
+            if current_price > buy_price:
                 return f"Trailing Stop (Peak: +{max_profit_rate:.2f}%, Drop: {drawdown_from_max:.2f}%)"
-
-        # -------------------------------------------------------------------
-        # 5. [룰 2] 초기 생존망 (Stop Loss) - 폭락 방어용 (Down-ATR 적용)
-        # -------------------------------------------------------------------
-        # 하방 리스크만 담긴 얇은 방어막을 5.0배 스케일업하여 휩쏘 방지
-        stop_loss_limit = -(current_down_atr * 5.0) 
-        if profit_rate <= stop_loss_limit:
-            return f"Stop Loss ({profit_rate:.2f}%)"
+            else:
+                return f"Stop Loss (Universal: {drawdown_from_max:.2f}%)"
 
         return None
 
@@ -165,6 +159,9 @@ class TradingStrategy:
         magnetic = forces.get('magnetic', 0.0)
         jerk = forces.get('jerk', 0.0)
         gravity = forces.get('gravity', 0.0)
+        
+        atr_percent = getattr(metrics, 'atr_percent', 0.5)
+        down_atr_percent = getattr(metrics, 'down_atr_percent', 0.5)
                 
         is_buy_signal = False
         status = "관망"
@@ -172,6 +169,8 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         # 🛡️ [Trap Shield] 진입 방어 규칙
         # -------------------------------------------------------------------
+        up_atr = max(0.1, atr_percent - down_atr_percent)
+        
         if thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
 
@@ -181,10 +180,17 @@ class TradingStrategy:
         elif thrust >= 1.0 and impulse < 1.0:
             status = "💨빈 껍데기 가속도 차단 (Fake Breakout)"
             
+        # 💡 고공 실속막 (Stall Shield) 강제 적용
+        elif gravity <= -0.9 and thrust < 1.0:
+            status = "🛬고공 실속(Stall) 차단"
+            
+        # 💡 추세의 질 (Trend Quality) 필터 추가
+        elif down_atr_percent > 0 and (up_atr / down_atr_percent) < 1.5:
+            status = "💨더러운 추세(Low Quality) 차단"
+            
         # -------------------------------------------------------------------
         # 🚀 순수 동역학 진입 로직
         # -------------------------------------------------------------------
-        # 💡 thrust > 0.5 이고 가속도(Jerk)가 위로 향할 것!
         elif thrust > 0.5 and jerk > 0.0:
             if current_velocity > 0.0:
                 is_buy_signal = True
@@ -204,7 +210,7 @@ class TradingStrategy:
             "is_buy_signal": is_buy_signal,
             "price": metrics.cur_prc,
             "stock_code": stock_code,
-            "atr_percent": getattr(metrics, 'atr_percent', 0.5),
-            "down_atr_percent": getattr(metrics, 'down_atr_percent', 0.5),
+            "atr_percent": atr_percent,
+            "down_atr_percent": down_atr_percent,
             "forces": forces 
         }
