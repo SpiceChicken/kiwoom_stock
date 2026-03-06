@@ -206,7 +206,7 @@ class TradeLogger:
             
         return None
 
-    def get_today_traded_targets(self) -> Dict[str, str]:
+    def get_today_traded_targets(self):
         """
         오늘 거래(매수/매도) 이력이 있는 종목들의 코드와 이름을 딕셔너리로 묶어서 반환합니다.
         반환 예시: {"042700": "한미반도체", "005490": "POSCO홀딩스"}
