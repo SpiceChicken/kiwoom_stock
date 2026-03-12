@@ -175,7 +175,7 @@ class Notifier:
                 ai_comment = f"AI 분석 중 오류 발생: {result.get('error')}"
 
         # 4. Slack Block Kit 조립 (이전과 동일)
-        blocks = [
+        blocks: List[Dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {
