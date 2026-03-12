@@ -5,9 +5,12 @@ import logging
 
 from kiwoom_stock.api.client import KiwoomClient
 from kiwoom_stock.monitoring.engine import TradingEngine
+from kiwoom_stock.monitoring.reporter import DailyReporter
 from kiwoom_stock.utils import setup_structured_logging
 
 from kiwoom_stock.core import config 
+
+from kiwoom_stock.monitoring.reporter import DailyReporter
 
 # 로거 설정
 logger = logging.getLogger(__name__)
@@ -45,6 +48,10 @@ def main():
 
         # 프로세스 실행
         monitor.run()
+
+        logger.info("🏁 엔진 구동 종료. 일일 자동 부검 파이프라인(Daily Post-Mortem)을 가동합니다.")
+        reporter = DailyReporter(monitor.notifier)
+        reporter.run_pipeline()
         
     except KeyboardInterrupt:
         print("\n👋 사용자에 의해 시스템이 종료되었습니다.")

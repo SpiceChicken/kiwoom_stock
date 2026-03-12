@@ -99,7 +99,8 @@ class TradingEngine:
                 self.notifier.notify_error(str(e))
                 time_mod.sleep(10)
         
-        sys.exit(0)
+        # 프로세스 종료
+        return
 
     def _get_due_targets(self) -> List[str]:
         """[Scheduler] 투트랙 인터벌 정책에 따라 현재 검사해야 할 종목 리스트 반환"""

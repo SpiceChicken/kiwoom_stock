@@ -1,18 +1,10 @@
-# [PATCH] tools/trade_validator.py (전체 덮어쓰기)
-
-import sqlite3
 import pandas as pd
-import os
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
 from kiwoom_stock.core.database import TradeLogger
 
-def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
-    if not os.path.exists(db_path):
-        print(f"❌ 에러: {db_path} 파일을 찾을 수 없습니다.")
-        return
-
+def analyze_trade_efficiency():
     console = Console()
     db = TradeLogger()
 
@@ -81,11 +73,13 @@ def analyze_trade_efficiency(db_path="trades.db", export_csv=True):
 
     console.print(table)
 
-    if export_csv:
+    if table:
         result_df = pd.DataFrame(analysis_results)
         filename = f"physics_trade_analysis_{datetime.now().strftime('%Y%m%d')}.csv"
         result_df.to_csv(filename, index=False, encoding='utf-8-sig')
         console.print(f"\n[bold green]✅ 물리 엔진 7대 벡터 분석 결과가 CSV로 전체 저장되었습니다: {filename}[/]")
+
+        return filename
 
 if __name__ == "__main__":
     analyze_trade_efficiency()
