@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 from kiwoom_stock.monitoring.manager import Position
+from kiwoom_stock.utils.gemini_client import GeminiClient
+from kiwoom_stock.core.prompts import SystemPrompts
 
 # [1] 일반 운영/에러 로그용
 logger = logging.getLogger(__name__)
@@ -16,6 +18,9 @@ class Notifier:
     def __init__(self, stock_names: Dict[str, str], config: Dict):
         self.stock_names = stock_names
         self.webhook_url = config.get("webhook_url")
+
+        gemini_api_key = config.get("gemini_api_key")
+        self.ai_client = GeminiClient(api_key=gemini_api_key, model="gemini-2.5-flash")
 
         # 50개 종목 데이터를 임시 저장할 버퍼
         self.status_data: List[Dict[str, Any]] = []
@@ -151,3 +156,65 @@ class Notifier:
         ]
         self._send_slack_blocks(blocks)
         logger.error(f"CRITICAL_ERROR: {message}")
+
+    def send_daily_post_mortem(self, stats: Dict[str, Any], csv_path: str = None):
+        """[V3.2] CSV 파일을 인자로 직접 전달받아 AI에게 멀티모달로 분석 요청"""
+        if not self.webhook_url: return
+        ai_comment = "AI 분석 환경이 준비되지 않았습니다."
+        
+        if self.ai_client.check_availability():
+            prompt = SystemPrompts.build_daily_post_mortem(stats)
+            
+            # 💡 파라미터로 받은 csv_path를 제미나이 멀티모달 메서드에 바로 꽂아넣음!
+            result = self.ai_client.generate_content(prompt, file_path=csv_path)
+            
+            if result.get('success'):
+                ai_comment = result.get('output')
+            else:
+                logger.error(f"AI 분석 중 오류 발생: {result.get('error')}")
+                ai_comment = f"AI 분석 중 오류 발생: {result.get('error')}"
+
+        # 4. Slack Block Kit 조립 (이전과 동일)
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text", 
+                    "text": "📈 일일 마감 부검 리포트"
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn", 
+                        "text": f"*📅 날짜:*\n{stats.get('date', 'N/A')}"
+                    },
+                    {
+                        "type": "mrkdwn", 
+                        "text": f"*✅ 승률:*\n{stats.get('win_rate', 'N/A')}"
+                    },
+                    {
+                        "type": "mrkdwn", 
+                        "text": f"*💰 총 수익률:*\n*{stats.get('total_pnl', '0.00%')}*"
+                    },
+                    {
+                        "type": "mrkdwn", 
+                        "text": f"*🛡️ 쉴드 방어 (수급 락 등):*\n{stats.get('defense_count', 0)}건 차단"
+                    }
+                ]
+            },
+            {
+                "type": "divider"
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn", 
+                    "text": f"*📝 아키텍트 AI 총평*\n{ai_comment}"
+                }
+            }
+        ]
+        
+        self._send_slack_blocks(blocks)
+        logger.info("일일 마감 부검 리포트 Slack 전송 완료.")

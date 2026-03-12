@@ -1,17 +1,13 @@
-import sys
 import os
 import pandas as pd
 from datetime import datetime
-
-# 프로젝트 루트 경로를 sys.path에 추가 (tools 폴더에서 실행 시 모듈 import 오류 방지)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kiwoom_stock.core import config 
 from kiwoom_stock.api.client import KiwoomClient 
 from kiwoom_stock.monitoring.collector import MarketDataCollector
 from kiwoom_stock.core.database import TradeLogger
 
-def main():
+def extract_and_save_1min_chart():
     # 1. API 클라이언트 초기화 및 인증
     print("🚀 키움 API 클라이언트 연결 중...")
     
@@ -51,6 +47,8 @@ def main():
     # 디렉토리 없으면 생성
     if not os.path.exists(directory_path):
         os.makedirs(directory_path)
+
+    saved_files = []  # <- 저장된 파일 경로를 모을 리스트
     
     for code, name in targets:
         print(f"\n📥 [{name}({code})] 1분봉 데이터 수집 시작...")
@@ -80,7 +78,10 @@ def main():
         
         # 한글 깨짐 방지를 위해 utf-8-sig 인코딩 사용
         df.to_csv(file_path, index=False, encoding='utf-8-sig')
+        saved_files.append(file_path)  # <- 추가
         print(f"✅ 저장 완료: {file_path} (총 {len(df)}개 분봉 데이터)")
+    
+    return saved_files
 
 if __name__ == "__main__":
-    main()
+    extract_and_save_1min_chart()
