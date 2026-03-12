@@ -157,7 +157,7 @@ class Notifier:
         self._send_slack_blocks(blocks)
         logger.error(f"CRITICAL_ERROR: {message}")
 
-    def send_daily_post_mortem(self, stats: Dict[str, Any], csv_path: str = None):
+    def send_daily_post_mortem(self, stats: Dict[str, Any], csv_path: Optional[str] = None):
         """[V3.2] CSV 파일을 인자로 직접 전달받아 AI에게 멀티모달로 분석 요청"""
         if not self.webhook_url: return
         ai_comment = "AI 분석 환경이 준비되지 않았습니다."
