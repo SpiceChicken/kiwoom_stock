@@ -10,7 +10,7 @@ def _load_config_files():
     """
     try:
         # 💡 [궁극의 경로 탐색] OS 폴더 경로가 아닌 '파이썬 모듈'로서 config 패키지를 스캔합니다.
-        config_pkg = pkg_resources.files("kiwoom_stock.config")
+        config_pkg = pkg_resources.files("config")
     except ModuleNotFoundError:
         logger.critical("[Config] 'kiwoom_stock.config' 패키지를 찾을 수 없습니다. 폴더 위치와 __init__.py를 확인하세요.")
         return

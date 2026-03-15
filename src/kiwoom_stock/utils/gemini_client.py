@@ -63,8 +63,8 @@ class GeminiClient:
             return {"success": False, "output": None, "error": "Gemini 엔진 미초기화"}
 
         try:
-            # 'kiwoom_stock.prompts' 패키지 안의 파일을 찾아 텍스트로 읽어옵니다.
-            prompts_pkg = pkg_resources.files("kiwoom_stock.prompts")
+            # 'prompt' 패키지 안의 파일을 찾아 텍스트로 읽어옵니다.
+            prompts_pkg = pkg_resources.files("prompt")
             
             system_prompt = prompts_pkg.joinpath("daily_postmortem_system.md").read_text(encoding='utf-8')
             user_prompt_template = prompts_pkg.joinpath("daily_postmortem_user.md").read_text(encoding='utf-8')
