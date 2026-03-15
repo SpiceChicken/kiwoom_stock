@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Optional
+import importlib.resources as pkg_resources
 
 try:
     import google.generativeai as genai
@@ -46,6 +47,46 @@ class GeminiClient:
             # 💡 텍스트만 있는 경우 (기존과 동일)
             else:
                 response = self.model.generate_content(prompt)
+                
+            return {
+                "success": True,
+                "output": response.text.strip(),
+                "error": None
+            }
+        except Exception as e:
+            logger.error(f"Gemini API 통신 오류: {e}")
+            return {"success": False, "output": None, "error": str(e)}
+
+    def generate_daily_report(self, stats: Dict, csv_path: Optional[str] = None) -> Dict:
+        """외부 MD 파일에서 프롬프트를 읽어와 리포트 생성."""
+        if not self.model:
+            return {"success": False, "output": None, "error": "Gemini 엔진 미초기화"}
+
+        try:
+            # 'kiwoom_stock.prompts' 패키지 안의 파일을 찾아 텍스트로 읽어옵니다.
+            prompts_pkg = pkg_resources.files("kiwoom_stock.prompts")
+            
+            system_prompt = prompts_pkg.joinpath("daily_postmortem_system.md").read_text(encoding='utf-8')
+            user_prompt_template = prompts_pkg.joinpath("daily_postmortem_user.md").read_text(encoding='utf-8')
+                
+            # 2. 통계 데이터 포맷팅
+            stats_str = (
+                f"- 날짜: {stats.get('date', 'N/A')}\n"
+                f"- 승률: {stats.get('win_rate', 'N/A')}\n"
+                f"- 총 수익률: {stats.get('total_pnl', '0.00%')}\n"
+                f"- 쉴드 방어 횟수: {stats.get('defense_count', 0)}건"
+            )
+            user_prompt = user_prompt_template.replace("{stats}", stats_str).replace("{logs}", "첨부된 CSV 파일 참조")
+            
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+            # 3. API 호출 (멀티모달)
+            if csv_path:
+                logger.info(f"📎 첨부파일 업로드 중: {csv_path}")
+                uploaded_file = genai.upload_file(path=csv_path, mime_type="text/csv")
+                response = self.model.generate_content([uploaded_file, full_prompt])
+            else:
+                response = self.model.generate_content(full_prompt)
                 
             return {
                 "success": True,
