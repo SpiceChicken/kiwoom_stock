@@ -174,43 +174,62 @@ class TradingStrategy:
         
         atr_percent = getattr(metrics, 'atr_percent', 0.5)
         down_atr_percent = getattr(metrics, 'down_atr_percent', 0.5)
-                
-        is_buy_signal = False
-        status = "관망"
-
-        # -------------------------------------------------------------------
-        # 🛡️ [Trap Shield] 진입 방어 규칙
-        # -------------------------------------------------------------------
         up_atr = max(0.1, atr_percent - down_atr_percent)
-        
-        if net_force < 0.0:
-            status = "🛑합력 역전(Net Force < 0) 차단"
-        elif thrust >= 1.5 and gravity <= -0.9:
+                
+        # 기본값 초기화
+        is_buy_signal = False
+        status = "대기"
+
+        # ===================================================================
+        # 🚀 순수 동역학 진입 통제 센터 (Kinematic Entry Control)
+        # ===================================================================
+
+        # [Stage 0] 절대 진입 금지 (Absolute Blacklist)
+        # ➔ 절대 살 수 없는 세력의 피날레 구간
+        if thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
-        elif thrust >= 1.5 and gravity == 0.0:
-            status = "⚓수면 아래 폭발 (Submarine Trap)"
-        elif thrust >= 1.0 and impulse < 1.0:
-            status = "💨빈 껍데기 가속도 차단 (Fake Breakout)"
-        elif gravity <= -0.9 and thrust < 1.0:
-            status = "🛬고공 실속(Stall) 차단"
-        elif down_atr_percent > 0 and (up_atr / down_atr_percent) < 1.5:
-            status = "💨더러운 추세(Low Quality) 차단"
+            is_buy_signal = False
+
+        # [Stage 1] 진성 돌파 하이패스 (Breakout Override)
+        # ➔ Climax가 아닌 일반적인 저항(Net Force < 0)을 자본으로 찢고 가는 주도주
+        elif impulse >= 3.0 and jerk >= 0.5 and thrust >= 1.0:
+            status = "🚀진성 돌파 (Breakout Override)"
+            is_buy_signal = True
+
+        # [Stage 2] 물리적 하드 록 (Hard Locks)
+        # ➔ 하이패스를 통과하지 못한 타점들에 대해 물리적 한계점 방어
         elif thrust < 0.8:
-            status = "🛑수급 빈곤(Thrust Low) 차단"
+            status = "🛑수급 빈곤 (Thrust Low)"
+            is_buy_signal = False
             
-        # -------------------------------------------------------------------
-        # 🚀 순수 동역학 진입 로직
-        # -------------------------------------------------------------------
-        # Thrust 락(0.8)을 통과한 종목 중 가속도가 위로 향할 때만 진입
+        elif net_force < 0.0:
+            status = "🛑합력 역전 (Net Force < 0)"
+            is_buy_signal = False
+            
+        elif gravity <= -0.9 and thrust < 1.0:
+            status = "🛬고공 실속 차단 (Stall Shield)"
+            is_buy_signal = False
+            
+        elif down_atr_percent > 0 and (up_atr / down_atr_percent) < 1.5:
+            status = "💨더러운 추세 (Low Quality)"
+            is_buy_signal = False
+
+        # [Stage 3] 정상 궤도 가동 (Standard Entry Triggers)
+        # ➔ 위의 락을 모두 무사히 통과한 종목 중, 가속 페달(Jerk)을 밟은 경우 탑승
         elif jerk > 0.0:
             if current_velocity > 0.0:
-                is_buy_signal = True
                 status = "🔥추세돌파 (Uptrend)"
-            elif impulse > 0.0 or magnetic > 0.0:
                 is_buy_signal = True
+            elif impulse > 0.0 or magnetic > 0.0:
                 status = "🚀바닥반등 (Reversal Boost)"
+                is_buy_signal = True
             else:
                 status = "👀예열중 (Warming Up)"
+                is_buy_signal = False
+                
+        else:
+            status = "📉가속도 감소 (Jerk <= 0)"
+            is_buy_signal = False
 
         return {
             "status": status,
