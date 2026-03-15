@@ -170,6 +170,7 @@ class TradingStrategy:
         magnetic = forces.get('magnetic', 0.0)
         jerk = forces.get('jerk', 0.0)
         gravity = forces.get('gravity', 0.0)
+        net_force = forces.get('net_force', 0.0)
         
         atr_percent = getattr(metrics, 'atr_percent', 0.5)
         down_atr_percent = getattr(metrics, 'down_atr_percent', 0.5)
@@ -182,7 +183,9 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         up_atr = max(0.1, atr_percent - down_atr_percent)
         
-        if thrust >= 1.5 and gravity <= -0.9:
+        if net_force < 0.0:
+            status = "🛑합력 역전(Net Force < 0) 차단"
+        elif thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
         elif thrust >= 1.5 and gravity == 0.0:
             status = "⚓수면 아래 폭발 (Submarine Trap)"

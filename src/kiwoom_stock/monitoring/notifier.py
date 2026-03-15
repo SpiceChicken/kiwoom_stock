@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Any
 
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.utils.gemini_client import GeminiClient
-from kiwoom_stock.core.prompts import SystemPrompts
 
 # [1] 일반 운영/에러 로그용
 logger = logging.getLogger(__name__)
@@ -158,15 +157,13 @@ class Notifier:
         logger.error(f"CRITICAL_ERROR: {message}")
 
     def send_daily_post_mortem(self, stats: Dict[str, Any], csv_path: Optional[str] = None):
-        """[V3.2] CSV 파일을 인자로 직접 전달받아 AI에게 멀티모달로 분석 요청"""
+        """외부 프롬프트를 활용한 멀티모달 분석 요청"""
         if not self.webhook_url: return
         ai_comment = "AI 분석 환경이 준비되지 않았습니다."
         
         if self.ai_client.check_availability():
-            prompt = SystemPrompts.build_daily_post_mortem(stats)
-            
-            # 💡 파라미터로 받은 csv_path를 제미나이 멀티모달 메서드에 바로 꽂아넣음!
-            result = self.ai_client.generate_content(prompt, file_path=csv_path)
+            # 💡 [V2.6] 팩토리 대신 클라이언트의 통합 메서드 호출
+            result = self.ai_client.generate_daily_report(stats=stats, csv_path=csv_path)
             
             if result.get('success'):
                 ai_comment = result.get('output')
