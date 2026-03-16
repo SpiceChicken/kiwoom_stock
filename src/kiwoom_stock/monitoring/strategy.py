@@ -68,6 +68,11 @@ class TradingStrategy:
         """
         [청산 판단] V2.5 비대칭 스마트 방어망 & Dual-Trigger Sniper (Zero-Time)
         """
+        if current_price <= 0.0:
+            # 주가가 0원이면 VI(단일가 매매) 발동 중이므로, 
+            # 어떠한 청산도 집행하지 않고 관성을 유지함 (손익 -100% 오작동 방지).
+            return None
+        
         now_time = datetime.now().time()
         stock_code = pos.stock_code
         
@@ -163,6 +168,18 @@ class TradingStrategy:
         
         stock_code = metrics.stock_code
         forces = getattr(metrics, 'forces', {})
+
+        if metrics.cur_prc <= 0.0:
+            return {
+                "status": "⏸️VI 발동 대기 (0원 호가 무시)",
+                "regime": getattr(self._current_regime, 'name', str(self._current_regime)),
+                "is_buy_signal": False,
+                "price": metrics.cur_prc,
+                "stock_code": stock_code,
+                "atr_percent": 0.0,
+                "down_atr_percent": 0.0,
+                "forces": forces 
+            }
         
         thrust = forces.get('thrust', 0.0)
         current_velocity = forces.get('current_velocity', 0.0)

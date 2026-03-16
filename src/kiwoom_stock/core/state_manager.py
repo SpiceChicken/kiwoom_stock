@@ -79,7 +79,10 @@ class PhysicalStateTracker:
 
         # 🟢 직전 가격(Previous Price) 로드 및 갱신
         previous_price = self._last_price.get(stock_code, current_price)
-        self._last_price[stock_code] = current_price
+        
+        # 0.0원(VI 발동)일 때는 캐시를 0으로 덮어쓰지 않음
+        if current_price > 0.0:
+            self._last_price[stock_code] = current_price
         
         if market_cap < 100_000_000_000:
             dynamic_cutoff = 10_000_000.0
