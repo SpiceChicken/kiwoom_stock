@@ -188,6 +188,7 @@ class TradingStrategy:
         jerk = forces.get('jerk', 0.0)
         gravity = forces.get('gravity', 0.0)
         net_force = forces.get('net_force', 0.0)
+        volume_drop_ratio = forces.get('volume_drop_ratio', 1.0)
         
         atr_percent = getattr(metrics, 'atr_percent', 0.5)
         down_atr_percent = getattr(metrics, 'down_atr_percent', 0.5)
@@ -214,7 +215,6 @@ class TradingStrategy:
             is_buy_signal = True
 
         # [Stage 2] 물리적 하드 록 (Hard Locks)
-        # ➔ 하이패스를 통과하지 못한 타점들에 대해 물리적 한계점 방어
         elif thrust < 0.8:
             status = "🛑수급 빈곤 (Thrust Low)"
             is_buy_signal = False
@@ -229,6 +229,10 @@ class TradingStrategy:
             
         elif down_atr_percent > 0 and (up_atr / down_atr_percent) < 1.5:
             status = "💨더러운 추세 (Low Quality)"
+            is_buy_signal = False
+
+        elif volume_drop_ratio < 0.5 and thrust < 1.5:
+            status = "💨연료 고갈 차단 (Volume Exhausted)"
             is_buy_signal = False
 
         # [Stage 3] 정상 궤도 가동 (Standard Entry Triggers)
