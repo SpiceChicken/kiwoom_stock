@@ -1,36 +1,36 @@
-# 🚀 Kiwoom All-Weather Intelligent Monitoring System (Pure Kinematics Edition v2.6.1)
+# 🚀 Kiwoom All-Weather Intelligent Monitoring System (Pure Kinematics Edition v2.6.4)
 
 본 프로젝트는 키움증권 REST API를 기반으로 주가의 움직임을 질량을 가진 물체의 운동($F=ma$)으로 치환하여 분석하는 **차세대 물리적 퀀트 트레이딩 시스템(Physics-based Quant System)**입니다.
 
-**🔥 Major Update v2.6.1: Kinematic Entry Control & Breakout Override**
+**🔥 Major Update v2.6.4: Zero-Price Shield & Fuel Exhaustion Shield**
 
-V2.6.1 업데이트는 파편화되어 있던 진입/방어 로직을 **'3단계 동역학 진입 통제 센터'**로 우아하게 재조립하고, 거대한 매물대를 막대한 자본으로 부수고 올라가는 주도주를 놓치지 않기 위한 **'진성 돌파(Breakout Override)'** 하이패스 로직을 완성한 최종 마일스톤입니다.
+V2.6.4 업데이트는 거래소의 VI(변동성 완화장치) 발동 시 발생하는 API 데이터 오염을 방어하고, 후행성 지표의 착시로 인한 휩쏘(Whipsaw) 장세의 뇌동매매를 '실시간 거래량 가속도'로 썰어버리는 무결점 방어 체계 완성 버전입니다.
 
 ---
 
 ## ⚡ 시스템 아키텍처 (System Architecture)
 
-### 1. 3단계 동역학 진입 통제 (3-Stage Kinematic Entry Control)
-복잡한 뇌동매매 방어 조건들을 물리적 인과관계에 따라 3단계로 완벽하게 재설계했습니다.
+### 1. 6단계 동역학 진입 통제 (6-Stage Kinematic Entry Control)
+시장 노이즈, 세력의 설거지, 그리고 API의 기만까지 완벽히 차단하는 다층 방어막입니다.
 
-* **[Stage 1] 진성 돌파 하이패스 (Breakout Override):** 고점 중력(Gravity)과 매물대 항력(Drag)에 의해 최종 합력(`Net Force`)이 마이너스로 역전된 악조건 속에서도, 막대한 자본(`Impulse >= 3.0`)과 가속도(`Jerk >= 0.5`), 그리고 충분한 수급(`Thrust >= 1.0`)이 동반되면 저항선을 뚫어낸 '진성 돌파'로 간주하여 최우선적으로 탑승합니다.
-* **[Stage 2] 물리적 5대 하드 록 (Hard Locks):**
-  하이패스를 통과하지 못한 일반 타점들에 대해 가장 엄격한 물리 법칙을 적용하여 뇌동매매를 차단합니다.
+* **[Stage -1] VI 오염 방어 (Zero-Price Shield):** VI 발동으로 인해 현재가(`cur_prc`)가 0원으로 송출될 경우, 엔진의 수학적 패닉(분모 0 또는 -100% 손절 오판)을 막고 즉시 평가를 보류합니다.
+* **[Stage 0] 절대 진입 금지 (Climax Shield):** 주가가 초고점(`Gravity <= -0.9`)인데 수급이 폭발(`Thrust >= 1.5`)하면, 세력의 피날레(설거지)로 간주하여 최우선으로 매수를 영구 차단합니다.
+* **[Stage 1] 진성 돌파 하이패스 (Breakout Override):** 합력(`Net Force`)이 마이너스로 역전된 악조건 속에서도, 막대한 자본(`Impulse >= 3.0`)과 가속도(`Jerk >= 0.5`)가 동반되면 저항선을 뚫어낸 '진성 돌파'로 간주하여 프리패스로 탑승합니다.
+* **[Stage 2] 물리적 하드 록 (Hard Locks):**
   * `수급 빈곤 (Thrust Low)`: 시장의 돈이 들어오지 않으면(`Thrust < 0.8`) 절대 사지 않습니다.
   * `합력 역전 (Net Force < 0)`: 맞바람에 밀려 추락하는 비행기(`Net Force < 0.0`)에는 타지 않습니다.
-  * `고점 과열 (Climax Shield)`: 초고점(`Gravity <= -0.9`)에서 수급이 과도하게 폭발(`Thrust >= 1.5`)하면 세력의 피날레(설거지)로 간주하여 차단합니다.
-  * `고공 실속 (Stall Shield)`: 초고점(`Gravity <= -0.9`)에서 수급이 마르면(`Thrust < 1.0`) 추락 직전으로 간주하여 차단합니다.
-  * `빈 껍데기 가속 (Fake Breakout)`: 수급(`Thrust >= 1.0`)은 좋아 보이나 실제 뭉칫돈(`Impulse < 1.0`)이 없으면 가짜 반등으로 간주하여 차단합니다.
-* **[Stage 3] 정상 궤도 가동 (Standard Entry):**
-  위의 깐깐한 5대 락(Lock)을 모두 무사히 통과한 종목 중, 엔진의 가속 페달(`Jerk > 0.0`)을 밟은 경우에만 최종적으로 매수를 집행합니다.
+  * `고공 실속 (Stall Shield)`: 초고점(`Gravity <= -0.9`)에서 수급이 마르면(`Thrust < 1.0`) 추락 직전으로 차단합니다.
+* **[Stage 2.5] 연료 고갈 방어막 (Fuel Exhaustion Shield):** 직전 1분 대비 현재 1분의 거래량이 반토막(`Ratio < 0.5`) 났다면, 가속도(`Jerk`) 지표가 아무리 높아도 과거 뭉칫돈에 의한 '후행 관성의 착시(휩쏘)'로 간주하여 탑승을 거부합니다.
+* **[Stage 3] 정상 궤도 가동 (Standard Entry):** 위의 무시무시한 5겹의 락을 모두 통과한 종목 중, 가속 페달(`Jerk > 0.0`)을 밟은 경우에만 최종적으로 매수를 집행합니다.
 
 ### 2. 동적 청산 및 이익 보존 전략 (Kinematic Exit & Retention)
+* **Zero-Price Panic Block:** 보유 종목이 VI에 걸려 0원 호가가 들어와도 시장가로 던지지 않고(Ghost Exit 차단) 침착하게 관성을 유지합니다.
 * **Universal Shield:** 단일 방어선(`-(Up-ATR * 3.0)`)으로 하락장에서는 바짝 당겨 목을 치고, 상승장에서는 넉넉히 룸을 주는 자가-수축형 1차 방어막입니다.
 * **Profit Lock-in (2.0% 이상):** 수익 2.0% 궤도에 오르면, 엔진 출력 상실 시 즉시 탈출하는 `이중 잠금 스나이퍼(Dual-Trigger)`와 번 돈의 절반(50%)을 무조건 지키는 `에너지 보존 비율`이 가동됩니다.
 
 ### 3. 상태 관리 제로화 & 자동 부검 파이프라인 (Auto Post-Mortem)
-* **L1 Cache:** 트레이딩 스레드는 시간/타이머에 의존하지 않고, 메모리의 $V_{t-1}$ 상태값만 참조하여 실시간 연산(Zero Latency)합니다.
-* **L3 Auto Post-Mortem:** 메인 엔진 무한 루프가 정상 종료(Graceful Shutdown)되면, 시스템이 자동으로 당일 매매의 1분봉 추출 ➔ 물리 역학 검증(`trade_validator`) ➔ 1분봉 궤적 요약 생성 ➔ Gemini LLM을 통한 아키텍트 총평 작성 ➔ Slack 알림으로 이어지는 단방향 자동 부검 파이프라인을 구동합니다.
+* **L1 Cache:** 트레이딩 스레드는 시간/타이머에 의존하지 않고, 메모리의 $V_{t-1}$ 상태값만 참조하여 실시간 연산(Zero Latency)합니다. 특히 V2.6.4부터는 **실시간 1분 누적 거래량 가속도**를 추적하여 연료 고갈을 판단합니다.
+* **L3 Auto Post-Mortem:** 메인 엔진 무한 루프가 정상 종료되면, 시스템이 자동으로 당일 매매의 1분봉 추출 ➔ 물리 역학 검증(`trade_validator`) ➔ Gemini LLM을 통한 아키텍트 총평 작성 ➔ Slack 알림으로 이어지는 단방향 자동 부검 파이프라인을 구동합니다.
 
 ---
 
@@ -66,12 +66,12 @@ Kiwoom-Stock/
 │   └── kiwoom_stock/
 │       ├── core/
 │       │   ├── physics_engine.py  # 6대 물리적 힘 및 Net Force 연산
-│       │   ├── state_manager.py   # 관성 상태 캐싱 (L1 Cache)
+│       │   ├── state_manager.py   # 관성 상태 캐싱 (1분봉 거래량 가속도 추적 추가)
 │       │   └── indicators.py      # Tri-ATR 수학적 파이프라인
 │       ├── monitoring/
-│       │   ├── strategy.py        # 3단계 진입 통제 (Breakout Override) & 이익 보존망
+│       │   ├── strategy.py        # 6단계 진입 통제 센터 & 이익 보존망
 │       │   ├── reporter.py        # 장 마감 자동 부검 컨트롤러
-│       │   ├── notifier.py        # Slack 알림 및 LLM 궤적 요약 주입
+│       │   ├── notifier.py        # Slack 알림
 │       │   └── manager.py         # 포지션 관리 및 비동기 처리
 │       └── utils/
 │           └── gemini_client.py   # LLM 연동 및 프롬프트 동적 매핑

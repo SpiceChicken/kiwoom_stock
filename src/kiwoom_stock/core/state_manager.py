@@ -16,7 +16,7 @@ class PhysicalStateTracker:
         self._strength_history: Dict[str, List[Tuple[datetime, float]]] = {}
         self._last_volume: Dict[str, float] = {} # 거래량 추적용 캐시
         self._last_price: Dict[str, float] = {} # 직전 가격 추적용 캐시
-        self._vol_history: Dict[str, List[Tuple[datetime, float]]] = {} # 💡 틱 거래량 타임스탬프 캐시
+        self._vol_history: Dict[str, List[float]] = {} # 💡 틱 거래량 타임스탬프 캐시
         self.db = db_logger
         
         # [방어 로직] 메인 스레드 블로킹을 막기 위한 전용 백그라운드 워커 1개 배정
