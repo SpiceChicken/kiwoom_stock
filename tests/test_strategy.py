@@ -25,7 +25,8 @@ class TestEntryLogic:
 
     def test_entry_breakout_override(self, strategy):
         """[Stage 1] 진성 돌파 하이패스 검증 (막대한 자본과 가속으로 저항 분쇄)"""
-        data = SupplyData(stock_code="005930")
+        # 💥 [데이터 교정] cur_prc=50000 주입하여 VI 방어막 통과
+        data = SupplyData(stock_code="005930", cur_prc=50000)
         # impulse >= 3.0, jerk >= 0.5, thrust >= 1.0 (하드락 무시 조건)
         data.forces = {"impulse": 3.5, "jerk": 0.6, "thrust": 1.2, "net_force": -0.5} 
         
@@ -54,7 +55,8 @@ class TestEntryLogic:
     ])
     def test_entry_hard_locks(self, strategy, forces, atr, down_atr, expected_keyword):
         """[Stage 0 & Stage 2] 절대 진입 금지 및 물리적 하드 록(Hard Locks) 방어막 검증"""
-        data = SupplyData(stock_code="005930")
+        # 💥 [데이터 교정] cur_prc=50000 주입하여 VI 방어막 통과
+        data = SupplyData(stock_code="005930", cur_prc=50000)
         data.forces = forces
         data.atr_percent = atr
         data.down_atr_percent = down_atr
@@ -66,7 +68,8 @@ class TestEntryLogic:
 
     def test_entry_standard_triggers(self, strategy):
         """[Stage 3] 정상 궤도 가동 검증 (추세돌파, 바닥반등, 예열중, 가속도 감소)"""
-        data = SupplyData(stock_code="005930")
+        # 💥 [데이터 교정] cur_prc=50000 주입하여 VI 방어막 통과
+        data = SupplyData(stock_code="005930", cur_prc=50000)
         # 기본 통과 조건: thrust=1.0, net_force=1.0, impulse=1.0, gravity=-0.5
         base_forces = {"thrust": 1.0, "net_force": 1.0, "impulse": 1.0, "gravity": -0.5}
         data.atr_percent = 2.0
@@ -94,63 +97,60 @@ class TestEntryLogic:
 
 
 class TestExitLogic:
-    """📌 2. 청산 로직 검증 (Bail-out, 고고도 잠금장치, 통합 쉴드)"""
+    """📌 2. 청산 로직 검증 (VI 방어망, Bail-out, 고고도 잠금장치, 통합 쉴드)"""
+
+    def test_exit_vi_defense(self, strategy):
+        """[Sign-off] Exit 방어 검증: 0원 틱 유입 시 Stop Loss(-100%) 로깅 없이 조용히 패스"""
+        pos = _setup_mock_position(atr=1.5, down_atr=1.0)
+        strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10000}
+        
+        forces = {"jerk": -2.0, "current_velocity": -5.0} # 물리 엔진 최악의 악조건 주입
+        
+        # 0원 틱 주입
+        reason = strategy.get_exit_reason(pos, current_price=0.0, forces=forces)
+        
+        # -100.0% 손절이나 에러가 뜨지 않고 완벽히 무시되어야 함
+        assert reason is None, "0원 틱 방어막이 뚫려 잘못된 청산 사유가 발생했습니다."
 
     def test_exit_panic_bailout(self, strategy):
-        """[조기 탈출] 폭포수 붕괴 및 일반 역분사 감지 검증"""
         pos = _setup_mock_position()
         
-        # 1. Flash Crash (profit_rate <= -1.5, jerk <= -1.0)
         forces_crash = {"jerk": -1.2, "thrust": 0.0}
-        reason_crash = strategy.get_exit_reason(pos, current_price=9800, forces=forces_crash) # -2.0% 구간
+        reason_crash = strategy.get_exit_reason(pos, current_price=9800, forces=forces_crash)
         assert reason_crash is not None and "Flash Crash Detected" in reason_crash
         
-        # 2. Negative Jerk (jerk <= -0.5, thrust < 1.0)
         forces_jerk = {"jerk": -0.6, "thrust": 0.9}
-        reason_jerk = strategy.get_exit_reason(pos, current_price=9900, forces=forces_jerk) # -1.0% 구간
+        reason_jerk = strategy.get_exit_reason(pos, current_price=9900, forces=forces_jerk)
         assert reason_jerk is not None and "Negative Jerk" in reason_jerk
 
     def test_exit_high_altitude_sniper(self, strategy):
-        """[고고도 룰 1] 이중 잠금 스나이퍼 (초고도 예민 반응) 검증"""
-        pos = _setup_mock_position(atr=1.0, down_atr=0.5) # Up-ATR = 0.5 -> 방어선 -0.5%
-        strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10250} # +2.5% 고점 갱신
+        pos = _setup_mock_position(atr=1.0, down_atr=0.5) 
+        strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10250} 
         
-        # Case 1: 휩쏘 (jerk < 0 이지만 하락폭 -0.29%로 방어선 이내 -> 홀드)
         forces = {"jerk": -0.1, "thrust": 1.0}
-        reason_hold = strategy.get_exit_reason(pos, current_price=10220, forces=forces) 
-        assert reason_hold is None
+        assert strategy.get_exit_reason(pos, current_price=10220, forces=forces) is None
         
-        # Case 2: 스나이퍼 타격 (음봉 & 방어선 이탈 -0.68% 하락 -> 익절)
         reason_exit = strategy.get_exit_reason(pos, current_price=10180, forces=forces) 
         assert reason_exit is not None and "Sniper Exit" in reason_exit
 
     def test_exit_high_altitude_energy_conservation(self, strategy):
-        """[고고도 룰 2] 에너지 보존 법칙 (수익 절반 방어) 검증"""
-        pos = _setup_mock_position(atr=1.5, down_atr=0.5) # Up-ATR = 1.0 -> 기본 방어선 -3.0%
-        strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10300} # +3.0% 수익 달성
+        pos = _setup_mock_position(atr=1.5, down_atr=0.5) 
+        strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10300} 
+        forces = {"jerk": 0.1, "thrust": 1.0} 
         
-        # 에너지 보존 룰 발동: max(-3.0%, -(3.0 * 0.5)%) = -1.5% 로 방어선이 타이트해짐
-        forces = {"jerk": 0.1, "thrust": 1.0} # 음봉 아님 (스나이퍼 회피)
+        assert strategy.get_exit_reason(pos, current_price=10150, forces=forces) is None
         
-        # 10300 -> 10150 (-1.45% 하락) -> 타이트해진 방어선(-1.5%) 이내이므로 버팀
-        reason_hold = strategy.get_exit_reason(pos, current_price=10150, forces=forces)
-        assert reason_hold is None
-        
-        # 10300 -> 10140 (-1.55% 하락) -> 타이트해진 방어선(-1.5%) 붕괴 -> 익절
         reason_exit = strategy.get_exit_reason(pos, current_price=10140, forces=forces)
         assert reason_exit is not None and "Profit Retention" in reason_exit
 
     def test_exit_universal_shield(self, strategy):
-        """[통합 쉴드] 초기 손절 및 일반 구간 이익 보존 검증"""
-        pos = _setup_mock_position(atr=1.5, down_atr=1.0) # Up-ATR = 0.5 -> 방어선 -1.5%
+        pos = _setup_mock_position(atr=1.5, down_atr=1.0) 
         forces = {"jerk": 0.0, "current_velocity": 1.0}
         
-        # 1. 초기 손절 (고점 갱신 없음)
         strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10000}
-        reason_sl = strategy.get_exit_reason(pos, current_price=9840, forces=forces) # -1.6%
+        reason_sl = strategy.get_exit_reason(pos, current_price=9840, forces=forces) 
         assert reason_sl is not None and "Stop Loss (Universal" in reason_sl
 
-        # 2. 일반 이익 보존 (고점 갱신 +1.8% -> 2.0% 미만이므로 고고도 룰 미발동)
         strategy._kinetic_state[pos.stock_code] = {"buy_price": 10000, "max_price": 10180}
-        reason_ts = strategy.get_exit_reason(pos, current_price=10020, forces=forces) # 고점 대비 -1.57%
+        reason_ts = strategy.get_exit_reason(pos, current_price=10020, forces=forces) 
         assert reason_ts is not None and "Trailing Stop (Peak:" in reason_ts
