@@ -71,3 +71,63 @@ def test_downtrend_impulse_block_integration():
     
     # 거래량이 100 늘어 컷오프를 뚫었음에도, 가격이 하락했으므로 Impulse는 철저히 0.0이어야 함
     assert res_down["forces"]["impulse"] == 0.0
+
+# =====================================================================
+# 🛡️ V2.6 추가 테스트 (메모리 누수 차단 및 연료 고갈 감지 로직)
+# =====================================================================
+
+def test_sliding_window_max_length():
+    """🔄 1. 120틱 슬라이딩 윈도우 한계 검증 (메모리 누수 차단)"""
+    mock_db = MagicMock()
+    tracker = PhysicalStateTracker(mock_db)
+    tracker._db_executor = MagicMock()
+    
+    stock_code = "000660"
+    total_vol = 0
+    
+    # 150번의 틱 데이터 강제 주입 (is_frozen을 피하기 위해 거래량 지속 증가)
+    for i in range(150):
+        total_vol += 10
+        tracker.process_tick(
+            stock_code=stock_code, strength=100.0, current_price=10000.0, 
+            vwap=10000.0, atr_percent=0.5, vol_ratio=1.0, rsi=50.0, 
+            tot_sel_req=1000, tot_buy_req=1000, total_volume=total_vol,
+            market_cap=50_000_000_000.0
+        )
+    
+    # 큐의 길이가 120을 절대 넘지 않는지(메모리 방어) 검증
+    assert len(tracker._vol_history[stock_code]) == 120
+
+def test_fuel_exhaustion_ratio_calculation():
+    """⛽ 2. volume_drop_ratio 연산 검증"""
+    mock_db = MagicMock()
+    tracker = PhysicalStateTracker(mock_db)
+    tracker._db_executor = MagicMock()
+    
+    stock_code = "000660"
+    total_vol = 0
+    
+    # 과거 1분(60틱): 틱당 100주씩 엄청난 거래량 발생 (총 6000주)
+    for _ in range(60):
+        total_vol += 100
+        tracker.process_tick(
+            stock_code=stock_code, strength=100.0, current_price=10000.0, 
+            vwap=10000.0, atr_percent=0.5, vol_ratio=1.0, rsi=50.0, 
+            tot_sel_req=1000, tot_buy_req=1000, total_volume=total_vol,
+            market_cap=50_000_000_000.0
+        )
+        
+    # 최근 1분(60틱): 틱당 30주로 거래량 급감 (총 1800주)
+    res = None
+    for _ in range(60):
+        total_vol += 30
+        res = tracker.process_tick(
+            stock_code=stock_code, strength=100.0, current_price=10000.0, 
+            vwap=10000.0, atr_percent=0.5, vol_ratio=1.0, rsi=50.0, 
+            tot_sel_req=1000, tot_buy_req=1000, total_volume=total_vol,
+            market_cap=50_000_000_000.0
+        )
+
+    # ratio = 1800 / 6000 = 0.3 이 나와야 정상
+    calculated_ratio = res["forces"].get("volume_drop_ratio", 0.0)
+    assert 0.29 < calculated_ratio < 0.31, f"비율 연산 오류: {calculated_ratio}"

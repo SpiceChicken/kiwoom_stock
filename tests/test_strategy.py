@@ -95,6 +95,44 @@ class TestEntryLogic:
         res_drop = strategy.evaluate(data)
         assert res_drop["is_buy_signal"] is False and "가속도 감소" in res_drop["status"]
 
+    def test_zero_price_shield(self, strategy):
+        """🛡️ 1. Zero-Price Shield 검증 (V2.6.3)"""
+        # cur_prc가 0.0인 VI 발동 상황 가정
+        data = SupplyData(stock_code="005930", cur_prc=0.0)  
+        data.forces = {'thrust': 2.0, 'jerk': 1.0} # 가속도가 엄청나도
+        
+        result = strategy.evaluate(data)
+        
+        assert result["is_buy_signal"] is False
+        assert "0원 호가 무시" in result["status"]
+
+    def test_net_force_lock(self, strategy):
+        """🛡️ 2. Net Force 역전 차단 검증 (V2.6.2)"""
+        data = SupplyData(stock_code="005930", cur_prc=50000.0)
+        # Thrust는 좋으나 중력/항력에 의해 Net Force가 마이너스인 비행기 딜레마 상황
+        data.forces = {'thrust': 1.5, 'net_force': -0.5, 'jerk': 0.1}
+        
+        result = strategy.evaluate(data)
+        
+        assert result["is_buy_signal"] is False
+        assert "합력 역전" in result["status"]
+
+    def test_fuel_exhaustion_shield(self, strategy):
+        """🛡️ 3. 연료 고갈 차단 검증 (V2.6.4)"""
+        data = SupplyData(stock_code="005930", cur_prc=50000.0)
+        
+        # 💥 [데이터 교정] 5순위 '더러운 추세' 방어막을 피하기 위해 건전한 ATR 체급 주입
+        data.atr_percent = 2.0
+        data.down_atr_percent = 0.5
+        
+        # 가속도는 붙어있으나 거래량이 직전 대비 30% 수준으로 반토막 난 상황
+        data.forces = {'thrust': 1.0, 'jerk': 0.5, 'volume_drop_ratio': 0.3}
+        
+        result = strategy.evaluate(data)
+        
+        assert result["is_buy_signal"] is False
+        assert "연료 고갈" in result["status"]
+
 
 class TestExitLogic:
     """📌 2. 청산 로직 검증 (VI 방어망, Bail-out, 고고도 잠금장치, 통합 쉴드)"""

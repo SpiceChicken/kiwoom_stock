@@ -14,8 +14,9 @@ class PhysicalStateTracker:
     def __init__(self, db_logger: TradeLogger):
         self._l1_cache: Dict[str, float] = {}
         self._strength_history: Dict[str, List[Tuple[datetime, float]]] = {}
-        self._last_volume: Dict[str, float] = {} # [추가] 거래량 추적용 캐시
-        self._last_price: Dict[str, float] = {} # [추가] 직전 가격 추적용 캐시
+        self._last_volume: Dict[str, float] = {} # 거래량 추적용 캐시
+        self._last_price: Dict[str, float] = {} # 직전 가격 추적용 캐시
+        self._vol_history: Dict[str, List[float]] = {} # 💡 틱 거래량 타임스탬프 캐시
         self.db = db_logger
         
         # [방어 로직] 메인 스레드 블로킹을 막기 위한 전용 백그라운드 워커 1개 배정
@@ -77,6 +78,27 @@ class PhysicalStateTracker:
             
         self._last_volume[stock_code] = total_volume
 
+        # 🟢 실시간 거래량 가속도 추적 (Fuel Exhaustion / Zero-Time Sliding Window)
+        vol_history = self._vol_history.setdefault(stock_code, [])
+        
+        # 틱 데이터가 들어올 때마다 시간 계산 없이 순수하게 리스트에 밀어 넣음
+        if not is_frozen and interval_volume > 0:
+            vol_history.append(interval_volume)
+            
+        # 💡 슬라이딩 윈도우 크기 고정 (최대 120틱 유지. 엔진 1초 1주기 기준 약 2분 분량)
+        if len(vol_history) > 120:
+            vol_history.pop(0)  # 제일 오래된 틱 데이터를 방출 (FIFO)
+            
+        # 최근 60틱(약 1분) vs 과거 60틱(약 1~2분 전)을 배열 슬라이싱으로 우아하게 분리
+        current_window = vol_history[-60:]
+        prev_window = vol_history[:-60]
+        
+        current_1m_vol = sum(current_window)
+        prev_1m_vol = sum(prev_window)
+        
+        # 거래량 급감 비율 계산 (이전 윈도우가 비어있으면 기본값 1.0 유지)
+        volume_drop_ratio = (current_1m_vol / prev_1m_vol) if prev_1m_vol > 0 else 1.0
+
         # 🟢 직전 가격(Previous Price) 로드 및 갱신
         previous_price = self._last_price.get(stock_code, current_price)
         
@@ -122,6 +144,9 @@ class PhysicalStateTracker:
             interval_amount_krw=interval_amount_krw,
             reference_mass=dynamic_cutoff  # 🟢 컷오프를 기준 질량으로 전달!
         )
+
+        # 산출된 거래량 비율을 엔진에 주입!
+        forces_dict["volume_drop_ratio"] = volume_drop_ratio
         
         current_velocity = forces_dict["current_velocity"]
         self._l1_cache[stock_code] = current_velocity
