@@ -15,10 +15,7 @@ requires-python = ">=3.9"
 dependencies = [
     "requests>=2.28.0",
     "pandas>=1.5.0",
-    "rich>=12.0.0",
-    # 윈도우 환경에서만 설치되도록 조건 부여 (Linux CI 에러 방지)
-    "pywin32>=305; sys_platform == 'win32'",
-    "PyQt5>=5.15.0; sys_platform == 'win32'"
+    "slack-sdk>=3.0.0"
 ]
 
 # 3. 개발/테스트용 의존성 (pip install .[dev] 로 설치 가능)

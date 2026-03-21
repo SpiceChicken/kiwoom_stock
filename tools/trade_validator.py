@@ -1,11 +1,8 @@
 import pandas as pd
 from datetime import datetime
-from rich.console import Console
-from rich.table import Table
 from kiwoom_stock.core.database import TradeLogger
 
 def analyze_trade_efficiency():
-    console = Console()
     db = TradeLogger()
 
     # 💡 하드코딩 대신 DB에서 동적으로 타겟 딕셔너리 생성
@@ -16,11 +13,6 @@ def analyze_trade_efficiency():
         return
 
     analysis_results = []
-    table = Table(title="[bold white]물리 엔진 동역학 타점 정밀 진단 (7대 벡터 모두 표시)[/]", show_lines=True)
-    table.add_column("종목 (레짐)", style="cyan")
-    table.add_column("수익률", justify="right")
-    table.add_column("7대 물리 벡터 (Forces)", justify="center")
-    table.add_column("타점 판정", justify="left")
 
     for row in targets:
         # 1. 7대 물리 벡터 모두 추출
@@ -48,38 +40,18 @@ def analyze_trade_efficiency():
         else:
             judgement = "➖ 보합(마찰 상쇄)"
 
-        # 4. 표 출력용 데이터 포매팅 (모든 값 표시, 가독성을 위해 줄바꿈 적용)
-        res_color = "red" if profit > 0 else "blue"
-        
-        # T:추세 / G:중력(저항) / D:마찰력 / M:호가흡입 / J:가속도 / I:순간충격
-        score_summary = (
-            f"[bold white]Net Force: {net_force:+.2f}[/]\n"
-            f"T:{forces['Thrust']:+.2f}  G:{forces['Gravity']:+.2f}  D:{forces['Drag']:+.2f}\n"
-            f"M:{forces['Magnetic']:+.2f}  J:{forces['Jerk']:+.2f}  I:{forces['Impulse']:+.2f}"
-        )
-        
-        table.add_row(
-            f"{row['stock_name']}\n({row['buy_regime']})",
-            f"[{res_color}]{profit:+.2f}%[/{res_color}]",
-            score_summary,
-            f"{judgement}\n(Main: {primary_driver})"
-        )
-
         # 5. CSV 저장용 데이터 구성 (pandas to_dict()가 이미 7개 컬럼을 모두 가져옵니다)
         row_dict = dict(row)
         row_dict['primary_driver'] = primary_driver
         row_dict['judgement'] = judgement
         analysis_results.append(row_dict)
 
-    console.print(table)
-
-    if table:
+    if analysis_results:
         result_df = pd.DataFrame(analysis_results)
         filename = f"physics_trade_analysis_{datetime.now().strftime('%Y%m%d')}.csv"
         result_df.to_csv(filename, index=False, encoding='utf-8-sig')
-        console.print(f"\n[bold green]✅ 물리 엔진 7대 벡터 분석 결과가 CSV로 전체 저장되었습니다: {filename}[/]")
 
-        return filename
+    return filename
 
 if __name__ == "__main__":
     analyze_trade_efficiency()

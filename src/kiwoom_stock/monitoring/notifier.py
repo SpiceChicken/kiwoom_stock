@@ -1,8 +1,13 @@
+import os
 import logging
 import requests
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+
+# Slack SDK Import 추가
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.utils.gemini_client import GeminiClient
@@ -12,6 +17,31 @@ logger = logging.getLogger(__name__)
 
 # [2] 상태 테이블 전용
 status_logger = logging.getLogger("status")
+
+class SlackUploader:
+    def __init__(self, token: str, channel_id: str):
+        self.client = WebClient(token=token)
+        self.channel_id = channel_id
+
+    def upload_csv(self, file_path: str, comment: str = "") -> bool:
+        if not os.path.exists(file_path):
+            logger.error(f"[Slack Upload] FileNotFound: {file_path}")
+            return False
+
+        file_name = os.path.basename(file_path)
+        try:
+            logger.info(f"[Slack Upload] {file_name} 업로드 시작...")
+            # 대용량 CSV를 위한 v2 업로드 메서드 사용
+            response = self.client.files_upload_v2(
+                channel=self.channel_id,
+                initial_comment=comment,
+                file=file_path,
+                title=file_name,
+            )
+            return response.get("ok", False)
+        except SlackApiError as e:
+            logger.error(f"[Slack Upload] API Error: {e.response['error']}")
+            return False
 
 class Notifier:
     def __init__(self, stock_names: Dict[str, str], config: Dict):
