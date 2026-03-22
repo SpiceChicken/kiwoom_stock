@@ -31,21 +31,18 @@ class DailyReporter:
         
         logger.info("🚀 [Telemetry] 일일 슬랙 텔레메트리 파이프라인 가동...")
         
-        # 1. 트레이드 분석 CSV 업로드
+        # 1. 트레이드 분석 CSV 단독 업로드
         if trade_csv_path and os.path.exists(trade_csv_path):
-            uploader.upload_csv(trade_csv_path, f"📊 *[{today_str}] 매매 분석 리포트*")
+            uploader.upload_csv(trade_csv_path, f"📊 *[{today_str}] V3.0 엔진 매매 분석 리포트*")
         else:
             logger.warning(f"트레이드 분석 파일을 찾을 수 없어 업로드를 생략합니다: {trade_csv_path}")
 
-        # 2. 1분봉 CSV 일괄 업로드 (💡 반환받은 리스트 기반 업로드)
+        # 2. 1분봉 CSV 일괄 업로드 (💡 하나의 메시지(스레드)로 통합)
         if minute_chart_list:
-            for file_path in minute_chart_list:
-                if os.path.exists(file_path):
-                    file_name = os.path.basename(file_path)
-                    # "종목명_005930_1min_20260316.csv" 포맷에서 종목 코드 추출
-                    stock_code = file_name.split("_")[1] if "_" in file_name else "UNKNOWN"
-                    
-                    uploader.upload_csv(file_path, f"📈 *[{today_str}] 종목: {stock_code} 1분봉 백업*")
+            uploader.upload_multiple_files(
+                file_paths=minute_chart_list, 
+                comment=f"📈 *[{today_str}] 1분봉 백업 데이터 일괄 업로드 ({len(minute_chart_list)}개 종목)*"
+            )
         else:
             logger.warning("업로드할 1분봉 차트 데이터(리스트)가 없습니다.")
 

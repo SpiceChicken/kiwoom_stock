@@ -63,14 +63,26 @@ def extract_and_save_1min_chart():
         # 4. DataFrame 변환
         df = pd.DataFrame(raw_data)
         
+        # 💡 [V3.1] 900틱 중 당일(Today) 데이터만 추출 (체결시간 기준 필터링)
+        # 키움증권 분봉 TR(opt10080)의 시간 컬럼('체결시간' 또는 'cntr_tm', 'dt' 등) 동적 탐색
+        time_col = next((col for col in ['체결시간', 'cntr_tm', 'dt', 'date'] if col in df.columns), None)
+        
+        if time_col:
+            # 문자열로 변환 후 오늘 날짜(YYYYMMDD)로 시작하는 row만 필터링
+            df = df[df[time_col].astype(str).str.startswith(today_str)]
+            print(f"   -> 당일({today_str}) 데이터 필터링 적용: {len(df)}개 분봉 추출됨")
+        else:
+            print(f"   -> ⚠️ 시간 컬럼을 찾을 수 없어 전체(900틱) 데이터를 유지합니다. (컬럼: {list(df.columns)})")
+            
+        # 필터링 후 오늘 거래 데이터가 없는 경우 스킵
+        if df.empty:
+            print(f"❌ [{name}] 당일 1분봉 거래 데이터가 없습니다.")
+            continue
+        
         # API 응답은 보통 최신순(과거로 갈수록 아래)이므로, 시계열 분석을 위해 오름차순(과거->최신)으로 뒤집기
         df = df.iloc[::-1].reset_index(drop=True)
         
-        # 보기 편하게 주요 컬럼명 매핑 (API 응답 필드명에 따라 실제 CSV 출력 시 확인 필요)
-        # 키움 API 응답 기준: cur_prc(현재가), high_pric(고가), low_pric(저가), trde_qty(거래량)
-        
         # 5. CSV 저장
-        today_str = datetime.now().strftime("%Y%m%d")
         filename = f"{name}_{code}_1min_{today_str}.csv"
                 
         # 안전하게 디렉토리 경로와 파일명을 결합

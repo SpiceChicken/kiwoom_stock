@@ -42,6 +42,50 @@ class SlackUploader:
         except SlackApiError as e:
             logger.error(f"[Slack Upload] API Error: {e.response['error']}")
             return False
+    
+    def upload_multiple_files(self, file_paths: List[str], comment: str = "") -> bool:
+        """여러 개의 CSV 파일을 하나의 슬랙 메시지로 묶어서(최대 10개씩) 일괄 업로드합니다."""
+        if not file_paths:
+            return False
+
+        # 1. 존재하는 파일만 필터링하고 슬랙 API가 요구하는 딕셔너리 형태로 변환
+        valid_uploads = []
+        for path in file_paths:
+            if os.path.exists(path):
+                valid_uploads.append({
+                    "file": path,
+                    "title": os.path.basename(path)
+                })
+        
+        if not valid_uploads:
+            logger.error("[Slack Upload] 유효한 업로드 대상 파일이 없습니다.")
+            return False
+
+        # 2. Slack API 한계(메시지 당 최대 10개 파일) 방어 로직 (Chunking)
+        chunk_size = 10
+        success = True
+        
+        for i in range(0, len(valid_uploads), chunk_size):
+            chunk = valid_uploads[i:i + chunk_size]
+            try:
+                logger.info(f"[Slack Upload] {len(chunk)}개의 파일 묶음 업로드 중... ({i+1}~{min(i+chunk_size, len(valid_uploads))})")
+                
+                # 첫 묶음에만 코멘트를 달고, 나머지는 (계속...) 표시
+                msg = comment if i == 0 else f"{comment} (이어서 계속...)"
+                
+                response = self.client.files_upload_v2(
+                    channel=self.channel_id,
+                    initial_comment=msg,
+                    file_uploads=chunk  # 💡 다중 파일 업로드 핵심 파라미터
+                )
+                if not response.get("ok", False):
+                    success = False
+                    
+            except SlackApiError as e:
+                logger.error(f"[Slack Upload] 다중 업로드 API Error: {e.response['error']}")
+                success = False
+                
+        return success
 
 class Notifier:
     def __init__(self, stock_names: Dict[str, str], config: Dict):
