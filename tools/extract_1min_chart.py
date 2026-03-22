@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import logging
 from datetime import datetime
+from typing import Optional
 
 from kiwoom_stock.core import config 
 from kiwoom_stock.api.client import KiwoomClient 
@@ -11,7 +12,7 @@ from kiwoom_stock.core.database import TradeLogger
 # 💡 [V3.1] 로거 초기화
 logger = logging.getLogger(__name__)
 
-def extract_and_save_1min_chart(target_date_str: str = None):
+def extract_and_save_1min_chart(target_date_str: Optional[str] = None):
     # 인자가 없으면 오늘 날짜('%Y-%m-%d') 사용
     if target_date_str is None:
         target_date_str = datetime.now().strftime('%Y-%m-%d')

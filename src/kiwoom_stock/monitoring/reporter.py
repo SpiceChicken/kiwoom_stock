@@ -2,7 +2,7 @@ import os
 import logging
 import pandas as pd
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from kiwoom_stock.core import config
 from kiwoom_stock.monitoring.notifier import Notifier, SlackUploader
@@ -46,7 +46,7 @@ class DailyReporter:
         else:
             logger.warning("업로드할 1분봉 차트 데이터(리스트)가 없습니다.")
 
-    def run_pipeline(self, target_date_str: str = None):
+    def run_pipeline(self, target_date_str: Optional[str] = None):
         if target_date_str is None:
             target_date_str = datetime.now().strftime('%Y-%m-%d')
         

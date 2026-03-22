@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import logging
 from datetime import datetime
+from typing import Optional
 
 from kiwoom_stock.core import config
 from kiwoom_stock.core.database import TradeLogger
@@ -9,7 +10,7 @@ from kiwoom_stock.core.database import TradeLogger
 # 💡 [V3.1] 로거 초기화
 logger = logging.getLogger(__name__)
 
-def analyze_trade_efficiency(target_date_str: str = None):
+def analyze_trade_efficiency(target_date_str: Optional[str] = None):
     if target_date_str is None:
         target_date_str = datetime.now().strftime('%Y-%m-%d')
     

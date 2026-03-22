@@ -206,7 +206,7 @@ class TradeLogger:
             
         return None
 
-    def get_today_traded_targets(self, target_date_str: str = None):
+    def get_today_traded_targets(self, target_date_str: Optional[str] = None):
         """
         특정 일자(매수/매도) 이력이 있는 종목들의 코드와 이름을 딕셔너리로 묶어서 반환합니다.
         :param target_date_str: '%Y-%m-%d' 양식의 날짜 문자열. 미입력 시 오늘 날짜 사용.
