@@ -55,24 +55,26 @@ def extract_and_save_1min_chart(target_date_str: Optional[str] = None):
             logger.error(f"❌ [{name}] 데이터를 불러오지 못했습니다. API 호출 한도나 장 마감 여부를 확인하세요.")
             continue
             
-        df: pd.DataFrame = pd.DataFrame(raw_data)
+        raw_df = pd.DataFrame(raw_data)
         
-        time_col = next((col for col in ['체결시간', 'cntr_tm', 'dt', 'date'] if col in df.columns), None)
+        time_col = next((col for col in ['체결시간', 'cntr_tm', 'dt', 'date'] if col in raw_df.columns), None)
         if time_col:
-            df = df[df[time_col].astype(str).str.startswith(target_date_str.replace('-', ''))]
-            logger.info(f"   -> {target_date_str} 데이터 필터링 적용: {len(df)}개 분봉 추출됨")
+            filtered_df = raw_df[raw_df[time_col].astype(str).str.startswith(target_date_str.replace('-', ''))]
+            logger.info(f"   -> {target_date_str} 데이터 필터링 적용: {len(filtered_df)}개 분봉 추출됨")
+        else:
+            filtered_df = raw_df
         
-        if df.empty:
+        if filtered_df.empty:
             # 데이터가 비어있으므로 warning 처리
             logger.warning(f"❌ [{name}] 당일 1분봉 거래 데이터가 없습니다.")
             continue
         
-        df = df.iloc[::-1].reset_index(drop=True)
+        final_df = filtered_df.iloc[::-1].reset_index(drop=True)
         
         filename = f"{name}_{code}_1min_{target_date_str}.csv"
         file_path = os.path.join(directory_path, filename) 
         
-        df.to_csv(file_path, index=False, encoding='utf-8-sig')
+        final_df.to_csv(file_path, index=False, encoding='utf-8-sig')
         saved_files.append(file_path) 
         logger.info(f"✅ 저장 완료: {file_path}")
     
