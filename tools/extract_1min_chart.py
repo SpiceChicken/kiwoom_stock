@@ -55,7 +55,7 @@ def extract_and_save_1min_chart(target_date_str: Optional[str] = None):
             logger.error(f"❌ [{name}] 데이터를 불러오지 못했습니다. API 호출 한도나 장 마감 여부를 확인하세요.")
             continue
             
-        df = pd.DataFrame(raw_data)
+        df: pd.DataFrame = pd.DataFrame(raw_data)
         
         time_col = next((col for col in ['체결시간', 'cntr_tm', 'dt', 'date'] if col in df.columns), None)
         if time_col:

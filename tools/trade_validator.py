@@ -34,7 +34,7 @@ def analyze_trade_efficiency(target_date_str: Optional[str] = None):
         net_force = row['net_force']
         
         positive_forces = {k: v for k, v in forces.items() if v > 0}
-        primary_driver = max(positive_forces, key=positive_forces.get) if positive_forces else "None"
+        primary_driver = max(positive_forces, key=lambda k: positive_forces[k]) if positive_forces else "None"
         profit = row['profit_rate']
         
         if profit > 2.0:
