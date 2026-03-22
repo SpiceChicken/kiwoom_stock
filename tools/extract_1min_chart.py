@@ -60,9 +60,14 @@ def extract_and_save_1min_chart(target_date_str: Optional[str] = None):
         time_col = next((col for col in ['체결시간', 'cntr_tm', 'dt', 'date'] if col in raw_df.columns), None)
 
         filtered_df: pd.DataFrame
-        
+
         if time_col:
-            filtered_df = raw_df[raw_df[time_col].astype(str).str.startswith(target_date_str.replace('-', ''))]
+            time_series = raw_df[time_col].astype(str)  # type: ignore
+            mask = time_series.str.startswith(target_date_str.replace('-', ''))  # type: ignore
+            
+            # .copy()를 통해 명확한 독립 DataFrame임을 명시
+            filtered_df = raw_df.loc[mask].copy()  # type: ignore
+            
             logger.info(f"   -> {target_date_str} 데이터 필터링 적용: {len(filtered_df)}개 분봉 추출됨")
         else:
             filtered_df = raw_df
