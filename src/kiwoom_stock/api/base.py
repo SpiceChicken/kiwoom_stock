@@ -1,7 +1,10 @@
 import requests
 import json
 import time
+import logging
 from .exceptions import KiwoomAPIError, KiwoomAPIResponseError
+
+logger = logging.getLogger(__name__)
 
 class BaseClient:
     def __init__(self, authenticator, base_url):
