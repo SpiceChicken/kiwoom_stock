@@ -36,6 +36,7 @@ prompt/
 *.db
 logs/
 etc/
+output/
 
 # IDEs
 .vscode/
