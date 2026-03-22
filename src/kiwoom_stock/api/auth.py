@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta
 import requests
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Authenticator:
     def __init__(self, appkey, secretkey, base_url):
@@ -35,8 +38,8 @@ class Authenticator:
             
             # 4. 상태 코드 확인 (JSON 파싱 전 필수)
             if resp.status_code != 200:
-                print(f"인증 요청 실패: 상태 코드 {resp.status_code}")
-                print(f"서버 응답 내용: {resp.text}") # 여기서 실제 에러 원인 확인 가능
+                logger.info(f"인증 요청 실패: 상태 코드 {resp.status_code}")
+                logger.info(f"서버 응답 내용: {resp.text}") # 여기서 실제 에러 원인 확인 가능
                 return None
             
             data = resp.json()
@@ -49,5 +52,5 @@ class Authenticator:
             return self._token
             
         except Exception as e:
-            print(f"토큰 발급 중 예외 발생: {e}")
+            logger.info(f"토큰 발급 중 예외 발생: {e}")
             return None

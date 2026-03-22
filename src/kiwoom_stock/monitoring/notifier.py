@@ -1,8 +1,13 @@
+import os
 import logging
 import requests
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+
+# Slack SDK Import 추가
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.utils.gemini_client import GeminiClient
@@ -12,6 +17,75 @@ logger = logging.getLogger(__name__)
 
 # [2] 상태 테이블 전용
 status_logger = logging.getLogger("status")
+
+class SlackUploader:
+    def __init__(self, token: str, channel_id: str):
+        self.client = WebClient(token=token)
+        self.channel_id = channel_id
+
+    def upload_csv(self, file_path: str, comment: str = "") -> bool:
+        if not os.path.exists(file_path):
+            logger.error(f"[Slack Upload] FileNotFound: {file_path}")
+            return False
+
+        file_name = os.path.basename(file_path)
+        try:
+            logger.info(f"[Slack Upload] {file_name} 업로드 시작...")
+            # 대용량 CSV를 위한 v2 업로드 메서드 사용
+            response = self.client.files_upload_v2(
+                channel=self.channel_id,
+                initial_comment=comment,
+                file=file_path,
+                title=file_name,
+            )
+            return response.get("ok", False)
+        except SlackApiError as e:
+            logger.error(f"[Slack Upload] API Error: {e.response['error']}")
+            return False
+    
+    def upload_multiple_files(self, file_paths: List[str], comment: str = "") -> bool:
+        """여러 개의 CSV 파일을 하나의 슬랙 메시지로 묶어서(최대 10개씩) 일괄 업로드합니다."""
+        if not file_paths:
+            return False
+
+        # 1. 존재하는 파일만 필터링하고 슬랙 API가 요구하는 딕셔너리 형태로 변환
+        valid_uploads = []
+        for path in file_paths:
+            if os.path.exists(path):
+                valid_uploads.append({
+                    "file": path,
+                    "title": os.path.basename(path)
+                })
+        
+        if not valid_uploads:
+            logger.error("[Slack Upload] 유효한 업로드 대상 파일이 없습니다.")
+            return False
+
+        # 2. Slack API 한계(메시지 당 최대 10개 파일) 방어 로직 (Chunking)
+        chunk_size = 10
+        success = True
+        
+        for i in range(0, len(valid_uploads), chunk_size):
+            chunk = valid_uploads[i:i + chunk_size]
+            try:
+                logger.info(f"[Slack Upload] {len(chunk)}개의 파일 묶음 업로드 중... ({i+1}~{min(i+chunk_size, len(valid_uploads))})")
+                
+                # 첫 묶음에만 코멘트를 달고, 나머지는 (계속...) 표시
+                msg = comment if i == 0 else f"{comment} (이어서 계속...)"
+                
+                response = self.client.files_upload_v2(
+                    channel=self.channel_id,
+                    initial_comment=msg,
+                    file_uploads=chunk  # 💡 다중 파일 업로드 핵심 파라미터
+                )
+                if not response.get("ok", False):
+                    success = False
+                    
+            except SlackApiError as e:
+                logger.error(f"[Slack Upload] 다중 업로드 API Error: {e.response['error']}")
+                success = False
+                
+        return success
 
 class Notifier:
     def __init__(self, stock_names: Dict[str, str], config: Dict):
@@ -24,7 +98,7 @@ class Notifier:
         # 50개 종목 데이터를 임시 저장할 버퍼
         self.status_data: List[Dict[str, Any]] = []
 
-    def _send_slack(self, text: str):
+    def send_slack(self, text: str):
         """Slack Webhook을 통해 메시지를 전송합니다."""
         if not self.webhook_url:
             return
@@ -37,7 +111,7 @@ class Notifier:
             logger.error(f"Slack 전송 실패: {e}")
 
     # [수정] 인자 타입을 List[Dict[str, Any]]로 명확히 정의
-    def _send_slack_blocks(self, blocks: List[Dict[str, Any]]):
+    def send_slack_blocks(self, blocks: List[Dict[str, Any]]):
         """Slack Block Kit 메시지 전송 헬퍼"""
         if not self.webhook_url:
             return
@@ -95,7 +169,7 @@ class Notifier:
             },
             {"type": "divider"}
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
 
         log_line = f"BUY_SIGNAL:{buy_data['stock_name']},Price:{buy_data['buy_price']}"
         logger.info(log_line)
@@ -117,6 +191,7 @@ class Notifier:
             {
                 "type": "section",
                 "fields": [
+                    {"type": "mrkdwn", "text": f"*매도가:*\n{pos.sell_price:,}원"},
                     {"type": "mrkdwn", "text": f"*수익률:*\n{profit:+.2f}%"},
                     {"type": "mrkdwn", "text": f"*매도 사유:*\n{pos.sell_reason}"},
                     {"type": "mrkdwn", "text": f"*시간:*\n{datetime.now().strftime('%H:%M:%S')}"}
@@ -124,7 +199,7 @@ class Notifier:
             },
             {"type": "divider"}
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
 
         log_line = f"SELL_SIGNAL:{pos.stock_name},Profit:{profit:+.2f}%,Reason:{pos.sell_reason}"
         logger.info(log_line)
@@ -141,7 +216,7 @@ class Notifier:
                 }
             }
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
         logger.error(f"SLACK_ERROR_NOTIFIED: {message}")
 
     def notify_critical(self, message: str):
@@ -153,7 +228,7 @@ class Notifier:
                 "text": {"type": "mrkdwn", "text": f"🚨 *[SYSTEM STOP]*\n*사유:* {message}"}
             }
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
         logger.error(f"CRITICAL_ERROR: {message}")
 
     def send_daily_post_mortem(self, stats: Dict[str, Any], csv_path: Optional[str] = None):
@@ -213,5 +288,5 @@ class Notifier:
             }
         ]
         
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
         logger.info("일일 마감 부검 리포트 Slack 전송 완료.")
