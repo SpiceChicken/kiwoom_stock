@@ -1,8 +1,18 @@
+import os
 import json
 import logging
+from datetime import datetime
 import importlib.resources as pkg_resources
 
 logger = logging.getLogger(__name__)
+
+BASE_DIR = os.getenv("KIWOOM_OUTPUT_DIR", os.getcwd())
+
+# 오늘 날짜 폴더(예: output/20260322) 지정 및 자동 생성
+today_str = datetime.now().strftime("%Y%m%d")
+OUTPUT_DIR_STR = os.path.join(BASE_DIR, "output", today_str)
+
+os.makedirs(OUTPUT_DIR_STR, exist_ok=True)
 
 def _load_config_files():
     """

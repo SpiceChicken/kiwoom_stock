@@ -183,7 +183,7 @@ class TradeLogger:
             return result['total_pnl'] if result['total_pnl'] is not None else 0.0
         except Exception as e:
             # 로깅 시스템이 설정되어 있다면 활용 (예: logger.error)
-            print(f"오늘 수익률 조회 실패: {e}")
+            logger.info(f"오늘 수익률 조회 실패: {e}")
             return 0.0
 
     def get_last_sell_time(self, stock_code: str) -> Optional[datetime]:
@@ -206,12 +206,13 @@ class TradeLogger:
             
         return None
 
-    def get_today_traded_targets(self):
+    def get_today_traded_targets(self, target_date_str: str = None):
         """
-        오늘 거래(매수/매도) 이력이 있는 종목들의 코드와 이름을 딕셔너리로 묶어서 반환합니다.
-        반환 예시: {"042700": "한미반도체", "005490": "POSCO홀딩스"}
+        특정 일자(매수/매도) 이력이 있는 종목들의 코드와 이름을 딕셔너리로 묶어서 반환합니다.
+        :param target_date_str: '%Y-%m-%d' 양식의 날짜 문자열. 미입력 시 오늘 날짜 사용.
         """
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        if target_date_str is None:
+            target_date_str = datetime.now().strftime('%Y-%m-%d')
         
         # DISTINCT를 사용하여 동일한 종목이 여러 번 거래되었더라도 한 번만 가져옵니다.
         query = """
@@ -221,10 +222,10 @@ class TradeLogger:
         """
         
         try:
-            cursor = self.conn.execute(query, (f"{today_str}%", f"{today_str}%"))
+            cursor = self.conn.execute(query, (f"{target_date_str}%", f"{target_date_str}%"))
             rows = cursor.fetchall()
             
             return rows
         except Exception as e:
-            print(f"오늘 거래 종목 타겟 추출 실패: {e}")
+            logger.info(f"오늘 거래 종목 타겟 추출 실패: {e}")
             return {}

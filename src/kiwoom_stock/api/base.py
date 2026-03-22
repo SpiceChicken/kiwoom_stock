@@ -42,7 +42,7 @@ class BaseClient:
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
                 if attempt < max_retries - 1:
                     wait = (attempt + 1) * 2
-                    print(f"⚠️ 타임아웃 발생 ({type(e).__name__}). {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                    logger.info(f"⚠️ 타임아웃 발생 ({type(e).__name__}). {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                     time.sleep(wait)
                     continue
                 raise KiwoomAPIError("서버 응답 시간이 초과되었습니다. (Timeout)")
@@ -52,7 +52,7 @@ class BaseClient:
                 if "Read timed out" in str(e):
                     if attempt < max_retries - 1:
                         wait = (attempt + 1) * 2
-                        print(f"⚠️ 데이터 수신 중 지연 발생. {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                        logger.info(f"⚠️ 데이터 수신 중 지연 발생. {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
                         time.sleep(wait)
                         continue
                     raise KiwoomAPIError("데이터 수신 중 타임아웃이 발생했습니다. (Read Timeout)")
@@ -61,5 +61,5 @@ class BaseClient:
 
             except Exception as e:
                 if not isinstance(e, KiwoomAPIError):
-                    print(f"DEBUG: 예상치 못한 에러 - {type(e).__name__}: {e}")
+                    logger.info(f"DEBUG: 예상치 못한 에러 - {type(e).__name__}: {e}")
                 raise e

@@ -46,14 +46,17 @@ class DailyReporter:
         else:
             logger.warning("업로드할 1분봉 차트 데이터(리스트)가 없습니다.")
 
-    def run_pipeline(self):
+    def run_pipeline(self, target_date_str: str = None):
+        if target_date_str is None:
+            target_date_str = datetime.now().strftime('%Y-%m-%d')
+        
         logger.info("🔄 [Daily Post-Mortem] 1단계: 1분봉 데이터 추출 시작")
         try:
             # 💡 [변경] 1단계에서 반환된 파일 리스트를 변수에 안전하게 담습니다.
-            minute_chart_list = extract_and_save_1min_chart()
+            minute_chart_list = extract_and_save_1min_chart(target_date_str)
             
             logger.info("📊 [Daily Post-Mortem] 2단계: 거래 검증 및 통계 산출")
-            csv_path = analyze_trade_efficiency()
+            csv_path = analyze_trade_efficiency(target_date_str)
             
             logger.info("🤖 [Daily Post-Mortem] 3단계: LLM 총평 생성 및 Slack 알림")
             stats = self._load_and_parse_stats(csv_path)

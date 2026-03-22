@@ -98,7 +98,7 @@ class Notifier:
         # 50개 종목 데이터를 임시 저장할 버퍼
         self.status_data: List[Dict[str, Any]] = []
 
-    def _send_slack(self, text: str):
+    def send_slack(self, text: str):
         """Slack Webhook을 통해 메시지를 전송합니다."""
         if not self.webhook_url:
             return
@@ -111,7 +111,7 @@ class Notifier:
             logger.error(f"Slack 전송 실패: {e}")
 
     # [수정] 인자 타입을 List[Dict[str, Any]]로 명확히 정의
-    def _send_slack_blocks(self, blocks: List[Dict[str, Any]]):
+    def send_slack_blocks(self, blocks: List[Dict[str, Any]]):
         """Slack Block Kit 메시지 전송 헬퍼"""
         if not self.webhook_url:
             return
@@ -169,7 +169,7 @@ class Notifier:
             },
             {"type": "divider"}
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
 
         log_line = f"BUY_SIGNAL:{buy_data['stock_name']},Price:{buy_data['buy_price']}"
         logger.info(log_line)
@@ -191,6 +191,7 @@ class Notifier:
             {
                 "type": "section",
                 "fields": [
+                    {"type": "mrkdwn", "text": f"*매도가:*\n{pos.sell_price:,}원"},
                     {"type": "mrkdwn", "text": f"*수익률:*\n{profit:+.2f}%"},
                     {"type": "mrkdwn", "text": f"*매도 사유:*\n{pos.sell_reason}"},
                     {"type": "mrkdwn", "text": f"*시간:*\n{datetime.now().strftime('%H:%M:%S')}"}
@@ -198,7 +199,7 @@ class Notifier:
             },
             {"type": "divider"}
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
 
         log_line = f"SELL_SIGNAL:{pos.stock_name},Profit:{profit:+.2f}%,Reason:{pos.sell_reason}"
         logger.info(log_line)
@@ -215,7 +216,7 @@ class Notifier:
                 }
             }
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
         logger.error(f"SLACK_ERROR_NOTIFIED: {message}")
 
     def notify_critical(self, message: str):
@@ -227,7 +228,7 @@ class Notifier:
                 "text": {"type": "mrkdwn", "text": f"🚨 *[SYSTEM STOP]*\n*사유:* {message}"}
             }
         ]
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
         logger.error(f"CRITICAL_ERROR: {message}")
 
     def send_daily_post_mortem(self, stats: Dict[str, Any], csv_path: Optional[str] = None):
@@ -287,5 +288,5 @@ class Notifier:
             }
         ]
         
-        self._send_slack_blocks(blocks)
+        self.send_slack_blocks(blocks)
         logger.info("일일 마감 부검 리포트 Slack 전송 완료.")
