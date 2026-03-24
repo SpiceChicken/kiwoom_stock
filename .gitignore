@@ -29,7 +29,6 @@ ENV/
 
 # Configuration and Secrets (중요!)
 config/
-prompt/
 *.txt
 *.csv
 .env

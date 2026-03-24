@@ -1,12 +1,7 @@
 import logging
 from typing import Dict, Optional
 import importlib.resources as pkg_resources
-
-try:
-    import google.generativeai as genai
-    HAS_GENAI = True
-except ImportError:
-    HAS_GENAI = False
+import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +16,7 @@ class GeminiClient:
         self.model_name = model
         self.api_key = api_key
         
-        if HAS_GENAI and self.api_key:
+        if self.api_key:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel(self.model_name)
             logger.info(f"✅ Gemini Native Engine 점화 완료 (Model: {self.model_name})")
