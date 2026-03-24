@@ -191,8 +191,7 @@ class Notifier:
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*매도가:*\n{pos.sell_price:,}원"},
-                    {"type": "mrkdwn", "text": f"*수익률:*\n{profit:+.2f}%"},
+                    {"type": "mrkdwn", "text": f"*매도가:*\n{pos.sell_price:,.0f}원 ({profit:+.2f}%)"},
                     {"type": "mrkdwn", "text": f"*매도 사유:*\n{pos.sell_reason}"},
                     {"type": "mrkdwn", "text": f"*시간:*\n{datetime.now().strftime('%H:%M:%S')}"}
                 ]
