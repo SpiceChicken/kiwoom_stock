@@ -1,60 +1,75 @@
-import os
-import json
-import logging
-from datetime import datetime
-import importlib.resources as pkg_resources
+"""Read-only legacy configuration views populated by explicit startup wiring."""
 
-logger = logging.getLogger(__name__)
+from datetime import date
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Mapping, Optional, Tuple
 
-BASE_DIR = os.getenv("KIWOOM_OUTPUT_DIR", os.getcwd())
+from kiwoom_stock.settings import (
+    Settings,
+    load_legacy_json_mappings,
+    load_settings_from_environment,
+)
 
-# 오늘 날짜 폴더(예: output/20260322) 지정 및 자동 생성
-today_str = datetime.now().strftime("%Y%m%d")
-OUTPUT_DIR_STR = os.path.join(BASE_DIR, "output", today_str)
 
-os.makedirs(OUTPUT_DIR_STR, exist_ok=True)
+CONFIG: Mapping[str, Any] = MappingProxyType({})
+STRATEGY_CONFIG: Mapping[str, Any] = MappingProxyType({})
+SCORING_CONFIG: Mapping[str, Any] = MappingProxyType({})
+OUTPUT_DIR_STR = ""
+_CURRENT_SETTINGS: Optional[Settings] = None
 
-def _load_config_files():
-    """
-    kiwoom_stock.config 패키지 내부의 모든 JSON 파일을 읽어 전역 변수로 등록
-    """
-    try:
-        # 💡 [궁극의 경로 탐색] OS 폴더 경로가 아닌 '파이썬 모듈'로서 config 패키지를 스캔합니다.
-        config_pkg = pkg_resources.files("config")
-    except ModuleNotFoundError:
-        logger.critical("[Config] 'kiwoom_stock.config' 패키지를 찾을 수 없습니다. 폴더 위치와 __init__.py를 확인하세요.")
-        return
+_SettingsSnapshot = Tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], str]
 
-    logger.info("[Config] Loading configurations from resource package: kiwoom_stock.config")
 
-    loaded_count = 0
-    
-    # iterdir()을 통해 패키지 내부의 리소스들을 순회
-    for file_resource in config_pkg.iterdir():
-        if file_resource.name.endswith('.json'):
-            try:
-                # 💡 파일 경로(open) 대신 리소스 객체에서 직접 텍스트를 추출
-                raw_text = file_resource.read_text(encoding='utf-8')
-                data = json.loads(raw_text)
-                
-                # 동적 변수 생성 (파일명 -> 대문자 변수명)
-                var_name = file_resource.name.replace('.json', '').upper()
-                
-                # globals()를 사용하여 현재 모듈의 전역 변수로 등록
-                globals()[var_name] = data
-                
-                logger.debug(f"  - Loaded: {file_resource.name} -> config.{var_name}")
-                loaded_count += 1
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"  - Failed to parse JSON {file_resource.name}: {e}")
-            except Exception as e:
-                logger.error(f"  - Error loading {file_resource.name}: {e}")
+def _settings_snapshot(settings: Settings, today: date) -> _SettingsSnapshot:
+    system_config, strategy_config = settings.to_legacy_mappings()
+    scoring_config = settings.legacy_scoring_config
+    output_dir_str = str(settings.storage.output_dir / "output" / today.strftime("%Y%m%d"))
+    return system_config, strategy_config, scoring_config, output_dir_str
 
-    if loaded_count == 0:
-        logger.warning("[Config] No JSON config files loaded. Check 'kiwoom_stock.config' package.")
-    else:
-        logger.info(f"[Config] Successfully loaded {loaded_count} config files.")
 
-# 모듈이 import 될 때 즉시 실행
-_load_config_files()
+def _publish_settings(
+    settings: Settings,
+    system_config: Mapping[str, Any],
+    strategy_config: Mapping[str, Any],
+    scoring_config: Mapping[str, Any],
+    output_dir_str: str,
+) -> Settings:
+    global CONFIG, STRATEGY_CONFIG, SCORING_CONFIG, OUTPUT_DIR_STR, _CURRENT_SETTINGS
+
+    CONFIG = system_config
+    STRATEGY_CONFIG = strategy_config
+    SCORING_CONFIG = scoring_config
+    OUTPUT_DIR_STR = output_dir_str
+    _CURRENT_SETTINGS = settings
+    return settings
+
+
+def configure(settings: Settings, today: date) -> Settings:
+    """Populate compatibility views without creating directories or reading files."""
+
+    return _publish_settings(settings, *_settings_snapshot(settings, today))
+
+
+def validate_environment_settings() -> Settings:
+    """Validate process and legacy settings without publishing or creating output."""
+
+    legacy = load_legacy_json_mappings()
+    return load_settings_from_environment(legacy=legacy)
+
+
+def activate_runtime_settings(settings: Settings, today: date) -> Settings:
+    """Create dated output before atomically publishing compatibility views."""
+
+    snapshot = _settings_snapshot(settings, today)
+    Path(snapshot[3]).mkdir(parents=True, exist_ok=True)
+    return _publish_settings(settings, *snapshot)
+
+
+def configure_from_environment(today: date) -> Settings:
+    """Idempotently wire process/legacy sources for explicit executable entry points."""
+
+    settings = _CURRENT_SETTINGS
+    if settings is None:
+        settings = validate_environment_settings()
+    return activate_runtime_settings(settings, today)

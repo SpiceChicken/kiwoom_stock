@@ -1,6 +1,6 @@
 # src/kiwoom_stock/api/services/market.py
 import datetime
-from typing import Dict, List, TypedDict, Optional
+from typing import Any, Dict, List, cast
 
 class MarketService:
     def __init__(self, base):
@@ -13,18 +13,18 @@ class MarketService:
             "mrkt_tp": market_tp,
             "mang_stk_incls": "0",
             "stex_tp": "1"
-        })
-        return data.get("trde_prica_upper", [])
+        }, read_only=True)
+        return cast(List[Dict], data.get("trde_prica_upper", []))
 
-    def get_stock_basic_info(self, stock_code: str) -> List[Dict]:
+    def get_stock_basic_info(self, stock_code: str) -> Dict[str, Any]:
         """
         주식기본정보요청 (ka10001)
 
         """
         data = self.base.request("/api/dostk/stkinfo", "ka10001", {
             "stk_cd": stock_code
-        })
-        return data
+        }, read_only=True)
+        return cast(Dict[str, Any], data)
 
     def get_minute_chart(self, stock_code: str, tic: str) -> List[Dict]:
         """
@@ -35,9 +35,9 @@ class MarketService:
             "stk_cd": stock_code,    # 종목코드
             "tic_scope": tic,  # 틱범위
             "upd_stkpc_tp": "1"      # 수정주가구분 (1: 적용)
-        })
+        }, read_only=True)
 
-        return data.get('stk_min_pole_chart_qry', [])
+        return cast(List[Dict], data.get('stk_min_pole_chart_qry', []))
 
     # --- [신규/개선] 실시간 수급 지표 (ka10063 대체) ---
 
@@ -48,10 +48,10 @@ class MarketService:
         """
         data = self.base.request("/api/dostk/mrkcond", "ka10046", {
             "stk_cd": stock_code
-        })
-        return data.get("cntr_str_tm", [])
+        }, read_only=True)
+        return cast(List[Dict], data.get("cntr_str_tm", []))
 
-    def get_program_trade(self) -> Dict[str, float]:
+    def get_program_trade(self) -> List[Dict]:
         """
         종목별 프로그램 매매 현황 조회 (ka90004)
         외인/기관 수급의 실시간 대용치(Proxy)로 활용됩니다.
@@ -64,9 +64,9 @@ class MarketService:
             "dt": today.strftime('%Y%m%d'),
             "mrkt_tp": "P00101",
             "stex_tp": "1"
-        })
+        }, read_only=True)
 
-        return data.get("stk_prm_trde_prst", [])
+        return cast(List[Dict], data.get("stk_prm_trde_prst", []))
 
     def get_foreign_window_total(self, market_tp: str = "001") -> List[Dict]:
         """
@@ -79,20 +79,20 @@ class MarketService:
             "trde_tp": "1",
             "sort_tp": "1",
             "stex_tp": "1",
-        })
-        
-        return data.get("frgn_wicket_trde_upper", [])
-    
-    def get_recent_ticks(self, stock_code: str) -> Dict[str, int]:
+        }, read_only=True)
+
+        return cast(List[Dict], data.get("frgn_wicket_trde_upper", []))
+
+    def get_recent_ticks(self, stock_code: str) -> List[Dict]:
         """
         주식 체결 정보 조회 (ka10003) - 문서 p.20
         * 최근 체결 내역을 분석하여 '고래(Whale)'의 흔적을 찾음
         """
         data = self.base.request("/api/dostk/stkinfo", "ka10003", {
             "stk_cd": stock_code
-        })
+        }, read_only=True)
 
-        return data.get('cntr_infr', {})
+        return cast(List[Dict], data.get('cntr_infr', {}))
 
     def get_order_book(self, stock_code: str) -> Dict[str, int]:
         """
@@ -100,6 +100,6 @@ class MarketService:
         """
         data = self.base.request("/api/dostk/mrkcond", "ka10004", {
             "stk_cd": stock_code
-        })
-        
-        return data
+        }, read_only=True)
+
+        return cast(Dict[str, int], data)

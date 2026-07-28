@@ -6,6 +6,7 @@ from collections import deque
 from typing import List, Dict
 
 from .collector import MarketDataCollector
+from kiwoom_stock.application.ports import MarketDataGateway
 from kiwoom_stock.core import indicators as ind
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.core.types import MarketRegime
@@ -18,8 +19,8 @@ class MarketAnalyzer:
     [Helper] 시장 환경 분석기 (Physics-Engine Version)
     - 역할: 데이터 수집 및 물리 엔진(StateTracker)으로의 파이프라인 연결
     """
-    def __init__(self, client, market_config: Dict, state_tracker: PhysicalStateTracker):
-        self.collector = MarketDataCollector(client)
+    def __init__(self, market_gateway: MarketDataGateway, market_config: Dict, state_tracker: PhysicalStateTracker):
+        self.collector = MarketDataCollector(market_gateway)
         self.state_tracker = state_tracker
         
         self.market_proxy_code = market_config.get("proxy_code", "069500")

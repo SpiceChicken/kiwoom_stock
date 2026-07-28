@@ -1,7 +1,23 @@
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import importlib.resources as pkg_resources
-import google.generativeai as genai
+try:  # Prefer the supported SDK; keep a compatibility fallback for existing installs.
+    from google import genai  # type: ignore
+    _SDK_KIND = "modern"
+except ImportError:  # pragma: no cover - exercised only in legacy environments
+    try:
+        import google.generativeai as genai  # type: ignore
+        _SDK_KIND = "legacy"
+    except ImportError:  # dependency is optional until an API key is configured
+        genai = None  # type: ignore[assignment]
+        _SDK_KIND = "none"
+
+from kiwoom_stock.application.reporting import (
+    DailyReportRequest,
+    DailyReportStats,
+    NarrationResult,
+    ReportArtifact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -15,16 +31,26 @@ class GeminiClient:
     def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash"):
         self.model_name = model
         self.api_key = api_key
+        self.model: Optional[Any]
         
-        if self.api_key:
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel(self.model_name)
+        if self.api_key and genai is not None:
+            if hasattr(genai, "Client"):
+                self.client = genai.Client(api_key=self.api_key)
+                self.model = self.client
+                self._sdk_kind = "modern"
+            else:
+                genai.configure(api_key=self.api_key)
+                self.model = genai.GenerativeModel(self.model_name)
+                self.client = None
+                self._sdk_kind = "legacy"
             logger.info(f"✅ Gemini Native Engine 점화 완료 (Model: {self.model_name})")
         else:
             self.model = None
+            self.client = None
+            self._sdk_kind = "none"
             logger.warning("⚠️ Gemini SDK가 설치되지 않았거나 API Key가 주입되지 않았습니다.")
     
-    def generate_content(self, prompt: str, file_path: str = None) -> Dict:
+    def generate_content(self, prompt: str, file_path: Optional[str] = None) -> Dict:
         """[Core] Native SDK를 이용한 텍스트 및 파일(멀티모달) 처리"""
         if not self.model:
             return {"success": False, "output": None, "error": "Gemini 엔진 미초기화"}
@@ -34,14 +60,26 @@ class GeminiClient:
             if file_path:
                 logger.info(f"📎 첨부파일 업로드 중: {file_path}")
                 # 구글 임시 서버에 파일 업로드 (보통 48시간 후 자동 삭제됨)
-                uploaded_file = genai.upload_file(path=file_path, mime_type="text/csv")
+                if self._sdk_kind == "modern":
+                    uploaded_file = self.client.files.upload(file=file_path, config={"mime_type": "text/csv"})
+                    response = self.client.models.generate_content(
+                        model=self.model_name, contents=[uploaded_file, prompt]
+                    )
+                else:
+                    uploaded_file = genai.upload_file(path=file_path, mime_type="text/csv")
+                    response = self.model.generate_content([uploaded_file, prompt])
                 
-                # 텍스트(prompt)와 파일 객체를 리스트([])로 묶어서 전송!
-                response = self.model.generate_content([uploaded_file, prompt])
+                # The SDK-specific call above is the single request.  Do not
+                # replay it through the legacy model (the modern client has no
+                # such model and a duplicate request would be costly).
                 
             # 💡 텍스트만 있는 경우 (기존과 동일)
             else:
-                response = self.model.generate_content(prompt)
+                response = (
+                    self.client.models.generate_content(model=self.model_name, contents=prompt)
+                    if self._sdk_kind == "modern"
+                    else self.model.generate_content(prompt)
+                )
                 
             return {
                 "success": True,
@@ -49,7 +87,7 @@ class GeminiClient:
                 "error": None
             }
         except Exception as e:
-            logger.error(f"Gemini API 통신 오류: {e}")
+            logger.error("Gemini API 통신 오류 (type=%s)", type(e).__name__)
             return {"success": False, "output": None, "error": str(e)}
 
     def generate_daily_report(self, stats: Dict, csv_path: Optional[str] = None) -> Dict:
@@ -58,8 +96,8 @@ class GeminiClient:
             return {"success": False, "output": None, "error": "Gemini 엔진 미초기화"}
 
         try:
-            # 'prompt' 패키지 안의 파일을 찾아 텍스트로 읽어옵니다.
-            prompts_pkg = pkg_resources.files("prompt")
+            # 설치된 package 안의 prompt resource를 읽습니다.
+            prompts_pkg = pkg_resources.files("kiwoom_stock.resources.prompts")
             
             system_prompt = prompts_pkg.joinpath("daily_postmortem_system.md").read_text(encoding='utf-8')
             user_prompt_template = prompts_pkg.joinpath("daily_postmortem_user.md").read_text(encoding='utf-8')
@@ -78,10 +116,20 @@ class GeminiClient:
             # 3. API 호출 (멀티모달)
             if csv_path:
                 logger.info(f"📎 첨부파일 업로드 중: {csv_path}")
-                uploaded_file = genai.upload_file(path=csv_path, mime_type="text/csv")
-                response = self.model.generate_content([uploaded_file, full_prompt])
+                if self._sdk_kind == "modern":
+                    uploaded_file = self.client.files.upload(file=csv_path, config={"mime_type": "text/csv"})
+                    response = self.client.models.generate_content(
+                        model=self.model_name, contents=[uploaded_file, full_prompt]
+                    )
+                else:
+                    uploaded_file = genai.upload_file(path=csv_path, mime_type="text/csv")
+                    response = self.model.generate_content([uploaded_file, full_prompt])
             else:
-                response = self.model.generate_content(full_prompt)
+                response = (
+                    self.client.models.generate_content(model=self.model_name, contents=full_prompt)
+                    if self._sdk_kind == "modern"
+                    else self.model.generate_content(full_prompt)
+                )
                 
             return {
                 "success": True,
@@ -89,8 +137,41 @@ class GeminiClient:
                 "error": None
             }
         except Exception as e:
-            logger.error(f"Gemini API 통신 오류: {e}")
+            logger.error("Gemini API 통신 오류 (type=%s)", type(e).__name__)
             return {"success": False, "output": None, "error": str(e)}
+
+    def narrate(
+        self,
+        *,
+        request: DailyReportRequest,
+        stats: DailyReportStats,
+        trade_artifact: Optional[ReportArtifact],
+    ) -> NarrationResult:
+        """Adapt the legacy dictionary result to the reporting contract."""
+        if not self.model:
+            return NarrationResult.unavailable()
+
+        csv_path = (
+            trade_artifact.reference
+            if trade_artifact is not None
+            else None
+        )
+        result = self.generate_daily_report(
+            stats={
+                "date": request.report_date,
+                "win_rate": stats.win_rate,
+                "total_pnl": stats.total_pnl,
+                "defense_count": stats.defense_count,
+            },
+            csv_path=csv_path,
+        )
+        if result.get("success"):
+            output = result.get("output")
+            if isinstance(output, str):
+                return NarrationResult.succeeded(output)
+            return NarrationResult.failed("invalid Gemini response output")
+
+        return NarrationResult.failed("Gemini request failed")
             
     def check_availability(self) -> bool:
         is_available = self.model is not None

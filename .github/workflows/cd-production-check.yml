@@ -1,0 +1,425 @@
+name: Production container check
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full 40-character lowercase commit SHA to validate
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: kiwoom-stock-production-check-i-02cb0a404794bd43a
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  AWS_REGION: ap-northeast-2
+  AWS_MAX_ATTEMPTS: "3"
+  EC2_INSTANCE_ID: i-02cb0a404794bd43a
+  GHCR_REPOSITORY: ghcr.io/spicechicken/kiwoom_stock
+  MAX_RUNTIME_IMAGE_MIB: "850"
+
+jobs:
+  build_publish:
+    name: validate and publish immutable candidate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      image_digest: ${{ steps.publish.outputs.digest }}
+      image_size_mib: ${{ steps.image.outputs.size_mib }}
+      compose_sha256: ${{ steps.release.outputs.compose_sha256 }}
+      compose_prod_sha256: ${{ steps.release.outputs.compose_prod_sha256 }}
+
+    steps:
+      - name: Validate immutable source input
+        id: requested
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          printf 'sha=%s\n' "${REQUESTED_SOURCE_SHA}" >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout exact requested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.requested.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind source and Compose identity
+        id: release
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ steps.requested.outputs.sha }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          test "${source_sha}" = "${REQUESTED_SOURCE_SHA}"
+          test "$(git status --short)" = ""
+          compose_sha256="$(sha256sum compose.yaml | cut -d' ' -f1)"
+          compose_prod_sha256="$(sha256sum compose.prod.yaml | cut -d' ' -f1)"
+          [[ "${compose_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${compose_prod_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            printf 'source_sha=%s\n' "${source_sha}"
+            printf 'compose_sha256=%s\n' "${compose_sha256}"
+            printf 'compose_prod_sha256=%s\n' "${compose_prod_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install checksum-verified Gitleaks
+        shell: bash
+        env:
+          GITLEAKS_ARCHIVE_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          GITLEAKS_BINARY_SHA256: "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509"
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64"
+          tool_dir="${RUNNER_TEMP}/gitleaks-8.30.1"
+          archive="${tool_dir}/gitleaks.tar.gz"
+          install -d -m 0700 "${tool_dir}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "${archive}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
+          test "$(sha256sum "${archive}" | cut -d' ' -f1)" = \
+            "${GITLEAKS_ARCHIVE_SHA256}"
+          tar -xzf "${archive}" -C "${tool_dir}" gitleaks
+          test "$(sha256sum "${tool_dir}/gitleaks" | cut -d' ' -f1)" = \
+            "${GITLEAKS_BINARY_SHA256}"
+          test "$("${tool_dir}/gitleaks" version 2>/dev/null)" = "8.30.1"
+          echo "${tool_dir}" >>"${GITHUB_PATH}"
+
+      - name: Scan complete source history for credentials
+        run: |
+          set -euo pipefail
+          gitleaks git --redact --no-banner --config .gitleaks.toml \
+            --log-opts="--all HEAD" .
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint, type-check, and run full tests
+        run: |
+          set -euo pipefail
+          python -m flake8 src tests --count --select=E9,F63,F7,F82 \
+            --show-source --statistics
+          python -m mypy src/kiwoom_stock
+          mkdir -p reports
+          python -m pytest tests --junitxml=reports/pytest-production-check.xml
+
+      - name: Build package and smoke installed wheel
+        run: |
+          set -euo pipefail
+          python -m build
+          python -m venv .wheel-smoke
+          .wheel-smoke/bin/python -m pip install --upgrade pip
+          .wheel-smoke/bin/python -m pip install dist/*.whl
+          wheel_python="${GITHUB_WORKSPACE}/.wheel-smoke/bin/python"
+          (
+            cd "${RUNNER_TEMP}"
+            "${wheel_python}" -c \
+              'import kiwoom_stock; import kiwoom_stock.application.lifecycle'
+          )
+          KIWOOM_API_MODE=disabled KIWOOM_PROCESS_NAME=paper-monitor \
+            "${wheel_python}" -m kiwoom_stock --check-config
+          set +e
+          "${wheel_python}" -m kiwoom_stock --check-config \
+            >/tmp/kiwoom-check.out 2>/tmp/kiwoom-check.err
+          missing_status=$?
+          set -e
+          test "${missing_status}" -eq 1
+          grep -q KIWOOM_PROCESS_NAME /tmp/kiwoom-check.err
+
+      - name: Build and execute container test stage
+        run: |
+          set -euo pipefail
+          docker build --target test \
+            --tag kiwoom-stock:test-"${{ steps.release.outputs.source_sha }}" .
+          docker run --rm \
+            kiwoom-stock:test-"${{ steps.release.outputs.source_sha }}"
+
+      - name: Build and inspect immutable runtime candidate
+        id: image
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          local_image="kiwoom-stock:runtime-${SOURCE_SHA}"
+          remote_tag="${GHCR_REPOSITORY}:sha-${SOURCE_SHA}"
+          docker build --target runtime \
+            --label io.kiwoom-stock.project=kiwoom-stock \
+            --label org.opencontainers.image.revision="${SOURCE_SHA}" \
+            --tag "${local_image}" .
+          image_bytes="$(docker image inspect "${local_image}" --format '{{.Size}}')"
+          image_mib="$(( (image_bytes + 1048575) / 1048576 ))"
+          (( image_mib <= MAX_RUNTIME_IMAGE_MIB ))
+          revision="$(docker image inspect "${local_image}" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          test "${revision}" = "${SOURCE_SHA}"
+          docker image inspect "${local_image}" >runtime-image-inspect.json
+          {
+            printf 'local=%s\n' "${local_image}"
+            printf 'remote_tag=%s\n' "${remote_tag}"
+            printf 'size_mib=%s\n' "${image_mib}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Publish or reuse exact full-SHA GHCR tag
+        id: publish
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" |
+            docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          tag="sha-${SOURCE_SHA}"
+          tag_exists=false
+          package_exists=true
+          versions="${RUNNER_TEMP}/ghcr-versions.json"
+          for page in $(seq 1 100); do
+            status="$(curl --silent --show-error --location \
+              --output "${versions}" --write-out '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -H "Authorization: Bearer ${GHCR_TOKEN}" \
+              "https://api.github.com/users/SpiceChicken/packages/container/kiwoom_stock/versions?per_page=100&page=${page}")"
+            if [[ "${status}" == "404" && "${page}" == "1" ]]; then
+              package_exists=false
+              break
+            fi
+            [[ "${status}" == "200" ]] || {
+              echo "GHCR package inventory request failed closed" >&2
+              exit 1
+            }
+            read -r tag_exists version_count < <(
+              python - "${versions}" "${tag}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          versions = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = sys.argv[2]
+          found = any(
+              tag in item.get("metadata", {}).get("container", {}).get("tags", [])
+              for item in versions
+          )
+          print("true" if found else "false", len(versions))
+          PY
+            )
+            [[ "${tag_exists}" == "false" ]] || break
+            (( version_count == 100 )) || break
+            [[ "${page}" != "100" ]] || {
+              echo "GHCR package inventory pagination limit reached" >&2
+              exit 1
+            }
+          done
+          if [[ "${tag_exists}" == "true" ]]; then
+            docker pull "${{ steps.image.outputs.remote_tag }}"
+            local_id="$(docker image inspect "${{ steps.image.outputs.local }}" \
+              --format '{{.Id}}')"
+            remote_id="$(docker image inspect "${{ steps.image.outputs.remote_tag }}" \
+              --format '{{.Id}}')"
+            test "${local_id}" = "${remote_id}" || {
+              echo "existing full-SHA tag differs; overwrite refused" >&2
+              exit 1
+            }
+          elif [[ "${package_exists}" == "false" || "${tag_exists}" == "false" ]]; then
+            docker tag "${{ steps.image.outputs.local }}" \
+              "${{ steps.image.outputs.remote_tag }}"
+            docker push "${{ steps.image.outputs.remote_tag }}"
+          fi
+          digest="$(docker image inspect "${{ steps.image.outputs.remote_tag }}" \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' |
+            awk -v prefix="${GHCR_REPOSITORY}@sha256:" \
+              'index($0, prefix) == 1 {print $0; exit}')"
+          [[ "${digest}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "${digest}" >>"${GITHUB_OUTPUT}"
+          rm -f -- "${versions}"
+          docker logout ghcr.io
+
+      - name: Prove anonymous public digest pull
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker image rm --force "${{ steps.image.outputs.remote_tag }}" \
+            "${{ steps.image.outputs.local }}" >/dev/null
+          anonymous_config="$(mktemp -d "${RUNNER_TEMP}/anonymous-docker.XXXXXX")"
+          trap 'rm -rf "${anonymous_config}"' EXIT
+          DOCKER_CONFIG="${anonymous_config}" docker pull "${IMAGE_DIGEST}"
+          revision="$(docker image inspect "${IMAGE_DIGEST}" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          test "${revision}" = "${{ steps.release.outputs.source_sha }}"
+
+      - name: Upload unprivileged build evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: candidate-${{ steps.release.outputs.source_sha }}
+          path: |
+            reports/pytest-production-check.xml
+            runtime-image-inspect.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  deploy:
+    name: protected EC2 production check
+    if: github.ref == 'refs/heads/main'
+    needs: build_publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      id-token: write
+    env:
+      SOURCE_SHA: ${{ needs.build_publish.outputs.source_sha }}
+      IMAGE_DIGEST: ${{ needs.build_publish.outputs.image_digest }}
+      IMAGE_SIZE_MIB: ${{ needs.build_publish.outputs.image_size_mib }}
+      COMPOSE_SHA256: ${{ needs.build_publish.outputs.compose_sha256 }}
+      COMPOSE_PROD_SHA256: ${{ needs.build_publish.outputs.compose_prod_sha256 }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.KIWOOM_AWS_DEPLOY_ROLE_ARN }}
+
+    steps:
+      - name: Revalidate protected release tuple
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
+          [[ "${COMPOSE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${COMPOSE_PROD_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${IMAGE_SIZE_MIB}" =~ ^[0-9]+$ ]]
+          (( IMAGE_SIZE_MIB <= MAX_RUNTIME_IMAGE_MIB ))
+          test "${AWS_DEPLOY_ROLE_ARN}" = \
+            "arn:aws:iam::380648615401:role/kiwoom-stock-github-production-check"
+          test "${EC2_INSTANCE_ID}" = "i-02cb0a404794bd43a"
+          test "${AWS_REGION}" = "ap-northeast-2"
+
+      - name: Configure exact AWS deploy role with OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: kiwoom-production-check
+
+      - name: Send allowlisted production-check document
+        id: ssm
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          values = {
+              "ImageDigest": [os.environ["IMAGE_DIGEST"]],
+              "SourceSha": [os.environ["SOURCE_SHA"]],
+              "ComposeSha256": [os.environ["COMPOSE_SHA256"]],
+              "ComposeProdSha256": [os.environ["COMPOSE_PROD_SHA256"]],
+              "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
+              "Region": [os.environ["AWS_REGION"]],
+          }
+          Path("ssm-parameters.json").write_text(
+              json.dumps(values, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+          command_id="$(aws ssm send-command \
+            --region "${AWS_REGION}" \
+            --document-name KiwoomStock-ProductionCheck \
+            --instance-ids "${EC2_INSTANCE_ID}" \
+            --timeout-seconds 750 \
+            --comment "kiwoom production check ${SOURCE_SHA}" \
+            --parameters file://ssm-parameters.json \
+            --query 'Command.CommandId' --output text)"
+          [[ "${command_id}" =~ ^[0-9a-f-]{36}$ ]]
+          printf 'command_id=%s\n' "${command_id}" >>"${GITHUB_OUTPUT}"
+
+      - name: Wait for terminal SSM result and record redacted evidence
+        env:
+          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
+        run: |
+          set -euo pipefail
+          terminal_status=""
+          for attempt in $(seq 1 72); do
+            set +e
+            aws ssm get-command-invocation \
+              --region "${AWS_REGION}" \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${EC2_INSTANCE_ID}" \
+              --output json >ssm-invocation.json 2>/dev/null
+            query_status=$?
+            set -e
+            if (( query_status == 0 )); then
+              status="$(python3 -c \
+                'import json; print(json.load(open("ssm-invocation.json"))["Status"])')"
+              case "${status}" in
+                Success|Cancelled|TimedOut|Failed|Cancelling)
+                  terminal_status="${status}"
+                  break
+                  ;;
+              esac
+            fi
+            sleep 10
+          done
+          test -n "${terminal_status}"
+          python3 - "${COMMAND_ID}" "${terminal_status}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          command_id, status = sys.argv[1:]
+          invocation = json.loads(
+              Path("ssm-invocation.json").read_text(encoding="utf-8")
+          )
+          evidence = {
+              "source_sha": os.environ["SOURCE_SHA"],
+              "image_digest": os.environ["IMAGE_DIGEST"],
+              "image_size_mib": int(os.environ["IMAGE_SIZE_MIB"]),
+              "compose_sha256": os.environ["COMPOSE_SHA256"],
+              "compose_prod_sha256": os.environ["COMPOSE_PROD_SHA256"],
+              "instance_id": invocation.get("InstanceId"),
+              "command_id": command_id,
+              "status": status,
+              "response_code": invocation.get("ResponseCode"),
+              "stdout_bytes": len(invocation.get("StandardOutputContent", "")),
+              "stderr_bytes": len(invocation.get("StandardErrorContent", "")),
+              "secrets_in_github": False,
+              "worker_activated": False,
+          }
+          Path("production-check-evidence.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          test "${terminal_status}" = "Success"
+
+      - name: Upload protected deployment evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: production-check-${{ needs.build_publish.outputs.source_sha }}
+          path: production-check-evidence.json
+          if-no-files-found: warn
+          retention-days: 14

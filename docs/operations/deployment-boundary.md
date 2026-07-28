@@ -1,0 +1,115 @@
+# Deployment boundary
+
+The approved target for the first container deployment is:
+
+- EC2 instance `i-02cb0a404794bd43a` in `ap-northeast-2`;
+- SSM-only administration with no inbound security-group rule;
+- one public GHCR image selected by an exact OCI digest;
+- one ephemeral `python -m kiwoom_stock --check-config` container.
+
+This approval is **check-only**. It is not approval to start a worker, schedule a
+process, query an account, place or revoke an order, write a production database,
+or invoke Slack, S3, or Gemini.
+
+## Four separate activation boundaries
+
+1. **Image publication** builds an immutable `sha-<full commit SHA>` image and
+   publishes it to the public GitHub Container Registry. It does not contact EC2.
+2. **Production check deployment** proves anonymous digest pull, sends one
+   bounded SSM command, and runs only `--check-config`.
+3. **Shadow worker activation** remains RED until the process, shutdown, calendar,
+   database, and side-effect boundaries below have real-path evidence.
+4. **Live trading activation** is a separate, explicit approval. No workflow in
+   this repository grants it.
+
+The production-check workflow is manual (`workflow_dispatch`) and accepts only a
+full 40-character lowercase commit SHA. Its unprivileged build/publish job has no
+OIDC permission or production Environment. A separate checkout-free deploy job
+uses the protected GitHub `production` Environment and OIDC only after the exact
+SHA/digest/Compose-hash tuple is available. It does not cancel an in-progress run
+and cannot read the Kiwoom SecureString parameters. AWS permits only the
+account-owned `KiwoomStock-ProductionCheck` document, not generic
+`AWS-RunShellScript`.
+
+## Production-check completion gate
+
+Completion requires evidence tied to one source SHA and one image digest:
+
+- all local quality, package, settings, and container gates pass;
+- the GHCR package is public and a clean anonymous digest pull succeeds;
+- the exact OIDC audience/subject and Environment protection are read back;
+- IAM simulation proves the GitHub role is SSM-only;
+- the host verifies instance identity, resource floors, and secret file metadata;
+- the candidate receives non-secret placeholders, no network, and no production
+  named volume;
+- Compose renders with a required digest and one exact-name ephemeral check exits
+  `0` and is absent afterward;
+- current/previous full release tuples update in one atomic JSON replacement;
+- cleanup is label-scoped and preserves secrets, volumes, and known-good images.
+
+Missing package visibility, GitHub Environment approval, OIDC configuration, IAM
+application, SSM execution, or host evidence is `BLOCKED`, not a presumed success.
+See [GitHub-to-EC2 container deployment](github-ec2-container-deployment.md).
+
+## Startup and shadow-worker first-activation gate
+
+The local B1 gate proves aggregate settings validation, an explicit-date XKRX adapter, no-side-effect holiday exits,
+and settings/date forwarding with fake runtime boundaries. It does not prove an actual open-session Kiwoom
+authentication/runtime construction, the production host's timezone and tzdata, or how a process supervisor handles
+holiday exit `0` and fatal/kill-switch exit `1`. Those C3/C4 paths remain a reachable real-path gap.
+
+Do not turn the root `main.py` into an operational container command or enable automatic restart until an isolated
+paper/shadow activation has verified the exact timezone, one open-session startup, external-client construction policy,
+worker shutdown, and supervisor exit handling. B6 database/worker flush and close ownership must be complete first.
+Calendar-library failure is currently treated as closed, so an exit `0` needs calendar-health evidence before operators
+classify it as a normal holiday.
+
+## SQLite and container first-activation gate
+
+Local B6 tests prove the configured-path composition, same-file ledger/physical rows, queue drain, worker join,
+idempotent close, close-before-post-market routing, and short-lived report readers with temporary SQLite files. They do
+not prove the production named volume, host permissions, supervisor signals, an operational container command, or real
+external report integrations.
+
+The current common/prod Compose contract uses exactly:
+
+- `KIWOOM_DB_PATH=/var/lib/kiwoom/trades.db`;
+- `kiwoom-data:/var/lib/kiwoom`;
+- non-root `10001:10001`, read-only root, `/tmp` tmpfs, and `stop_grace_period: 30s`;
+- no raw `scale`/`deploy.replicas` request.
+
+These declarations do not enforce a replica limit or graceful shutdown. `docker compose --scale` can still create an
+unsupported second SQLite owner. The image command and healthcheck run only `python -m kiwoom_stock --check-config`,
+which exits without starting a worker. `STOPSIGNAL SIGTERM` is present, but the application has no SIGTERM adapter that
+routes to `TradingEngine.close()`. Therefore actual Docker C1/C3/C4 status remains RED.
+
+Before enabling any worker command, obtain explicit approval and validate in an isolated non-production volume:
+
+1. one process and one replica only, with an owner responsible for preventing CLI/supervisor scaling;
+2. effective UID/GID can create, reopen, and close the exact configured DB on the named volume;
+3. no cwd `trades.db` is created and schema/row/PnL/`OPEN` recovery matches characterization;
+4. a real supervisor stop reaches the approved SIGTERM adapter, rejects new work, drains the queue, joins the worker,
+   closes both connections, and exits within the grace period;
+5. restart reads the exact `OPEN` rows without a second writer, with post-market work disabled during the stop test;
+6. rollback disables the worker command and preserves the volume for read-only diagnosis.
+
+Do not extend SQLite beyond one process/replica and local storage. A need for multiple replicas/processes, multiple
+hosts, network/shared storage, sustained write contention, HA/failover, online migrations, or independent services is a
+trigger for a separately planned PostgreSQL-class backend, schema migration, backup/restore, and rollback strategy.
+Changing the backend or migrating operational data requires a new plan and user approval; B6 performs no migration.
+
+## S3 archive first-activation gate
+
+The local B2 gate uses an injected fake S3 client and temporary filesystem paths. It does not prove AWS credentials,
+IAM permissions, bucket policy, object persistence, or live response fidelity. Before first activation, obtain separate
+user approval and validate a throwaway object in an isolated non-production bucket and dedicated prefix. Confirm the
+exact bucket, region/provider chain, upload-only IAM scope, expected object key, owner, and rollback procedure. That
+validator must keep local cleanup disabled and must never use production report files. Production deployment remains
+blocked while this real-path evidence is absent.
+
+Production cleanup also requires a quiescent, single-writer output tree. Linux descriptor-relative operations pin the
+configured root/date directory and immutable archive receipts bind device, inode, size, mtime, and ctime; any observed
+parent or target replacement fails closed before the first deletion. POSIX does not provide an atomic
+compare-identity-and-unlink operation, so the final identity check and `unlinkat`-style call still assume no
+non-cooperating writer changes that entry in between. If that ownership guarantee cannot be enforced, keep cleanup
+disabled and retain the archived local files instead of treating the path check as proof.

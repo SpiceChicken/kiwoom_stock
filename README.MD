@@ -56,47 +56,68 @@ V2.6.4 업데이트는 거래소의 VI(변동성 완화장치) 발동 시 발생
 
 ```text
 Kiwoom-Stock/
-├── config/                 
-│   ├── config.json         
-│   └── scoring_config.json 
-├── prompts/                # 외부화된 LLM 시스템/유저 프롬프트 (v2.6+)
-│   ├── daily_postmortem_system.md
-│   └── daily_postmortem_user.md
 ├── src/
 │   └── kiwoom_stock/
+│       ├── application/    # composition root, lifecycle orchestration, ports
+│       ├── domain/         # 순수 계산/모델
+│       ├── infrastructure/ # DB 등 외부 adapter
+│       ├── api/            # Kiwoom REST/auth client
 │       ├── core/
 │       │   ├── physics_engine.py  # 6대 물리적 힘 및 Net Force 연산
-│       │   ├── state_manager.py   # 관성 상태 캐싱 (1분봉 거래량 가속도 추적 추가)
-│       │   └── indicators.py      # Tri-ATR 수학적 파이프라인
+│       │   ├── state_manager.py   # 관성 상태 캐싱 및 repository port 사용
+│       │   └── indicators.py
 │       ├── monitoring/
 │       │   ├── strategy.py        # 6단계 진입 통제 센터 & 이익 보존망
 │       │   ├── reporter.py        # 장 마감 자동 부검 컨트롤러
 │       │   ├── notifier.py        # Slack 알림
-│       │   └── manager.py         # 포지션 관리 및 비동기 처리
+│       │   └── manager.py         # 포지션/감시 종목 관리
 │       └── utils/
-│           └── gemini_client.py   # LLM 연동 및 프롬프트 동적 매핑
-├── logs/                   # 실행 로그
-├── data/                   # 분석 데이터 (SQLite DB)
+│           └── gemini_client.py
+├── docs/                   # architecture, configuration, testing, container/deployment guides
 ├── tools/                  # 거래 검증 및 1분봉 추출 등 사후 분석 툴킷
-└── main.py                 # 프로그램 진입점 및 Lifecycle 관리
+└── main.py                 # process entrypoint
 ```
+
+구조와 외부 경계는 [docs/architecture.md](docs/architecture.md), 핵심 규칙은 [docs/business-rules.md](docs/business-rules.md), 설정 표는 [docs/configuration.md](docs/configuration.md)를 기준으로 확인합니다.
 
 ---
 
 ## 🚀 시작하기 (Getting Started)
 
-본 프로젝트는 `pyproject.toml`을 사용하여 의존성을 관리합니다.
+본 프로젝트는 `pyproject.toml`을 의존성 SSOT로 사용하고, `venv`와 `pip`으로 개발 환경을 관리합니다.
+Python은 3.11 이상을 지원하며, 개발/CI의 최신 기준은 Python 3.14 계열입니다.
 
-### 1. 환경 설정 및 설치
+### 1. 가상환경 생성 및 활성화
 
 ```bash
-poetry install
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-### 2. 실행
+Windows PowerShell에서는 `.venv\Scripts\Activate.ps1`을 실행합니다.
+
+### 2. 의존성 설치
 
 ```bash
-poetry run python main.py
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+### 3. 테스트
+
+```bash
+python -m pytest
+```
+
+전체 로컬 검증 명령은 [docs/testing.md](docs/testing.md)를 기준으로 실행합니다.
+Docker 기반 dev/prod 분리와 현재 배포 경계는 [docs/container-development.md](docs/container-development.md) 및 [docs/operations/deployment-boundary.md](docs/operations/deployment-boundary.md)를 참고합니다.
+수동 GHCR → EC2 설정 검사 절차는 [docs/operations/github-ec2-container-deployment.md](docs/operations/github-ec2-container-deployment.md)를 따릅니다.
+키움 App/Secret Key는 대화·Git·`.env`·CI에 입력하지 말고 [자격증명 관리 정책](docs/security/kiwoom-credential-management.md)과 [회전·사고 대응 절차](docs/operations/credential-rotation.md)를 따릅니다.
+
+### 4. 실행
+
+```bash
+python main.py
 ```
 
 *(실행 후 메인 루프가 정상 종료되면 자동으로 일일 부검 리포트가 Slack으로 발송됩니다.)*

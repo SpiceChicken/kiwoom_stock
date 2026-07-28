@@ -1,57 +1,20 @@
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from dataclasses import dataclass
+
+from kiwoom_stock.application.ports import MarketDataGateway
+from kiwoom_stock.domain.models import Position
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
-
-@dataclass
-class Position:
-    id: int
-    stock_code: str
-    stock_name: str
-    buy_price: float
-    buy_time: str
-    buy_regime: str
-    status: str = 'OPEN'
-    # [추가]
-    thrust: float = 0.0
-    gravity: float = 0.0
-    drag: float = 0.0
-    magnetic: float = 0.0
-    jerk: float = 0.0
-    impulse: float = 0.0
-    net_force: float = 0.0
-    # [추가] DB에서 읽어올 때 포함될 수 있는 필드들 (기본값 None)
-    sell_price: Optional[float] = None
-    profit_rate: Optional[float] = None
-    sell_time: Optional[str] = None
-    sell_reason: Optional[str] = None
-    # DB에는 없지만, 프로그램 실행 중(Runtime)에만 사용하는 메모리 변수
-    atr_percent: float = 0.5
-    down_atr_percent: float = 0.5
-    
-    @property
-    def calc_profit_rate(self) -> float:
-        """
-        매수가 대비 수익률을 계산합니다.
-
-        """
-        # 0으로 나누기 방지 및 가격 미지정 시 0.0 반환
-        if not self.buy_price or not self.sell_price:
-            return 0.0
-            
-        # sell_price가 0이면(아직 매도 전) 현재가를 대신 넣거나 0.0을 반환하도록 설계 가능
-        return round((self.sell_price / self.buy_price - 1) * 100, 2)
 
 class StockManager:
     """
     [Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리
     
     """
-    def __init__(self, client, db, filter_config: Dict):
-        self.client = client
+    def __init__(self, market_gateway: MarketDataGateway, db, filter_config: Dict):
+        self.market_gateway = market_gateway
         self.db = db
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
         self.max_stocks = filter_config.get("max_stocks", 50)
@@ -75,7 +38,7 @@ class StockManager:
             seen_codes = set() # 중복 체크용
             
             # 1. 실시간 거래대금 상위 종목 먼저 추가
-            upper_list = self.client.market.get_top_trading_value(market_tp="001")
+            upper_list = self.market_gateway.get_top_trading_value(market_tp="001")
             for item in upper_list:
                 if len(new_stocks) >= self.max_stocks: break
                 code, name = item['stk_cd'], item['stk_nm']

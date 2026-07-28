@@ -1,0 +1,187 @@
+# GitHub → EC2 container production-check 운영 가이드
+
+이 문서는 현재 코드를 public GHCR에 올리고 EC2에서 **설정 검사만** 수행하는
+절차를 설명한다. 실제 worker와 매매 기능은 시작하지 않는다.
+
+## 한눈에 보는 흐름
+
+```text
+manual GitHub workflow
+  → full 40-hex source SHA 입력
+  → lint/type/test/package/container 검증
+  → ghcr.io/spicechicken/kiwoom_stock:sha-<40 hex> push
+  → OCI digest 확인 + 로그아웃 상태 익명 pull
+  → production 승인
+  → checkout 없는 deploy job이 GitHub OIDC로 SSM-only AWS role 사용
+  → i-02cb0a404794bd43a에서 잠금/자원/secret metadata 검사
+  → network/운영 volume/실제 key 없는 digest image로 일회성 --check-config
+  → current/previous full release tuple을 하나의 JSON으로 기록
+```
+
+GitHub에는 Kiwoom App Key와 Secret Key를 넣지 않는다. 두 값은 EC2의 Parameter
+Store materializer가 `/run/kiwoom-stock/credentials/app-key`와 `secret-key`에
+root 소유 `0400` 파일로 만든다. workflow와 SSM 출력은 값이나 OAuth token을 읽거나
+출력하지 않는다. host command는 이 파일의 owner/mode/link/size/symlink
+metadata만 검사한다. candidate container에는 별도의 정적 non-secret placeholder
+두 개만 잠시 mount하며 종료 시 제거한다.
+
+## 1. 한 번만 준비할 항목
+
+### GitHub
+
+1. repository가 public인지 확인한다.
+2. Settings → Environments → `production`을 만든다.
+3. required reviewer를 지정한다. 1인 프로젝트라면 운영 계정 본인을 지정한다.
+4. Environment variable `KIWOOM_AWS_DEPLOY_ROLE_ARN`에 exact deploy role ARN을
+   등록한다. 현재 허용값은
+   `arn:aws:iam::380648615401:role/kiwoom-stock-github-production-check` 하나다.
+5. Kiwoom key, AWS access key, `.env` 내용은 GitHub Secret/Variable에 등록하지
+   않는다.
+
+첫 GHCR push 뒤 Packages에서 `kiwoom_stock` package를 public으로 설정해야 할 수
+있다. workflow는 Docker 로그아웃과 빈 `DOCKER_CONFIG`를 사용한 digest pull이
+실패하면 AWS OIDC 단계 전에 중단된다. 익명 pull이 성공하기 전 EC2 명령은 없다.
+
+### AWS
+
+1. GitHub OIDC provider의 URL은 `token.actions.githubusercontent.com`, audience는
+   `sts.amazonaws.com`이어야 한다.
+2. trust policy의 `sub`는 실제 repository OIDC customization read-back 결과와
+   `production` Environment를 exact match한다. wildcard를 사용하지 않는다.
+3. [GitHub deploy policy](../../deploy/iam/github-deploy-policy.json.example)는
+   exact instance/document `ssm:SendCommand`와
+   `ssm:GetCommandInvocation`만 허용한다.
+4. [EC2 runtime policy](../../deploy/iam/ec2-runtime-policy.json.example)는 exact
+   두 Parameter Store ARN만 읽는다. public GHCR pull에 ECR IAM 권한은 필요 없다.
+5. Access Analyzer와 IAM simulation을 통과한 뒤에만 live role을 변경한다.
+
+자세한 trust와 policy 적용 순서는
+[OIDC/AWS bootstrap](github-oidc-aws-bootstrap.md)을 따른다.
+
+## 2. 수동 production-check 실행
+
+1. Actions → `Production container check` → Run workflow를 연다.
+2. `source_sha`에 full 40-character lowercase commit SHA를 입력한다. branch와
+   tag 같은 mutable ref는 허용하지 않는다.
+3. OIDC가 없는 `build_publish` job이 끝날 때까지 기다린다.
+4. `production` Environment 승인 화면에서 immutable source SHA, digest, image
+   size와 Compose hash evidence를 확인하고 승인한다.
+
+workflow는 다음 순서를 바꾸지 않는다.
+
+1. complete-history Gitleaks scan
+2. pip editable install, lint, mypy, 전체 테스트
+3. package build, 설치된 wheel import/config smoke
+4. Docker test/runtime build와 runtime image 검사
+5. full-SHA tag만 GHCR push
+6. exact digest 해소, image size 850 MiB 상한 확인
+7. clean anonymous digest pull
+8. 별도 checkout-free deploy job의 OIDC role assumption
+9. exact EC2에 account-owned custom SSM document 실행
+10. terminal SSM result와 redacted evidence artifact 기록
+
+`latest` tag는 만들지 않는다. EC2에는
+`ghcr.io/spicechicken/kiwoom_stock@sha256:<64 hex>` 형식만 전달한다.
+full-SHA tag가 이미 존재하면 먼저 인증 pull한다. 새 local candidate와 remote image
+ID가 완전히 같을 때만 기존 digest를 재사용하며, 다르면 overwrite하지 않고
+실패한다. 첫 push 뒤 package가 private여서 anonymous gate가 실패한 경우 package를
+public으로 바꾸고 같은 SHA를 재실행할 수 있다.
+
+protected deploy job에는 checkout, setup-python, pip, test, Docker 실행이 없다.
+`needs.build_publish.outputs`의 SHA/digest/size/두 Compose hash를 형식·상한까지 다시
+검사한 뒤 document parameter로만 전달한다.
+
+## 3. EC2에서 실제로 검사하는 것
+
+[deploy_runtime_check.sh](../../deploy/ec2/deploy_runtime_check.sh)는 검증된
+artifact를 root:root `0755`
+`/usr/local/sbin/kiwoom-production-check`에 미리 설치한다. SSM의
+[`KiwoomStock-ProductionCheck`](../../deploy/ssm/production-check-document.yaml)
+document만 이 경로를 실행한다. document에는 임의 command/string parameter가
+없다. host command는 다음을 fail-fast로 확인한다.
+
+- root 실행과 `/run/lock/kiwoom-stock-deploy.lock`의 non-blocking `flock`;
+- Docker와 Compose 존재;
+- IMDSv2 instance ID/region이 workflow의 exact target과 일치;
+- Docker filesystem free space 1536 MiB 이상;
+- `MemAvailable` 256 MiB 이상;
+- secret directory가 root:root `0700`;
+- 두 secret가 root:root `0400`, 1~8192 bytes, regular file, hard link 1개이며
+  전체 path component에 symlink가 없음;
+- source SHA와 두 Compose SHA256;
+- image가 exact public repository의 sha256 digest.
+
+그 다음 exact source SHA에서 두 Compose 파일을 내려받아 전달받은 hash와 대조하고,
+bounded pull 뒤 OCI revision label이 source SHA와 같은지 확인한다. check 전용
+directory와 placeholder key를 만들고 `docker compose config --quiet` 및 아래
+명령 한 번만 수행한다.
+
+```text
+docker compose ... run --rm --no-deps -T \
+  --name kiwoom-check-<sha12>-<digest12> app \
+  python -m kiwoom_stock --check-config
+```
+
+effective Compose는 `network_mode: none`이며 production `kiwoom-data` 대신
+read-only ephemeral check directory를 사용한다. 실제 host key는 mount하지 않는다.
+EXIT/ERR/TERM trap은 exact-name container를 `docker rm -f`하고 부재를 확인한 뒤
+placeholder와 check data directory를 제거한다. `docker compose up`, worker
+override, restart, scale, volume prune는 없다.
+
+## 4. 성공 증거
+
+GitHub artifact `production-check-<source SHA>`에는 비밀이 아닌 정보만 남긴다.
+
+- source SHA
+- OCI digest와 runner에서 측정한 image size
+- instance ID와 SSM command ID
+- terminal status와 response code
+- 시작/종료 시각
+- stdout/stderr byte 수
+- GitHub secret 미사용 및 worker 미활성화 선언
+
+원격 성공 후 `/opt/kiwoom-stock/deployments/release-state.json` 하나가 atomic
+replace된다. `current`와 `previous` 각각은 source SHA, image digest, OCI revision,
+두 Compose hash를 모두 가진다. 별도 파일 사이 partial update가 없다. secret 내용,
+placeholder 내용, raw Kiwoom 응답, OAuth token은 evidence에 포함하지 않는다.
+
+## 5. rollback check
+
+rollback은 이전 worker를 재활성화하는 기능이 아니다. EC2 운영자가 별도 승인된 SSM
+검증 창에서 동일 preinstalled script에 `--rollback-check`,
+`--expected-instance-id`, `--region`만 전달한다. image/source/hash argument는
+rollback에서 허용하지 않는다. recorded `previous` tuple과 저장된 hash-matched
+Compose만 사용해 `--check-config`를 다시 실행하며 state를 바꾸지 않는다.
+
+previous image가 없거나 digest 형식이 다르면 실패한다. named volume과 host secret를
+삭제하지 않는다.
+
+## 6. 비용과 보존
+
+이 설계는 private ECR을 사용하지 않는다. public GHCR은 익명 pull을 허용하며, 현재
+GitHub 문서상 public package의 Container registry 저장·대역폭은 무료 정책에
+속한다. public repository의 표준 GitHub-hosted Actions도 무료 정책 범위에서
+사용한다. 정책은 바뀔 수 있으므로 release 전 공식 문서를 다시 확인한다.
+
+- <https://docs.github.com/en/packages/learn-github-packages/introduction-to-github-packages>
+- <https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility>
+- <https://docs.github.com/en/actions/concepts/billing-and-usage>
+
+private repository/package, paid runner, 장기 artifact retention, private registry,
+NAT Gateway, 추가 EC2/EBS/CloudWatch 자원은 이 승인 범위 밖이다. artifact retention은
+14일이며 image 정리는 exact digest와 rollback 보존 조건을 먼저 확인해야 한다.
+
+## 7. 아직 RED인 항목
+
+production-check 성공은 아래를 증명하지 않는다.
+
+- 시장 시간대의 장시간 worker 안정성;
+- SIGTERM이 `TradingEngine.close()`까지 전달되는 real path;
+- named volume의 실제 SQLite create/reopen/recovery;
+- 한 process/replica 강제;
+- 계좌·주문·취소 권한;
+- Slack/S3/Gemini;
+- 실제 매매 성과와 trading readiness.
+
+이 항목은 [deployment boundary](deployment-boundary.md)의 shadow/live activation
+gate를 별도로 통과해야 한다.

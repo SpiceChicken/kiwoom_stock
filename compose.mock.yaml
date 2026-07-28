@@ -1,0 +1,33 @@
+services:
+  app:
+    image: ${KIWOOM_IMAGE:-kiwoom-stock:runtime}
+    init: true
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp
+      - /run/secrets:mode=0700
+      - /run/kiwoom-secrets:mode=0700
+    environment:
+      KIWOOM_API_MODE: mock
+      KIWOOM_APP_ENV: staging
+      KIWOOM_PROCESS_NAME: ${KIWOOM_PROCESS_NAME:-paper-monitor-mock}
+      KIWOOM_CREDENTIALS_DIR: /run/secrets
+    secrets:
+      - source: kiwoom_mock_app_key
+        target: KIWOOM_APP_KEY
+      - source: kiwoom_mock_secret_key
+        target: KIWOOM_SECRET_KEY
+
+secrets:
+  kiwoom_mock_app_key:
+    file: ${KIWOOM_MOCK_APP_KEY_FILE:?set an absolute external mock app-key file}
+  kiwoom_mock_secret_key:
+    file: ${KIWOOM_MOCK_SECRET_KEY_FILE:?set an absolute external mock secret-key file}

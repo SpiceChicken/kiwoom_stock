@@ -1,12 +1,65 @@
-# tests/conftest.py
-import pytest
-from unittest.mock import MagicMock
 from datetime import datetime
-from kiwoom_stock.core.schema import SupplyData, PgmData, ForeignData
-from kiwoom_stock.monitoring.manager import Position
-from kiwoom_stock.monitoring.strategy import TradingStrategy
-from kiwoom_stock.monitoring.manager import StockManager
-from kiwoom_stock.core.types import MarketRegime
+from pathlib import Path
+import socket
+import threading
+from unittest.mock import MagicMock
+
+import pytest
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_ORIGINAL_NETWORK_FUNCTIONS = {
+    "create_connection": socket.create_connection,
+    "getaddrinfo": socket.getaddrinfo,
+    "connect": socket.socket.connect,
+    "connect_ex": socket.socket.connect_ex,
+}
+
+
+def _deny_external_network(*args, **kwargs):
+    raise AssertionError("tests must use a fake transport; external network access was attempted")
+
+
+def pytest_sessionstart(session):
+    """Install the network tripwire before pytest imports any test modules."""
+    socket.create_connection = _deny_external_network
+    socket.getaddrinfo = _deny_external_network
+    socket.socket.connect = _deny_external_network
+    socket.socket.connect_ex = _deny_external_network
+
+
+def pytest_sessionfinish(session, exitstatus):
+    socket.create_connection = _ORIGINAL_NETWORK_FUNCTIONS["create_connection"]
+    socket.getaddrinfo = _ORIGINAL_NETWORK_FUNCTIONS["getaddrinfo"]
+    socket.socket.connect = _ORIGINAL_NETWORK_FUNCTIONS["connect"]
+    socket.socket.connect_ex = _ORIGINAL_NETWORK_FUNCTIONS["connect_ex"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def repository_side_effect_guard():
+    """Fail the suite if a test creates the legacy cwd database or leaks a worker."""
+    root_database = REPOSITORY_ROOT / "trades.db"
+    threads_before = set(threading.enumerate())
+
+    assert not root_database.exists(), f"pre-existing repository database blocks hermetic tests: {root_database}"
+    yield
+
+    assert not root_database.exists(), f"test suite created repository database: {root_database}"
+    leaked_threads = [
+        thread
+        for thread in threading.enumerate()
+        if thread not in threads_before and thread.is_alive()
+    ]
+    assert not leaked_threads, f"test suite leaked worker threads: {leaked_threads}"
+
+
+@pytest.fixture(autouse=True)
+def block_external_network(monkeypatch):
+    """Block socket creation and DNS resolution for every collected test."""
+    monkeypatch.setattr(socket, "create_connection", _deny_external_network)
+    monkeypatch.setattr(socket, "getaddrinfo", _deny_external_network)
+    monkeypatch.setattr(socket.socket, "connect", _deny_external_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", _deny_external_network)
+
 
 @pytest.fixture
 def mock_strategy_config():
@@ -34,6 +87,9 @@ def strategy(mock_strategy_config, mocker):
     [해결책] MagicMock 대신 실제 datetime을 상속받아 now()만 조작합니다.
     이렇게 하면 combine, strptime 등 다른 메서드는 실제처럼 동작하여 TypeError가 사라집니다.
     """
+    from kiwoom_stock.core.types import MarketRegime
+    from kiwoom_stock.monitoring.strategy import TradingStrategy
+
     real_datetime = datetime
 
     class MockDatetime(real_datetime):
@@ -53,6 +109,8 @@ def strategy(mock_strategy_config, mocker):
 @pytest.fixture
 def sample_supply_data():
     """v2.6 SupplyData 기반 가짜 데이터 (상승 추세)"""
+    from kiwoom_stock.core.schema import ForeignData, PgmData, SupplyData
+
     data = SupplyData(
         stock_code="005930",
         strength=120.0,
@@ -92,6 +150,8 @@ def sample_supply_data():
 
 @pytest.fixture
 def sample_position():
+    from kiwoom_stock.monitoring.manager import Position
+
     return Position(
         id=1,
         stock_code="005930",

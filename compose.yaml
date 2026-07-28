@@ -1,0 +1,32 @@
+name: kiwoom-stock
+
+services:
+  app:
+    image: ${KIWOOM_IMAGE:-kiwoom-stock:runtime}
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    environment:
+      KIWOOM_API_MODE: disabled
+      KIWOOM_PROCESS_NAME: ${KIWOOM_PROCESS_NAME:-paper-monitor}
+      KIWOOM_OUTPUT_DIR: /var/lib/kiwoom/output
+      KIWOOM_DB_PATH: /var/lib/kiwoom/trades.db
+    volumes:
+      - kiwoom-data:/var/lib/kiwoom
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/kiwoom-runtime-entrypoint.py", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    command: ["python", "-m", "kiwoom_stock", "--check-config"]
+
+volumes:
+  kiwoom-data:

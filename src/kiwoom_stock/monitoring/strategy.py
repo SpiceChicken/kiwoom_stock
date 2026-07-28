@@ -1,12 +1,18 @@
 import logging
 from datetime import datetime, time, timedelta
-from typing import Dict, Optional, List, Any
+from typing import Any, Callable, Dict, Optional, cast
 
-from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.core.types import MarketRegime
 
 logger = logging.getLogger(__name__)
+
+Clock = Callable[[], datetime]
+
+
+def _system_now() -> datetime:
+    return cast(datetime, getattr(datetime, "now")())
+
 
 class TradingStrategy:
     """
@@ -14,16 +20,17 @@ class TradingStrategy:
     - 특징: 물리 엔진이 산출한 가속도(모멘텀)와 속도(스코어)를 활용하여 가장 순수한 동역학 기반 판단을 내립니다.
     """
     
-    def __init__(self, strategy_config: Dict):
+    def __init__(self, strategy_config: Dict, clock: Optional[Clock] = None):
         self.settings = strategy_config
         self.debug_mode = strategy_config.get("debug_mode", False)
+        self._clock = clock or _system_now
 
         exit_str = strategy_config.get("day_trade_exit_time", "15:30")
         self.exit_time_obj = time.fromisoformat(exit_str)
-        dummy_dt = datetime.combine(datetime.today(), self.exit_time_obj)
+        dummy_dt = datetime.combine(datetime.min.date(), self.exit_time_obj)
         self.forced_exit_time = (dummy_dt - timedelta(minutes=3)).time()
 
-        self._current_regime = MarketRegime.UNKNOWN
+        self._current_regime: Any = MarketRegime.UNKNOWN
         self._cached_config: Dict[str, Any] = {}
 
         self.target_profit_rate = strategy_config.get("target_profit_rate", 0.03)
@@ -35,6 +42,9 @@ class TradingStrategy:
 
         # 청산 동력을 추적
         self._kinetic_state: Dict[str, Dict[str, Any]] = {}
+
+    def _resolve_now(self, now: Optional[datetime] = None) -> datetime:
+        return now if now is not None else self._clock()
 
     def update_context(self, regime: MarketRegime):
         """[Context Update] 시장 레짐에 따라 임계값 동적 조정"""
@@ -51,20 +61,30 @@ class TradingStrategy:
             
             logger.info(f"Strategy Updated: {regime_val}")
 
-    def is_monitoring_time(self) -> bool:
-        if self.debug_mode: return True
-        now = datetime.now()
-        if now.weekday() >= 5: return False
-        return time(9, 0) <= now.time() <= self.exit_time_obj
+    def is_monitoring_time(self, now: Optional[datetime] = None) -> bool:
+        if self.debug_mode:
+            return True
+        current = self._resolve_now(now)
+        if current.weekday() >= 5:
+            return False
+        return time(9, 0) <= current.time() <= self.exit_time_obj
 
-    def is_trading_window(self) -> bool:
-        if self.debug_mode: return True
-        return time(9, 0) <= datetime.now().time() < self.deadline_time
+    def is_trading_window(self, now: Optional[datetime] = None) -> bool:
+        if self.debug_mode:
+            return True
+        current = self._resolve_now(now)
+        return time(9, 0) <= current.time() < self.deadline_time
 
     def is_kill_switch_activated(self, total_pnl: float) -> bool:
         return total_pnl <= self.total_loss_limit
 
-    def get_exit_reason(self, pos, current_price: float, forces: Dict) -> Optional[str]:
+    def get_exit_reason(
+        self,
+        pos,
+        current_price: float,
+        forces: Dict,
+        now: Optional[datetime] = None,
+    ) -> Optional[str]:
         """
         [청산 판단] V2.5 비대칭 스마트 방어망 & Dual-Trigger Sniper (Zero-Time)
         """
@@ -73,7 +93,7 @@ class TradingStrategy:
             # 어떠한 청산도 집행하지 않고 관성을 유지함 (손익 -100% 오작동 방지).
             return None
         
-        now_time = datetime.now().time()
+        now_time = self._resolve_now(now).time()
         stock_code = pos.stock_code
         
         if pos.status == "OVERNIGHT":
