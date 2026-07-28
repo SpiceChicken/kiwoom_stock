@@ -1,16 +1,61 @@
-import logging
-from typing import Any, Dict, Optional
 import importlib.resources as pkg_resources
+import logging
+from typing import Any, Dict, Optional, Protocol, cast
+
+genai: Any
 try:  # Prefer the supported SDK; keep a compatibility fallback for existing installs.
-    from google import genai  # type: ignore
+    from google import genai as _modern_genai
+
+    genai = _modern_genai
     _SDK_KIND = "modern"
 except ImportError:  # pragma: no cover - exercised only in legacy environments
     try:
-        import google.generativeai as genai  # type: ignore
+        import google.generativeai as _legacy_genai
+
+        genai = _legacy_genai
         _SDK_KIND = "legacy"
     except ImportError:  # dependency is optional until an API key is configured
-        genai = None  # type: ignore[assignment]
+        genai = None
         _SDK_KIND = "none"
+
+
+class _GeminiResponse(Protocol):
+    text: Optional[str]
+
+
+class _ModernFiles(Protocol):
+    def upload(self, *, file: str, config: Dict[str, str]) -> Any: ...
+
+
+class _ModernModels(Protocol):
+    def generate_content(
+        self,
+        *,
+        model: str,
+        contents: Any,
+    ) -> _GeminiResponse: ...
+
+
+class _ModernClient(Protocol):
+    files: _ModernFiles
+    models: _ModernModels
+
+
+class _ModernSDK(Protocol):
+    def Client(self, *, api_key: str) -> _ModernClient: ...
+
+
+class _LegacyModel(Protocol):
+    def generate_content(self, contents: Any) -> _GeminiResponse: ...
+
+
+class _LegacySDK(Protocol):
+    def configure(self, *, api_key: str) -> None: ...
+
+    def GenerativeModel(self, model_name: str) -> _LegacyModel: ...
+
+    def upload_file(self, *, path: str, mime_type: str) -> Any: ...
+
 
 from kiwoom_stock.application.reporting import (
     DailyReportRequest,
@@ -31,25 +76,53 @@ class GeminiClient:
     def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash"):
         self.model_name = model
         self.api_key = api_key
-        self.model: Optional[Any]
+        self.model: Optional[Any] = None
+        self.client: Optional[_ModernClient] = None
+        self._legacy_model: Optional[_LegacyModel] = None
+        self._legacy_sdk: Optional[_LegacySDK] = None
         
         if self.api_key and genai is not None:
             if hasattr(genai, "Client"):
-                self.client = genai.Client(api_key=self.api_key)
+                modern_sdk = cast(_ModernSDK, genai)
+                self.client = modern_sdk.Client(api_key=self.api_key)
                 self.model = self.client
                 self._sdk_kind = "modern"
             else:
-                genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel(self.model_name)
-                self.client = None
+                self._legacy_sdk = cast(_LegacySDK, genai)
+                self._legacy_sdk.configure(api_key=self.api_key)
+                self._legacy_model = self._legacy_sdk.GenerativeModel(
+                    self.model_name
+                )
+                self.model = self._legacy_model
                 self._sdk_kind = "legacy"
             logger.info(f"✅ Gemini Native Engine 점화 완료 (Model: {self.model_name})")
         else:
             self.model = None
-            self.client = None
             self._sdk_kind = "none"
             logger.warning("⚠️ Gemini SDK가 설치되지 않았거나 API Key가 주입되지 않았습니다.")
-    
+
+    @staticmethod
+    def _extract_response_text(response: _GeminiResponse) -> str:
+        text = getattr(response, "text", None)
+        if not isinstance(text, str):
+            raise ValueError("Gemini response did not include text")
+        return text.strip()
+
+    def _require_modern_client(self) -> _ModernClient:
+        if self.client is None:
+            raise RuntimeError("Gemini modern client is not initialized")
+        return self.client
+
+    def _require_legacy_model(self) -> _LegacyModel:
+        if self._legacy_model is None:
+            raise RuntimeError("Gemini legacy model is not initialized")
+        return self._legacy_model
+
+    def _require_legacy_sdk(self) -> _LegacySDK:
+        if self._legacy_sdk is None:
+            raise RuntimeError("Gemini legacy SDK is not initialized")
+        return self._legacy_sdk
+
     def generate_content(self, prompt: str, file_path: Optional[str] = None) -> Dict:
         """[Core] Native SDK를 이용한 텍스트 및 파일(멀티모달) 처리"""
         if not self.model:
@@ -61,13 +134,19 @@ class GeminiClient:
                 logger.info(f"📎 첨부파일 업로드 중: {file_path}")
                 # 구글 임시 서버에 파일 업로드 (보통 48시간 후 자동 삭제됨)
                 if self._sdk_kind == "modern":
-                    uploaded_file = self.client.files.upload(file=file_path, config={"mime_type": "text/csv"})
-                    response = self.client.models.generate_content(
+                    client = self._require_modern_client()
+                    uploaded_file = client.files.upload(file=file_path, config={"mime_type": "text/csv"})
+                    response = client.models.generate_content(
                         model=self.model_name, contents=[uploaded_file, prompt]
                     )
                 else:
-                    uploaded_file = genai.upload_file(path=file_path, mime_type="text/csv")
-                    response = self.model.generate_content([uploaded_file, prompt])
+                    uploaded_file = self._require_legacy_sdk().upload_file(
+                        path=file_path,
+                        mime_type="text/csv",
+                    )
+                    response = self._require_legacy_model().generate_content(
+                        [uploaded_file, prompt]
+                    )
                 
                 # The SDK-specific call above is the single request.  Do not
                 # replay it through the legacy model (the modern client has no
@@ -76,14 +155,17 @@ class GeminiClient:
             # 💡 텍스트만 있는 경우 (기존과 동일)
             else:
                 response = (
-                    self.client.models.generate_content(model=self.model_name, contents=prompt)
+                    self._require_modern_client().models.generate_content(
+                        model=self.model_name,
+                        contents=prompt,
+                    )
                     if self._sdk_kind == "modern"
-                    else self.model.generate_content(prompt)
+                    else self._require_legacy_model().generate_content(prompt)
                 )
                 
             return {
                 "success": True,
-                "output": response.text.strip(),
+                "output": self._extract_response_text(response),
                 "error": None
             }
         except Exception as e:
@@ -117,23 +199,34 @@ class GeminiClient:
             if csv_path:
                 logger.info(f"📎 첨부파일 업로드 중: {csv_path}")
                 if self._sdk_kind == "modern":
-                    uploaded_file = self.client.files.upload(file=csv_path, config={"mime_type": "text/csv"})
-                    response = self.client.models.generate_content(
+                    client = self._require_modern_client()
+                    uploaded_file = client.files.upload(file=csv_path, config={"mime_type": "text/csv"})
+                    response = client.models.generate_content(
                         model=self.model_name, contents=[uploaded_file, full_prompt]
                     )
                 else:
-                    uploaded_file = genai.upload_file(path=csv_path, mime_type="text/csv")
-                    response = self.model.generate_content([uploaded_file, full_prompt])
+                    uploaded_file = self._require_legacy_sdk().upload_file(
+                        path=csv_path,
+                        mime_type="text/csv",
+                    )
+                    response = self._require_legacy_model().generate_content(
+                        [uploaded_file, full_prompt]
+                    )
             else:
                 response = (
-                    self.client.models.generate_content(model=self.model_name, contents=full_prompt)
+                    self._require_modern_client().models.generate_content(
+                        model=self.model_name,
+                        contents=full_prompt,
+                    )
                     if self._sdk_kind == "modern"
-                    else self.model.generate_content(full_prompt)
+                    else self._require_legacy_model().generate_content(
+                        full_prompt
+                    )
                 )
                 
             return {
                 "success": True,
-                "output": response.text.strip(),
+                "output": self._extract_response_text(response),
                 "error": None
             }
         except Exception as e:

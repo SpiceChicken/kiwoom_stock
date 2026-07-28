@@ -39,7 +39,7 @@ def _forbid_external_clients(monkeypatch):
 
 
 class _ModelResponse:
-    def __init__(self, text: str):
+    def __init__(self, text: str | None):
         self.text = text
 
 
@@ -120,6 +120,52 @@ def test_modern_gemini_uploads_and_generates_once(monkeypatch, tmp_path):
     assert len(sdk.models.calls) == 1
     assert sdk.models.calls[0]["model"] == "gemini-2.5-flash"
     assert sdk.models.calls[0]["contents"][1] == "summarize"
+
+
+def test_modern_gemini_rejects_response_without_text(monkeypatch):
+    sdk = _ModernGeminiSDK()
+    sdk.models.response = _ModelResponse(None)
+    monkeypatch.setattr(gemini_module, "genai", sdk)
+    client = gemini_module.GeminiClient(api_key="fake-key")
+
+    result = client.generate_content("summarize")
+
+    assert result == {
+        "success": False,
+        "output": None,
+        "error": "Gemini response did not include text",
+    }
+    assert len(sdk.models.calls) == 1
+
+
+def test_modern_daily_report_rejects_missing_text_without_retry(
+    monkeypatch,
+    tmp_path,
+):
+    sdk = _ModernGeminiSDK()
+    sdk.models.response = _ModelResponse(None)
+    monkeypatch.setattr(gemini_module, "genai", sdk)
+    client = gemini_module.GeminiClient(api_key="fake-key")
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text("symbol,pnl\nABC,1\n", encoding="utf-8")
+
+    result = client.generate_daily_report(
+        stats={
+            "date": REPORT_DATE,
+            "win_rate": STATS.win_rate,
+            "total_pnl": STATS.total_pnl,
+            "defense_count": STATS.defense_count,
+        },
+        csv_path=str(csv_path),
+    )
+
+    assert result == {
+        "success": False,
+        "output": None,
+        "error": "Gemini response did not include text",
+    }
+    assert len(sdk.files.calls) == 1
+    assert len(sdk.models.calls) == 1
 
 
 def test_gemini_narrator_maps_success_date_and_artifact_reference(monkeypatch):
