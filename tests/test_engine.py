@@ -158,6 +158,17 @@ def _unexpected_boundary(*_args, **_kwargs):
     raise AssertionError("post-threshold engine boundary was called")
 
 
+def _forbid_engine_clock(monkeypatch):
+    monkeypatch.setattr(
+        engine_module,
+        "time_mod",
+        SimpleNamespace(
+            time=_unexpected_boundary,
+            sleep=_unexpected_boundary,
+        ),
+    )
+
+
 def _patch_constructor_dependencies(monkeypatch, events, expected_ledger, expected_physical):
     market = object()
     state_tracker = object()
@@ -685,8 +696,7 @@ def test_kill_switch_latches_once_without_tick_order_or_ledger_mutation(monkeypa
     active_positions = {"B": second_position, "A": first_position}
     engine = _risk_engine(total_pnl=-5.0, active_positions=active_positions)
     before_mapping = dict(active_positions)
-    monkeypatch.setattr(engine_module.time_mod, "time", _unexpected_boundary)
-    monkeypatch.setattr(engine_module.time_mod, "sleep", _unexpected_boundary)
+    _forbid_engine_clock(monkeypatch)
 
     first_result = engine.run()
     second_result = engine.run()
@@ -713,8 +723,7 @@ def test_kill_switch_latches_once_without_tick_order_or_ledger_mutation(monkeypa
 
 def test_kill_switch_with_no_active_positions_is_still_terminal(monkeypatch):
     engine = _risk_engine(total_pnl=-6.0)
-    monkeypatch.setattr(engine_module.time_mod, "time", _unexpected_boundary)
-    monkeypatch.setattr(engine_module.time_mod, "sleep", _unexpected_boundary)
+    _forbid_engine_clock(monkeypatch)
 
     result = engine.run()
 
@@ -741,8 +750,7 @@ def test_critical_notifier_failure_stays_terminal_without_generic_retry(
     monkeypatch, error, expected_type
 ):
     engine = _risk_engine(total_pnl=-5.0, critical_error=error)
-    monkeypatch.setattr(engine_module.time_mod, "time", _unexpected_boundary)
-    monkeypatch.setattr(engine_module.time_mod, "sleep", _unexpected_boundary)
+    _forbid_engine_clock(monkeypatch)
 
     first_result = engine.run()
     second_result = engine.run()
@@ -758,8 +766,7 @@ def test_critical_notifier_failure_stays_terminal_without_generic_retry(
 
 def test_critical_notifier_system_exit_is_not_swallowed(monkeypatch):
     engine = _risk_engine(total_pnl=-5.0, critical_error=SystemExit(7))
-    monkeypatch.setattr(engine_module.time_mod, "time", _unexpected_boundary)
-    monkeypatch.setattr(engine_module.time_mod, "sleep", _unexpected_boundary)
+    _forbid_engine_clock(monkeypatch)
 
     with pytest.raises(SystemExit) as caught:
         engine.run()
@@ -772,8 +779,7 @@ def test_critical_notifier_system_exit_is_not_swallowed(monkeypatch):
 
 def test_market_close_returns_normal_typed_result_without_pnl_or_time_access(monkeypatch):
     engine = _risk_engine(monitoring=False)
-    monkeypatch.setattr(engine_module.time_mod, "time", _unexpected_boundary)
-    monkeypatch.setattr(engine_module.time_mod, "sleep", _unexpected_boundary)
+    _forbid_engine_clock(monkeypatch)
 
     result = engine.run()
 
