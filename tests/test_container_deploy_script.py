@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import textwrap
 
@@ -53,22 +55,27 @@ def _fake_docker(directory: Path) -> Path:
             #!/usr/bin/env bash
             set -eu
             printf '%s\\n' "$*" >>"${FAKE_DOCKER_LOG}"
-            if [[ "$1" == "compose" && "$*" == *" config --quiet"* ]]; then
-                [[ "${FAKE_DOCKER_MODE}" != "config-fail" ]]
-                exit
-            fi
             if [[ "$1" == "pull" ]]; then
                 exit 0
             fi
             if [[ "$1" == "image" && "$2" == "inspect" ]]; then
                 if [[ "$*" == *"org.opencontainers.image.revision"* ]]; then
                     printf '%s\\n' "${FAKE_SOURCE_SHA}"
+                elif [[ "$*" == *"Config.Entrypoint"* ]]; then
+                    if [[ "${FAKE_DOCKER_MODE}" == "bad-entrypoint" ]]; then
+                        printf '%s\\n' '["/bin/sh","-c"]'
+                    else
+                        printf '%s\\n' \
+                            '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]'
+                    fi
+                elif [[ "$*" == *".Config.User"* ]]; then
+                    printf '%s\\n' "10001:10001"
                 else
                     printf '%s\\n' "sha256:fake-image-id"
                 fi
                 exit 0
             fi
-            if [[ "$1" == "compose" && "$*" == *" run "* ]]; then
+            if [[ "$1" == "run" ]]; then
                 touch "${FAKE_CONTAINER_RUNNING}"
                 if [[ "${FAKE_DOCKER_MODE}" == "term-ignore" ]]; then
                     trap '' TERM
@@ -92,9 +99,6 @@ def _fake_docker(directory: Path) -> Path:
             if [[ "$1" == "image" && "$2" == "ls" ]]; then
                 exit 0
             fi
-            if [[ "$1" == "compose" && "$2" == "version" ]]; then
-                exit 0
-            fi
             exit 0
             """
         ),
@@ -108,6 +112,9 @@ def _fake_environment(tmp_path: Path, mode: str) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _fake_docker(bin_dir)
+    chown = bin_dir / "chown"
+    chown.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    chown.chmod(0o755)
     return {
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_DOCKER_LOG": str(tmp_path / "docker.log"),
@@ -294,11 +301,9 @@ def test_compose_download_hash_mismatch_never_replaces_contract(tmp_path):
 def test_term_ignoring_check_is_force_removed_and_placeholders_are_deleted(
     tmp_path,
 ):
-    compose_dir = tmp_path / "compose"
-    compose_dir.mkdir()
     env = _fake_environment(tmp_path, "term-ignore")
     completed = _source(
-        f"compose_check {DIGEST_A!r} {SOURCE_A} {str(compose_dir)!r}",
+        f"run_container_check {DIGEST_A!r} {SOURCE_A}",
         env=env,
         timeout=8,
     )
@@ -314,18 +319,143 @@ def test_term_ignoring_check_is_force_removed_and_placeholders_are_deleted(
     assert not list(tmp_path.glob("kiwoom-check-data.*"))
 
 
-def test_config_failure_also_cleans_exact_boundaries(tmp_path):
-    compose_dir = tmp_path / "compose"
-    compose_dir.mkdir()
-    env = _fake_environment(tmp_path, "config-fail")
+def test_invalid_image_entrypoint_never_reaches_run_and_cleans_boundaries(
+    tmp_path,
+):
+    env = _fake_environment(tmp_path, "bad-entrypoint")
     completed = _source(
-        f"compose_check {DIGEST_A!r} {SOURCE_A} {str(compose_dir)!r}",
+        f"run_container_check {DIGEST_A!r} {SOURCE_A}",
         env=env,
     )
+    log = (tmp_path / "docker.log").read_text(encoding="utf-8")
 
     assert completed.returncode == 1
+    assert not any(line.startswith("run ") for line in log.splitlines())
     assert not list(tmp_path.glob("kiwoom-check-secrets.*"))
     assert not list(tmp_path.glob("kiwoom-check-data.*"))
+
+
+def test_root_owned_docker_run_has_exact_ordered_execution_boundary(tmp_path):
+    env = _fake_environment(tmp_path, "success")
+    completed = _source(
+        f"run_container_check {DIGEST_A!r} {SOURCE_A}",
+        env=env,
+    )
+    log = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    run_line = next(line for line in log.splitlines() if line.startswith("run "))
+    tokens = shlex.split(run_line)
+    mount_indexes = [
+        index for index, value in enumerate(tokens) if value == "--mount"
+    ]
+
+    assert completed.returncode == 0, completed.stderr
+    assert len(mount_indexes) == 3
+    normalized = list(tokens)
+    expected_mount_suffixes = [
+        ",target=/var/lib/kiwoom,readonly",
+        ",target=/run/secrets/KIWOOM_APP_KEY,readonly",
+        ",target=/run/secrets/KIWOOM_SECRET_KEY,readonly",
+    ]
+    expected_sources = [
+        r"/kiwoom-check-data\.[^,]+",
+        r"/kiwoom-check-secrets\.[^,]+/app-key",
+        r"/kiwoom-check-secrets\.[^,]+/secret-key",
+    ]
+    replacements = ["<CHECK_DATA>", "<APP_KEY>", "<SECRET_KEY>"]
+    for index, suffix, source_pattern, replacement in zip(
+        mount_indexes,
+        expected_mount_suffixes,
+        expected_sources,
+        replacements,
+        strict=True,
+    ):
+        mount = tokens[index + 1]
+        assert mount.startswith("type=bind,source=")
+        assert mount.endswith(suffix)
+        source = mount.removeprefix("type=bind,source=").removesuffix(suffix)
+        assert re.search(source_pattern + r"$", source)
+        normalized[index + 1] = (
+            f"type=bind,source={replacement}{suffix}"
+        )
+
+    expected_name = "kiwoom-check-aaaaaaaaaaaa-111111111111"
+    assert normalized == [
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--name",
+        expected_name,
+        "--label",
+        "io.kiwoom-stock.project=kiwoom-stock",
+        "--label",
+        "io.kiwoom-stock.lifecycle=production-check-only",
+        "--init",
+        "--no-healthcheck",
+        "--user",
+        "0:0",
+        "--network",
+        "none",
+        "--read-only",
+        "--cpus",
+        "0.75",
+        "--memory",
+        "536870912",
+        "--memory-swap",
+        "536870912",
+        "--pids-limit",
+        "128",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "SETGID",
+        "--cap-add",
+        "SETUID",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,mode=1777",
+        "--tmpfs",
+        "/run/secrets:rw,nosuid,nodev,noexec,mode=0700",
+        "--tmpfs",
+        "/run/kiwoom-secrets:rw,nosuid,nodev,noexec,mode=0700",
+        "--mount",
+        "type=bind,source=<CHECK_DATA>,target=/var/lib/kiwoom,readonly",
+        "--mount",
+        (
+            "type=bind,source=<APP_KEY>,"
+            "target=/run/secrets/KIWOOM_APP_KEY,readonly"
+        ),
+        "--mount",
+        (
+            "type=bind,source=<SECRET_KEY>,"
+            "target=/run/secrets/KIWOOM_SECRET_KEY,readonly"
+        ),
+        "--env",
+        "KIWOOM_API_MODE=prod",
+        "--env",
+        "KIWOOM_APP_ENV=prod",
+        "--env",
+        "KIWOOM_PROCESS_NAME=paper-monitor",
+        "--env",
+        "KIWOOM_CREDENTIALS_DIR=/run/secrets",
+        "--env",
+        "KIWOOM_OUTPUT_DIR=/var/lib/kiwoom/output",
+        "--env",
+        "KIWOOM_DB_PATH=/var/lib/kiwoom/trades.db",
+        DIGEST_A,
+        "python",
+        "-m",
+        "kiwoom_stock",
+        "--check-config",
+    ]
+    assert "--privileged" not in tokens
+    assert "--device" not in tokens
+    assert "--pid" not in tokens
+    assert "--ipc" not in tokens
+    assert "/var/run/docker.sock" not in run_line
 
 
 def test_secret_metadata_contract_matches_8kib_ssot_and_rejects_symlink(
@@ -346,16 +476,19 @@ def test_secret_metadata_contract_matches_8kib_ssot_and_rejects_symlink(
 
 def test_script_never_mounts_actual_secret_files_or_prunes_volumes():
     text = SCRIPT.read_text(encoding="utf-8")
+    run_block = text.split("run_container_check() {", maxsplit=1)[1].split(
+        "\nvalidate_release_values() {",
+        maxsplit=1,
+    )[0]
 
-    assert 'KIWOOM_PROD_APP_KEY_FILE="${PLACEHOLDER_DIR}/app-key"' in text
-    assert (
-        'KIWOOM_PROD_SECRET_KEY_FILE="${PLACEHOLDER_DIR}/secret-key"'
-        in text
-    )
+    assert "APP_KEY_FILE" not in run_block
+    assert "SECRET_KEY_FILE" not in run_block
+    assert "docker compose" not in text
+    assert "compose.yaml" not in run_block
+    assert "compose.prod.yaml" not in run_block
     assert "CHECK_ONLY_NON_SECRET_APP_KEY" in text
     assert "CHECK_ONLY_NON_SECRET_SECRET_KEY" in text
     assert "docker volume" not in text
-    assert "docker compose up" not in text
     assert "rm -rf" not in text
     assert "trap 'cleanup_runtime' EXIT" in text
     assert "trap 'cleanup_runtime' ERR" in text

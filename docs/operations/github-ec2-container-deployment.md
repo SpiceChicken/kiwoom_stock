@@ -101,7 +101,7 @@ document만 이 경로를 실행한다. document에는 임의 command/string par
 없다. host command는 다음을 fail-fast로 확인한다.
 
 - root 실행과 `/run/lock/kiwoom-stock-deploy.lock`의 non-blocking `flock`;
-- Docker와 Compose 존재;
+- Docker 존재(EC2 host의 Docker Compose 설치는 필요하지 않음);
 - IMDSv2 instance ID/region이 workflow의 exact target과 일치;
 - Docker filesystem free space 1536 MiB 이상;
 - `MemAvailable` 256 MiB 이상;
@@ -111,21 +111,27 @@ document만 이 경로를 실행한다. document에는 임의 command/string par
 - source SHA와 두 Compose SHA256;
 - image가 exact public repository의 sha256 digest.
 
-그 다음 exact source SHA에서 두 Compose 파일을 내려받아 전달받은 hash와 대조하고,
-bounded pull 뒤 OCI revision label이 source SHA와 같은지 확인한다. check 전용
-directory와 placeholder key를 만들고 `docker compose config --quiet` 및 아래
-명령 한 번만 수행한다.
+그 다음 exact source SHA에서 두 Compose 파일을 내려받아 전달받은 hash와 대조해
+release identity와 rollback record로만 저장한다. host는 이 파일을 파싱하거나
+실행하지 않는다. bounded pull 뒤 OCI revision label, image entrypoint, image user를
+검사하고 check 전용 directory와 placeholder key를 만든 뒤 root-owned fixed
+`docker run` 한 번만 수행한다.
 
 ```text
-docker compose ... run --rm --no-deps -T \
-  --name kiwoom-check-<sha12>-<digest12> app \
+docker run --rm --pull never --name kiwoom-check-<sha12>-<digest12> \
+  --init --no-healthcheck --user 0:0 --network none --read-only \
+  --cpus 0.75 --memory 536870912 --memory-swap 536870912 --pids-limit 128 \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETGID --cap-add SETUID \
+  --security-opt no-new-privileges:true <fixed tmpfs/mount/env flags> \
+  <exact image digest> \
   python -m kiwoom_stock --check-config
 ```
 
-effective Compose는 `network_mode: none`이며 production `kiwoom-data` 대신
-read-only ephemeral check directory를 사용한다. 실제 host key는 mount하지 않는다.
-EXIT/ERR/TERM trap은 exact-name container를 `docker rm -f`하고 부재를 확인한 뒤
-placeholder와 check data directory를 제거한다. `docker compose up`, worker
+고정 flags는 network none, read-only rootfs, CPU/memory/PID 상한, capability
+allowlist, no-new-privileges, exact tmpfs와 read-only ephemeral data bind를 강제한다.
+실제 host key는 mount하거나 읽지 않고 non-secret placeholder 두 개만 read-only
+bind한다. EXIT/ERR/TERM trap은 exact-name container를 `docker rm -f`하고 부재를
+확인한 뒤 placeholder와 check data directory를 제거한다. Compose 실행, worker
 override, restart, scale, volume prune는 없다.
 
 ## 4. 성공 증거
@@ -150,8 +156,9 @@ placeholder 내용, raw Kiwoom 응답, OAuth token은 evidence에 포함하지 �
 rollback은 이전 worker를 재활성화하는 기능이 아니다. EC2 운영자가 별도 승인된 SSM
 검증 창에서 동일 preinstalled script에 `--rollback-check`,
 `--expected-instance-id`, `--region`만 전달한다. image/source/hash argument는
-rollback에서 허용하지 않는다. recorded `previous` tuple과 저장된 hash-matched
-Compose만 사용해 `--check-config`를 다시 실행하며 state를 바꾸지 않는다.
+rollback에서 허용하지 않는다. recorded `previous` tuple의 image/source/hash를
+읽고 저장된 Compose 두 파일의 hash identity만 재검증한 뒤, 동일한 root-owned fixed
+`docker run`으로 `--check-config`를 다시 실행하며 state를 바꾸지 않는다.
 
 previous image가 없거나 digest 형식이 다르면 실패한다. named volume과 host secret를
 삭제하지 않는다.

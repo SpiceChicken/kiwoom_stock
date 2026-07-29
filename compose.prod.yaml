@@ -4,7 +4,11 @@ services:
     init: true
     user: "0:0"
     network_mode: none
+    privileged: false
     read_only: true
+    cpus: 0.75
+    mem_limit: 512m
+    pids_limit: 128
     labels:
       io.kiwoom-stock.project: kiwoom-stock
       io.kiwoom-stock.lifecycle: production-check-only

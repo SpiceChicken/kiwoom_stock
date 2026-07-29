@@ -145,7 +145,13 @@ def test_prod_compose_requires_immutable_image_and_labels_check_containers():
 def test_effective_prod_compose_has_no_network_or_production_named_volume(
     tmp_path,
 ):
-    if shutil.which("docker") is None:
+    docker_available = shutil.which("docker") is not None and subprocess.run(
+        ["docker", "version"],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+    if not docker_available:
         pytest.skip("Docker Compose is unavailable")
     app, secret = _pair(tmp_path)
     environment = dict(os.environ)
@@ -173,6 +179,21 @@ def test_effective_prod_compose_has_no_network_or_production_named_volume(
     effective = json.loads(completed.stdout)
     app_service = effective["services"]["app"]
     assert app_service["network_mode"] == "none"
+    assert app_service["privileged"] is False
+    assert app_service["read_only"] is True
+    assert app_service["user"] == "0:0"
+    assert app_service["cap_drop"] == ["ALL"]
+    assert app_service["cap_add"] == ["CHOWN", "SETGID", "SETUID"]
+    assert app_service["security_opt"] == ["no-new-privileges:true"]
+    assert app_service["command"] == [
+        "python",
+        "-m",
+        "kiwoom_stock",
+        "--check-config",
+    ]
+    assert float(app_service["cpus"]) == 0.75
+    assert int(app_service["mem_limit"]) == 536870912
+    assert int(app_service["pids_limit"]) == 128
     assert app_service.get("networks") in (None, {})
     assert app_service["volumes"] == [
         {

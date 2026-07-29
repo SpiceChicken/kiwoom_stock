@@ -17,6 +17,9 @@ readonly RUNTIME_PARENT="${KIWOOM_DEPLOY_RUNTIME_PARENT:-/run}"
 readonly MIN_FREE_DISK_MIB=1536
 readonly MIN_AVAILABLE_MEMORY_MIB=256
 readonly MAX_CREDENTIAL_BYTES=8192
+readonly CHECK_CPUS="0.75"
+readonly CHECK_MEMORY_BYTES=536870912
+readonly CHECK_PIDS_LIMIT=128
 readonly PULL_TIMEOUT_SECONDS="${KIWOOM_DEPLOY_PULL_TIMEOUT_SECONDS:-300}"
 readonly CHECK_TIMEOUT_SECONDS="${KIWOOM_DEPLOY_CHECK_TIMEOUT_SECONDS:-120}"
 readonly KILL_AFTER_SECONDS="${KIWOOM_DEPLOY_KILL_AFTER_SECONDS:-15}"
@@ -196,18 +199,30 @@ verify_stored_compose() {
 validate_image_revision() {
     local image="$1"
     local source_sha="$2"
-    local revision
+    local revision entrypoint image_user
     revision="$(docker image inspect "${image}" \
         --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" \
         || fail "pulled image metadata is unavailable"
     [[ "${revision}" == "${source_sha}" ]] \
         || fail "pulled image revision does not match source SHA"
+    entrypoint="$(docker image inspect "${image}" \
+        --format '{{json .Config.Entrypoint}}')" \
+        || fail "pulled image entrypoint metadata is unavailable"
+    [[ "${entrypoint}" == \
+        '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]' ]] \
+        || fail "pulled image entrypoint does not match the runtime contract"
+    image_user="$(docker image inspect "${image}" --format '{{.Config.User}}')" \
+        || fail "pulled image user metadata is unavailable"
+    [[ "${image_user}" == "10001:10001" ]] \
+        || fail "pulled image user does not match the runtime contract"
 }
 
 create_placeholder_boundaries() {
     PLACEHOLDER_DIR="$(mktemp -d "${RUNTIME_PARENT}/kiwoom-check-secrets.XXXXXX")"
     CHECK_DATA_DIR="$(mktemp -d "${RUNTIME_PARENT}/kiwoom-check-data.XXXXXX")"
-    chmod 0700 "${PLACEHOLDER_DIR}" "${CHECK_DATA_DIR}"
+    chmod 0700 "${PLACEHOLDER_DIR}"
+    chown 10001:10001 "${CHECK_DATA_DIR}"
+    chmod 0500 "${CHECK_DATA_DIR}"
     printf '%s\n' 'CHECK_ONLY_NON_SECRET_APP_KEY' >"${PLACEHOLDER_DIR}/app-key"
     printf '%s\n' 'CHECK_ONLY_NON_SECRET_SECRET_KEY' >"${PLACEHOLDER_DIR}/secret-key"
     chmod 0400 "${PLACEHOLDER_DIR}/app-key" "${PLACEHOLDER_DIR}/secret-key"
@@ -253,36 +268,55 @@ cleanup_runtime() {
     return "${status}"
 }
 
-compose_check() {
+run_container_check() {
     local image="$1"
     local source_sha="$2"
-    local compose_directory="$3"
     local digest_hex="${image##*:}"
-    local -a compose=(
-        docker compose
-        --project-name kiwoom-stock-check
-        -f "${compose_directory}/compose.yaml"
-        -f "${compose_directory}/compose.prod.yaml"
-    )
     ACTIVE_CONTAINER_NAME="kiwoom-check-${source_sha:0:12}-${digest_hex:0:12}"
     trap 'cleanup_runtime' EXIT
     trap 'cleanup_runtime' ERR
     trap 'cleanup_runtime; exit 143' TERM
     create_placeholder_boundaries
 
-    export KIWOOM_IMAGE="${image}"
-    export KIWOOM_PROD_APP_KEY_FILE="${PLACEHOLDER_DIR}/app-key"
-    export KIWOOM_PROD_SECRET_KEY_FILE="${PLACEHOLDER_DIR}/secret-key"
-    export KIWOOM_CHECK_DATA_DIR="${CHECK_DATA_DIR}"
-    "${compose[@]}" config --quiet \
-        || fail "production Compose rendering failed"
     timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \
         || fail "immutable image pull failed or timed out"
     validate_image_revision "${image}" "${source_sha}"
     timeout --signal=TERM --kill-after="${KILL_AFTER_SECONDS}" \
         "${CHECK_TIMEOUT_SECONDS}" \
-        "${compose[@]}" run --rm --no-deps -T \
-        --name "${ACTIVE_CONTAINER_NAME}" app \
+        docker run --rm --pull never \
+        --name "${ACTIVE_CONTAINER_NAME}" \
+        --label io.kiwoom-stock.project=kiwoom-stock \
+        --label io.kiwoom-stock.lifecycle=production-check-only \
+        --init \
+        --no-healthcheck \
+        --user 0:0 \
+        --network none \
+        --read-only \
+        --cpus "${CHECK_CPUS}" \
+        --memory "${CHECK_MEMORY_BYTES}" \
+        --memory-swap "${CHECK_MEMORY_BYTES}" \
+        --pids-limit "${CHECK_PIDS_LIMIT}" \
+        --cap-drop ALL \
+        --cap-add CHOWN \
+        --cap-add SETGID \
+        --cap-add SETUID \
+        --security-opt no-new-privileges:true \
+        --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777 \
+        --tmpfs /run/secrets:rw,nosuid,nodev,noexec,mode=0700 \
+        --tmpfs /run/kiwoom-secrets:rw,nosuid,nodev,noexec,mode=0700 \
+        --mount \
+        "type=bind,source=${CHECK_DATA_DIR},target=/var/lib/kiwoom,readonly" \
+        --mount \
+        "type=bind,source=${PLACEHOLDER_DIR}/app-key,target=/run/secrets/KIWOOM_APP_KEY,readonly" \
+        --mount \
+        "type=bind,source=${PLACEHOLDER_DIR}/secret-key,target=/run/secrets/KIWOOM_SECRET_KEY,readonly" \
+        --env KIWOOM_API_MODE=prod \
+        --env KIWOOM_APP_ENV=prod \
+        --env KIWOOM_PROCESS_NAME=paper-monitor \
+        --env KIWOOM_CREDENTIALS_DIR=/run/secrets \
+        --env KIWOOM_OUTPUT_DIR=/var/lib/kiwoom/output \
+        --env KIWOOM_DB_PATH=/var/lib/kiwoom/trades.db \
+        "${image}" \
         python -m kiwoom_stock --check-config \
         || fail "one-shot configuration check failed or timed out"
     cleanup_runtime || fail "one-shot cleanup failed"
@@ -513,7 +547,6 @@ main() {
     command -v flock >/dev/null || fail "flock is unavailable"
     command -v docker >/dev/null || fail "Docker is unavailable"
     command -v curl >/dev/null || fail "curl is unavailable"
-    docker compose version >/dev/null || fail "Docker Compose is unavailable"
 
     install -d -m 0700 -- "${STATE_DIR}" "${SOURCE_DIR}"
     acquire_deployment_lock
@@ -532,12 +565,12 @@ main() {
         validate_release_values "${image}" "${source_sha}" "${common_hash}" "${prod_hash}"
         local rollback_directory="${SOURCE_DIR}/${source_sha}"
         verify_stored_compose "${rollback_directory}" "${common_hash}" "${prod_hash}"
-        compose_check "${image}" "${source_sha}" "${rollback_directory}"
+        run_container_check "${image}" "${source_sha}"
     else
         local compose_directory="${SOURCE_DIR}/${source_sha}"
         download_compose_contract \
             "${source_sha}" "${common_hash}" "${prod_hash}" "${compose_directory}"
-        compose_check "${image}" "${source_sha}" "${compose_directory}"
+        run_container_check "${image}" "${source_sha}"
     fi
     cleanup_project_artifacts "${image}"
     if [[ "${rollback}" == false ]]; then

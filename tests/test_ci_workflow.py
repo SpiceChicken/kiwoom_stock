@@ -1,6 +1,8 @@
 """Static checks for the GitHub Actions CI workflow."""
 
 from pathlib import Path
+import os
+import subprocess
 
 import pytest
 import yaml
@@ -245,6 +247,49 @@ def test_cd_is_manual_production_environment_and_serialized_without_cancel():
     assert workflow["env"]["AWS_REGION"] == "ap-northeast-2"
 
 
+@pytest.mark.parametrize(
+    ("requested_sha", "trigger_sha", "expected_status"),
+    [
+        ("a" * 40, "a" * 40, 0),
+        ("a" * 40, "b" * 40, 1),
+    ],
+)
+def test_cd_dispatch_source_must_equal_the_exact_main_trigger_sha(
+    tmp_path,
+    requested_sha,
+    trigger_sha,
+    expected_status,
+):
+    step = next(
+        item
+        for item in _cd_workflow()["jobs"]["build_publish"]["steps"]
+        if item["name"] == "Validate immutable source input"
+    )
+    output = tmp_path / "github-output"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "REQUESTED_SOURCE_SHA": requested_sha,
+            "GITHUB_TRIGGER_SHA": trigger_sha,
+            "GITHUB_OUTPUT": str(output),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == expected_status
+    if expected_status == 0:
+        assert output.read_text(encoding="utf-8") == f"sha={requested_sha}\n"
+    else:
+        assert not output.exists()
+
+
 def test_cd_pins_actions_and_never_receives_kiwoom_credentials():
     workflow = _cd_workflow()
     text = CD_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -360,8 +405,18 @@ def test_cd_ssm_command_is_allowlisted_bounded_and_check_only():
     assert '"commands"' not in deploy_runs
     assert "raw.githubusercontent.com" not in deploy_runs
     assert "production-check-evidence.json" in text
-    assert '"secrets_in_github": False' in text
-    assert '"worker_activated": False' in text
+    assert '"contract_expected_no_github_secrets": True' in text
+    assert '"contract_expected_worker_inactive": True' in text
+    assert '"instance_verified": instance_verified' in text
+    assert '"response_code_verified": response_code_verified' in text
+    assert '"pass_marker_verified": pass_marker_verified' in text
+    assert (
+        '"operator_follow_up_required": terminal_status != "Success"'
+        in text
+    )
+    assert "Success|Cancelled|TimedOut|Failed|Cancelling" not in text
+    assert "Success|Cancelled|TimedOut|Failed)" in text
+    assert "seq 1 90" in text
     assert "docker compose up" not in text
     assert " up -d" not in text
     assert "--rollback-check" not in text

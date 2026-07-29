@@ -45,9 +45,12 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          GITHUB_TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_TRIGGER_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${REQUESTED_SOURCE_SHA}" = "${GITHUB_TRIGGER_SHA}"
           printf 'sha=%s\n' "${REQUESTED_SOURCE_SHA}" >>"${GITHUB_OUTPUT}"
 
       - name: Checkout exact requested commit
@@ -362,37 +365,57 @@ jobs:
         run: |
           set -euo pipefail
           terminal_status=""
-          for attempt in $(seq 1 72); do
+          last_observed_status="InvocationNotObserved"
+          printf '%s\n' '{"Status":"InvocationNotObserved"}' \
+            >ssm-invocation.json
+          for attempt in $(seq 1 90); do
             set +e
             aws ssm get-command-invocation \
               --region "${AWS_REGION}" \
               --command-id "${COMMAND_ID}" \
               --instance-id "${EC2_INSTANCE_ID}" \
-              --output json >ssm-invocation.json 2>/dev/null
+              --output json >ssm-invocation.next.json 2>/dev/null
             query_status=$?
             set -e
             if (( query_status == 0 )); then
+              mv ssm-invocation.next.json ssm-invocation.json
               status="$(python3 -c \
                 'import json; print(json.load(open("ssm-invocation.json"))["Status"])')"
+              last_observed_status="${status}"
               case "${status}" in
-                Success|Cancelled|TimedOut|Failed|Cancelling)
+                Success|Cancelled|TimedOut|Failed)
                   terminal_status="${status}"
                   break
                   ;;
               esac
+            else
+              rm -f ssm-invocation.next.json
             fi
-            sleep 10
+            if (( attempt < 90 )); then
+              sleep 10
+            fi
           done
-          test -n "${terminal_status}"
-          python3 - "${COMMAND_ID}" "${terminal_status}" <<'PY'
+          python3 - "${COMMAND_ID}" "${terminal_status}" \
+            "${last_observed_status}" "${attempt}" <<'PY'
           import json
           import os
           from pathlib import Path
           import sys
-          command_id, status = sys.argv[1:]
+          command_id, terminal_status, last_status, poll_attempts = sys.argv[1:]
           invocation = json.loads(
               Path("ssm-invocation.json").read_text(encoding="utf-8")
           )
+          stdout = invocation.get("StandardOutputContent", "")
+          stderr = invocation.get("StandardErrorContent", "")
+          expected_instance = os.environ["EC2_INSTANCE_ID"]
+          expected_marker = (
+              "production check passed: "
+              f"source_sha={os.environ['SOURCE_SHA']} "
+              f"image={os.environ['IMAGE_DIGEST']} rollback=false"
+          )
+          instance_verified = invocation.get("InstanceId") == expected_instance
+          response_code_verified = invocation.get("ResponseCode") == 0
+          pass_marker_verified = stdout.splitlines().count(expected_marker) == 1
           evidence = {
               "source_sha": os.environ["SOURCE_SHA"],
               "image_digest": os.environ["IMAGE_DIGEST"],
@@ -401,19 +424,33 @@ jobs:
               "compose_prod_sha256": os.environ["COMPOSE_PROD_SHA256"],
               "instance_id": invocation.get("InstanceId"),
               "command_id": command_id,
-              "status": status,
+              "terminal_status": terminal_status or None,
+              "last_observed_status": last_status,
+              "poll_attempts": int(poll_attempts),
+              "operator_follow_up_required": terminal_status != "Success",
               "response_code": invocation.get("ResponseCode"),
-              "stdout_bytes": len(invocation.get("StandardOutputContent", "")),
-              "stderr_bytes": len(invocation.get("StandardErrorContent", "")),
-              "secrets_in_github": False,
-              "worker_activated": False,
+              "stdout_bytes": len(stdout),
+              "stderr_bytes": len(stderr),
+              "instance_verified": instance_verified,
+              "response_code_verified": response_code_verified,
+              "pass_marker_verified": pass_marker_verified,
+              "contract_expected_no_github_secrets": True,
+              "contract_expected_worker_inactive": True,
           }
           Path("production-check-evidence.json").write_text(
               json.dumps(evidence, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
+          checks = (
+              terminal_status == "Success",
+              last_status == "Success",
+              instance_verified,
+              response_code_verified,
+              pass_marker_verified,
+          )
+          if not all(checks):
+              raise SystemExit("production check evidence validation failed")
           PY
-          test "${terminal_status}" = "Success"
 
       - name: Upload protected deployment evidence
         if: always()

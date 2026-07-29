@@ -263,16 +263,10 @@ def test_test_image_manifest_covers_repository_assets_and_host_only_compose():
     assert len(docker_which_calls) == 1
     assert docker_which_calls[0][0] == expected_function
 
-    expected_guard = ast.parse(
-        'shutil.which("docker") is None',
-        mode="eval",
-    ).body
     guarded_skips = [
         node
         for node in ast.walk(functions[expected_function])
         if isinstance(node, ast.If)
-        and ast.dump(node.test, include_attributes=False)
-        == ast.dump(expected_guard, include_attributes=False)
         and len(node.body) == 1
         and isinstance(node.body[0], ast.Expr)
         and node.body[0].value is skip_call
@@ -387,6 +381,10 @@ def test_prod_compose_uses_secrets_without_source_bind_or_build_context():
 
     assert "build" not in app
     assert app["network_mode"] == "none"
+    assert app["privileged"] is False
+    assert app["cpus"] == 0.75
+    assert app["mem_limit"] == "512m"
+    assert app["pids_limit"] == 128
     assert app["volumes"] == [
         {
             "type": "bind",

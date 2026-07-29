@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any, cast
 
@@ -169,6 +171,87 @@ def test_custom_ssm_document_only_invokes_preinstalled_allowlisted_command():
     assert "bash -c" not in command
     assert "sudo" not in command
     assert "\n" not in command
+
+
+def test_custom_ssm_document_digest_pattern_matches_literal_dot_only():
+    document = yaml.safe_load(
+        (ROOT / "deploy/ssm/production-check-document.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    pattern = re.compile(document["parameters"]["ImageDigest"]["allowedPattern"])
+    valid = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + ("a" * 64)
+
+    assert pattern.fullmatch(valid)
+    assert not pattern.fullmatch(valid.replace("ghcr.io", "ghcrXio"))
+    assert not pattern.fullmatch(valid.replace("sha256:", "sha256:\\"))
+
+
+def test_custom_ssm_document_shell_quotes_render_exact_host_argv(tmp_path):
+    document = yaml.safe_load(
+        (ROOT / "deploy/ssm/production-check-document.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    command = document["mainSteps"][0]["inputs"]["runCommand"][0]
+    capture = tmp_path / "capture-argv"
+    output = tmp_path / "argv.json"
+    capture.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['ARGV_OUTPUT'], 'w', encoding='utf-8') as stream:\n"
+        "    json.dump(sys.argv[1:], stream)\n",
+        encoding="utf-8",
+    )
+    capture.chmod(0o755)
+    image = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + ("b" * 64)
+    source_sha = "c" * 40
+    compose_sha = "d" * 64
+    compose_prod_sha = "e" * 64
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "ARGV_OUTPUT": str(output),
+            "SSM_ImageDigest": image,
+            "SSM_SourceSha": source_sha,
+            "SSM_ComposeSha256": compose_sha,
+            "SSM_ComposeProdSha256": compose_prod_sha,
+            "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+            "SSM_Region": "ap-northeast-2",
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command.replace(
+                "/usr/local/sbin/kiwoom-production-check",
+                str(capture),
+                1,
+            ),
+        ],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output.read_text(encoding="utf-8")) == [
+        "--image",
+        image,
+        "--source-sha",
+        source_sha,
+        "--compose-sha256",
+        compose_sha,
+        "--compose-prod-sha256",
+        compose_prod_sha,
+        "--expected-instance-id",
+        "i-02cb0a404794bd43a",
+        "--region",
+        "ap-northeast-2",
+    ]
 
 
 def test_custom_ssm_document_has_no_arbitrary_command_parameter():
