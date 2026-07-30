@@ -716,7 +716,7 @@ def _run_compose_validator(tmp_path, prod_payload, *, expected_prod_hash):
             encoding="utf-8",
         )
         paths.append(str(response))
-    output = tmp_path / "compose-output"
+    handoff = tmp_path / "compose-handoff.json"
     environment = dict(os.environ)
     environment.update(
         {
@@ -725,7 +725,8 @@ def _run_compose_validator(tmp_path, prod_payload, *, expected_prod_hash):
                 payloads["compose.yaml"]
             ).hexdigest(),
             "MANIFEST_COMPOSE_PROD_SHA256": expected_prod_hash,
-            "GITHUB_OUTPUT": str(output),
+            "SOURCE_SHA": "a" * 40,
+            "COMPOSE_HANDOFF_PATH": str(handoff),
         }
     )
     return subprocess.run(
@@ -761,6 +762,211 @@ def test_promotion_compose_validator_accepts_exact_bytes_and_rejects_mismatch(
     assert rejected.returncode != 0
 
 
+def _run_compose_handoff_preflight(tmp_path, mutation=None):
+    prod_payload = b"services:\n  app:\n    read_only: true\n"
+    compose_hash = hashlib.sha256(
+        b"services:\n  app: {}\n"
+    ).hexdigest()
+    compose_prod_hash = hashlib.sha256(prod_payload).hexdigest()
+    compose = _run_compose_validator(
+        tmp_path,
+        prod_payload,
+        expected_prod_hash=compose_prod_hash,
+    )
+    assert compose.returncode == 0, compose.stderr
+
+    handoff_path = tmp_path / "compose-handoff.json"
+    if mutation == "empty":
+        payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+        payload["compose_prod_sha256"] = ""
+        handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif mutation == "malformed":
+        payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+        payload["compose_sha256"] = "A" * 64
+        handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif mutation == "mismatch":
+        payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+        payload["source_sha"] = "b" * 40
+        handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    step = next(
+        step
+        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
+        if step["name"]
+        == "Revalidate Compose handoff and prepare redacted request evidence"
+    )
+    parameters_path = tmp_path / "ssm-parameters.json"
+    evidence_path = tmp_path / "production-check-evidence.json"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "SOURCE_SHA": "a" * 40,
+            "IMAGE_DIGEST": (
+                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
+            ),
+            "BUILD_RUN_ID": "123",
+            "IMAGE_SIZE_MIB": "400",
+            "MAX_RUNTIME_IMAGE_MIB": "850",
+            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
+            "AWS_REGION": "ap-northeast-2",
+            "COMPOSE_HANDOFF_PATH": str(handoff_path),
+            "SSM_PARAMETERS_PATH": str(parameters_path),
+            "EVIDENCE_PATH": str(evidence_path),
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-"],
+        input=_single_python_heredoc(step),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return (
+        completed,
+        parameters_path,
+        evidence_path,
+        compose_hash,
+        compose_prod_hash,
+    )
+
+
+def test_promotion_compose_handoff_survives_separate_steps_and_binds_request(
+    tmp_path,
+):
+    completed, parameters_path, evidence_path, compose_hash, prod_hash = (
+        _run_compose_handoff_preflight(tmp_path)
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    parameters = json.loads(parameters_path.read_text(encoding="utf-8"))
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert parameters["ComposeSha256"] == [compose_hash]
+    assert parameters["ComposeProdSha256"] == [prod_hash]
+    assert evidence["compose_sha256"] == compose_hash
+    assert evidence["compose_prod_sha256"] == prod_hash
+    assert evidence["image_size_mib"] == 400
+    assert evidence["command_id"] is None
+    assert evidence["last_observed_status"] == "SendCommandNotAttempted"
+    assert parameters_path.stat().st_mode & 0o777 == 0o600
+    assert evidence_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("mutation", ["empty", "malformed", "mismatch"])
+def test_promotion_compose_handoff_rejects_untrusted_cross_step_state(
+    tmp_path,
+    mutation,
+):
+    completed, parameters_path, evidence_path, _, _ = (
+        _run_compose_handoff_preflight(tmp_path, mutation=mutation)
+    )
+
+    assert completed.returncode != 0
+    assert not parameters_path.exists()
+    assert not evidence_path.exists()
+
+
+def test_promotion_send_failure_preserves_redacted_evidence_without_command_id(
+    tmp_path,
+):
+    completed, _, evidence_path, _, _ = _run_compose_handoff_preflight(
+        tmp_path
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_aws = fake_bin / "aws"
+    fake_aws.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    fake_aws.chmod(0o700)
+    step = next(
+        step
+        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
+        if step["name"] == "Send allowlisted production-check document"
+    )
+    output = tmp_path / "github-output"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "AWS_REGION": "ap-northeast-2",
+            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
+            "SOURCE_SHA": "a" * 40,
+            "SSM_PARAMETERS_PATH": str(tmp_path / "ssm-parameters.json"),
+            "EVIDENCE_PATH": str(evidence_path),
+            "GITHUB_OUTPUT": str(output),
+        }
+    )
+    sent = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert sent.returncode == 42
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["command_id"] is None
+    assert (
+        evidence["last_observed_status"]
+        == "SendCommandFailedBeforeCommandId"
+    )
+    assert evidence["send_command_exit_code"] == 42
+    assert not output.exists()
+
+
+def test_promotion_send_success_records_command_id_before_polling(tmp_path):
+    completed, _, evidence_path, _, _ = _run_compose_handoff_preflight(
+        tmp_path
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    command_id = "12345678-1234-1234-1234-123456789abc"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_aws = fake_bin / "aws"
+    fake_aws.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{command_id}'\n",
+        encoding="utf-8",
+    )
+    fake_aws.chmod(0o700)
+    step = next(
+        step
+        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
+        if step["name"] == "Send allowlisted production-check document"
+    )
+    output = tmp_path / "github-output"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "AWS_REGION": "ap-northeast-2",
+            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
+            "SOURCE_SHA": "a" * 40,
+            "SSM_PARAMETERS_PATH": str(tmp_path / "ssm-parameters.json"),
+            "EVIDENCE_PATH": str(evidence_path),
+            "GITHUB_OUTPUT": str(output),
+        }
+    )
+    sent = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert sent.returncode == 0, sent.stderr
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["command_id"] == command_id
+    assert (
+        evidence["last_observed_status"]
+        == "CommandCreatedAwaitingInvocation"
+    )
+    assert output.read_text(encoding="utf-8") == f"command_id={command_id}\n"
+
+
 def test_promotion_has_no_candidate_build_and_gates_oidc_after_all_validation():
     workflow = _promotion_workflow()
     steps = workflow["jobs"]["promote"]["steps"]
@@ -790,6 +996,13 @@ def test_promotion_has_no_candidate_build_and_gates_oidc_after_all_validation():
         names.index("Prove anonymous exact digest image contract")
     )
     assert names.index("Prove anonymous exact digest image contract") < (
+        names.index(
+            "Revalidate Compose handoff and prepare redacted request evidence"
+        )
+    )
+    assert names.index(
+        "Revalidate Compose handoff and prepare redacted request evidence"
+    ) < (
         names.index("Configure exact AWS deploy role with OIDC")
     )
     assert "aws ssm" not in runs_before_oidc
@@ -809,11 +1022,16 @@ def test_promotion_ssm_command_is_allowlisted_digest_only_and_check_only():
     assert "--instance-ids \"${EC2_INSTANCE_ID}\"" in text
     assert "--timeout-seconds 750" in text
     assert '"ImageDigest": [os.environ["IMAGE_DIGEST"]]' in text
-    assert '"ComposeSha256": [os.environ["COMPOSE_SHA256"]]' in text
+    assert '"ComposeSha256": [handoff["compose_sha256"]]' in text
+    assert '"ComposeProdSha256": [handoff["compose_prod_sha256"]]' in text
+    assert "steps.compose.outputs" not in text
+    assert 're.fullmatch(r"[0-9a-f]{64}", value)' in text
+    assert "SendCommandFailedBeforeCommandId" in text
     assert '"commands"' not in runs
     assert "raw.githubusercontent.com" not in runs
     assert ":latest" not in text
     assert "production-check-evidence.json" in text
+    assert "if-no-files-found: error" in text
     assert '"contract_expected_no_github_secrets": True' in text
     assert '"contract_expected_worker_inactive": True' in text
     assert '"instance_verified": instance_verified' in text
