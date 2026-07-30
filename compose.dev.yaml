@@ -1,0 +1,24 @@
+services:
+  app:
+    build:
+      context: .
+      target: test
+      args:
+        PYTHON_VERSION: "3.14"
+    image: kiwoom-stock:dev
+    read_only: false
+    network_mode: none
+    healthcheck:
+      disable: true
+    environment:
+      KIWOOM_API_MODE: disabled
+      KIWOOM_APP_ENV: dev
+      KIWOOM_PROCESS_NAME: paper-monitor-dev
+      KIWOOM_CREDENTIALS_DIR: ""
+    volumes:
+      - .:/app
+      - kiwoom-dev-data:/var/lib/kiwoom
+    command: ["python", "-m", "pytest", "tests", "-q"]
+
+volumes:
+  kiwoom-dev-data:

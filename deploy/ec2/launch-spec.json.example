@@ -1,0 +1,47 @@
+{
+  "$schema": "kiwoom-stock/ec2-clean-rebuild-launch-intent/v1",
+  "executableArtifact": "deploy/ec2/apply_clean_rebuild.sh",
+  "region": "ap-northeast-2",
+  "availabilityZone": "ap-northeast-2a",
+  "imageId": "ami-05fa22e12f2cb12aa",
+  "imageContract": "Canonical Ubuntu Server 24.04 LTS amd64 EBS",
+  "instanceType": "t3.micro",
+  "creditSpecification": {"cpuCredits": "standard"},
+  "minCount": 1,
+  "maxCount": 1,
+  "keyPair": "omitted",
+  "iamInstanceProfile": {"name": "<EC2_INSTANCE_PROFILE_NAME>"},
+  "network": {
+    "subnetId": "<PUBLIC_SUBNET_ID>",
+    "securityGroupIds": ["<DEDICATED_SECURITY_GROUP_ID>"],
+    "associatePublicIpAddress": false,
+    "primaryNetworkInterfaceId": "<PRECREATED_EIP_ASSOCIATED_ENI_ID>",
+    "attachOrder": "EIP association read-back succeeds before run-instances"
+  },
+  "metadataOptions": {
+    "httpEndpoint": "enabled",
+    "httpTokens": "required",
+    "httpPutResponseHopLimit": 1,
+    "instanceMetadataTags": "disabled"
+  },
+  "blockDeviceMappings": [
+    {
+      "deviceName": "/dev/sda1",
+      "ebs": {
+        "volumeType": "gp3",
+        "volumeSizeGiB": 8,
+        "encrypted": true,
+        "deleteOnTermination": true,
+        "iops": 3000,
+        "throughputMiBps": 125
+      }
+    }
+  ],
+  "userDataFile": "deploy/ec2/cloud-init-ubuntu-24.04.sh",
+  "elasticIp": {
+    "allocationId": "<EIP_ALLOCATION_ID>",
+    "count": 1,
+    "associateToPrecreatedEniBeforeLaunch": true
+  },
+  "automaticApplicationStart": false
+}

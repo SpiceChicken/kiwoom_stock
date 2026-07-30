@@ -6,26 +6,56 @@
 
 import sys
 import logging
+import threading
 import time as time_mod
-from typing import Dict, List, Optional, Union, Any
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from kiwoom_stock.application.ports import PaperTradeLedger, PhysicalStateRepository
+from kiwoom_stock.application.session import (
+    CriticalNotificationOutcome,
+    SessionEndReason,
+    TradingSessionResult,
+)
 from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
 from .manager import StockManager
 from .notifier import Notifier
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.core.database import TradeLogger
-from kiwoom_stock.core.schema import SupplyData
+from kiwoom_stock.infrastructure.physical_state_repository import AsyncPhysicalStateRepository
 from kiwoom_stock.monitoring.manager import Position
 
 logger = logging.getLogger(__name__)
 
+
+class TradingEngineLifecycleError(RuntimeError):
+    """One or more engine-owned resources failed during shutdown."""
+
+
 class TradingEngine:
     """[Control Tower] 트레이딩 시스템 메인 컨트롤러"""
     
-    def __init__(self, client, config: Dict):
+    def __init__(
+        self,
+        client,
+        config: Dict,
+        *,
+        ledger: Optional[PaperTradeLedger] = None,
+        physical_state_repository: Optional[PhysicalStateRepository] = None,
+    ):
         self.config = config
+        self._lifecycle_lock = threading.Lock()
+        self._close_complete = threading.Event()
+        self._closing = False
+        self._closed = False
+        self._work_closed = False
+        self._executor_close_complete = False
+        self._physical_close_complete = False
+        self._ledger_close_complete = False
+        self._lifecycle_failure: Optional[Tuple[str, ...]] = None
+        self._lifecycle_process_control: Optional[BaseException] = None
         
         # -------------------------------------------------------------
         # 🚀 [동적 폴링 타이머 세팅]
@@ -37,27 +67,84 @@ class TradingEngine:
         
         self._last_check_time: Dict[str, float] = {}
         self._last_global_update = 0.0  # 시황/조건검색 업데이트용 타이머
-        
-        # [Modules] 기능별 모듈 초기화
-        self.db = TradeLogger()
-        self.state_tracker = PhysicalStateTracker(self.db)
-        self.analyzer = MarketAnalyzer(client, config.get("market", {}), self.state_tracker)
-        self.strategy = TradingStrategy(config.get("strategy", {}))
-        self.stock_mgr = StockManager(client, self.db, config.get("filters", {}))
-        self.notifier = Notifier(self.stock_mgr.stock_names, config)
-        
-        self.executor = ThreadPoolExecutor(max_workers=config.get("max_workers", 8))
+        self._terminal_result: Optional[TradingSessionResult] = None
+
+        if (ledger is None) != (physical_state_repository is None):
+            raise ValueError(
+                "ledger and physical_state_repository must be injected together"
+            )
+
+        fallback_owned = ledger is None
+        if fallback_owned:
+            warning_message = (
+                "TradingEngine(client, config) persistence fallback is deprecated; "
+                "inject the configured ledger and physical-state repository"
+            )
+            warnings.warn(warning_message, DeprecationWarning, stacklevel=2)
+            logger.warning(warning_message)
+            fallback_ledger = TradeLogger()
+            try:
+                fallback_repository = AsyncPhysicalStateRepository(fallback_ledger)
+            except BaseException:
+                self._close_constructor_fallback(None, fallback_ledger)
+                raise
+            ledger = fallback_ledger
+            physical_state_repository = fallback_repository
+
+        assert ledger is not None
+        assert physical_state_repository is not None
+        self.db = ledger
+        self.physical_state_repository = physical_state_repository
+
+        try:
+            # [Modules] 기능별 모듈 초기화
+            self.state_tracker = PhysicalStateTracker(self.physical_state_repository)
+            self.analyzer = MarketAnalyzer(
+                client.market,
+                config.get("market", {}),
+                self.state_tracker,
+            )
+            self.strategy = TradingStrategy(config.get("strategy", {}))
+            self.stock_mgr = StockManager(
+                client.market,
+                self.db,
+                config.get("filters", {}),
+            )
+            self.notifier = Notifier(self.stock_mgr.stock_names, config)
+            self.executor = ThreadPoolExecutor(max_workers=config.get("max_workers", 8))
+        except BaseException:
+            if fallback_owned:
+                self._close_constructor_fallback(
+                    self.physical_state_repository,
+                    self.db,
+                )
+            raise
         logger.info("Trading Engine Initialized with Dynamic Polling.")
 
-    def run(self):
+    def run(self) -> TradingSessionResult:
         """[Main Loop] 무한 루프: 분석 -> 판단 -> 행동"""
+        terminal_result = cast(
+            Optional[TradingSessionResult], getattr(self, "_terminal_result", None)
+        )
+        if terminal_result is not None:
+            return terminal_result
+
+        self._assert_open_for_work()
+
         logger.info(f"Engine Start (Fast Track: {self.fast_interval}s / Slow Track: {self.slow_interval}s)")
         
         while True:
             try:
                 # 1. 운영 시간 및 리스크 점검
                 if not self._check_system_status():
-                    if not self.strategy.is_monitoring_time(): break # 장 마감 시 종료
+                    terminal_result = cast(
+                        Optional[TradingSessionResult],
+                        getattr(self, "_terminal_result", None),
+                    )
+                    if terminal_result is not None:
+                        return terminal_result
+                    if not self.strategy.is_monitoring_time():
+                        return TradingSessionResult(reason=SessionEndReason.MARKET_CLOSED)
                     time_mod.sleep(60)
                     continue
 
@@ -93,14 +180,138 @@ class TradingEngine:
 
             except KeyboardInterrupt:
                 logger.warning("User Terminated.")
-                break
+                return TradingSessionResult(reason=SessionEndReason.USER_INTERRUPT)
             except Exception as e:
                 logger.critical(f"Main Loop Error: {e}", exc_info=True)
                 self.notifier.notify_error(str(e))
                 time_mod.sleep(10)
-        
-        # 프로세스 종료
-        return
+
+    @staticmethod
+    def _close_constructor_fallback(
+        physical_state_repository: Optional[PhysicalStateRepository],
+        ledger: PaperTradeLedger,
+    ) -> None:
+        """Release direct-constructor fallback resources without masking its error."""
+        for label, resource in (
+            ("physical-state repository", physical_state_repository),
+            ("paper ledger", ledger),
+        ):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except BaseException:
+                logger.exception(
+                    "Failed to close fallback %s after engine construction error.",
+                    label,
+                )
+
+    def _assert_open_for_work(self) -> None:
+        if (
+            getattr(self, "_work_closed", False)
+            or getattr(self, "_closing", False)
+            or getattr(self, "_closed", False)
+        ):
+            raise RuntimeError("TradingEngine is closed and cannot start new work")
+
+    def _raise_lifecycle_failure(self) -> None:
+        process_control = getattr(self, "_lifecycle_process_control", None)
+        if process_control is not None:
+            raise process_control
+        failure = getattr(self, "_lifecycle_failure", None)
+        if failure:
+            raise TradingEngineLifecycleError(
+                "TradingEngine close failed: " + "; ".join(failure)
+            )
+
+    def close(self) -> None:
+        """Stop evaluation, then close state submission and the shared ledger."""
+        with self._lifecycle_lock:
+            if self._closed:
+                close_owner = False
+                close_event = None
+            elif self._closing:
+                close_owner = False
+                close_event = self._close_complete
+            else:
+                self._work_closed = True
+                self._closing = True
+                self._close_complete = threading.Event()
+                close_owner = True
+                close_event = self._close_complete
+
+        if not close_owner and close_event is not None:
+            close_event.wait()
+        elif close_owner:
+            failures = []
+            process_control: Optional[BaseException] = None
+
+            def record_failure(label: str, error: BaseException) -> None:
+                nonlocal process_control
+                if isinstance(error, Exception):
+                    failures.append(
+                        f"{label} ({type(error).__name__}): {error}"
+                    )
+                elif process_control is None:
+                    process_control = error
+                logger.exception("Failed to close engine-owned %s.", label)
+
+            try:
+                if not getattr(self, "_executor_close_complete", False):
+                    try:
+                        self.executor.shutdown(
+                            wait=True,
+                            cancel_futures=False,
+                        )
+                    except BaseException as error:
+                        record_failure("evaluation executor", error)
+                    finally:
+                        self._executor_close_complete = True
+
+                if not getattr(self, "_physical_close_complete", False):
+                    try:
+                        self.physical_state_repository.close()
+                    except BaseException as error:
+                        record_failure("physical-state repository", error)
+                    finally:
+                        self._physical_close_complete = True
+
+                if not getattr(self, "_ledger_close_complete", False):
+                    ledger_complete = False
+                    try:
+                        self.db.close()
+                    except BaseException as error:
+                        record_failure("paper ledger", error)
+                        try:
+                            ledger_complete = getattr(self.db, "is_closed", False) is True
+                        except BaseException as observation_error:
+                            record_failure(
+                                "paper ledger terminal observation",
+                                observation_error,
+                            )
+                    else:
+                        ledger_complete = True
+                    if ledger_complete:
+                        self._ledger_close_complete = True
+            finally:
+                with self._lifecycle_lock:
+                    if failures and self._lifecycle_failure is None:
+                        self._lifecycle_failure = tuple(failures)
+                    if (
+                        process_control is not None
+                        and self._lifecycle_process_control is None
+                    ):
+                        self._lifecycle_process_control = process_control
+                    self._closing = False
+                    self._closed = (
+                        self._executor_close_complete
+                        and self._physical_close_complete
+                        and self._ledger_close_complete
+                    )
+                assert close_event is not None
+                close_event.set()
+
+        self._raise_lifecycle_failure()
 
     def _get_due_targets(self) -> List[str]:
         """[Scheduler] 투트랙 인터벌 정책에 따라 현재 검사해야 할 종목 리스트 반환"""
@@ -130,6 +341,9 @@ class TradingEngine:
 
     def _check_system_status(self) -> bool:
         """[Check 1] 장 운영 시간 및 킬스위치 점검"""
+        if getattr(self, "_terminal_result", None) is not None:
+            return False
+
         # 1. 시간 체크
         if not self.strategy.is_monitoring_time():
             logger.info("Outside of trading hours.")
@@ -138,16 +352,46 @@ class TradingEngine:
         # 2. 킬스위치(누적 손실) 체크
         total_pnl = self.stock_mgr.get_total_pnl_status(self.db.get_today_realized_pnl())
         if self.strategy.is_kill_switch_activated(total_pnl):
-            msg = f"🚨 KILL-SWITCH ACTIVATED (PnL: {total_pnl:.1f}%)"
-            logger.critical(msg)
-            self.notifier.notify_critical(msg)
-            self._force_liquidate() # 비상 청산
+            self._terminal_result = self._create_kill_switch_result(total_pnl)
             return False
             
         return True
 
+    def _create_kill_switch_result(self, total_pnl: float) -> TradingSessionResult:
+        """Latch a terminal stop without creating orders or mutating the ledger."""
+        loss_limit = self.strategy.total_loss_limit
+        unresolved_codes = tuple(sorted(self.stock_mgr.active_positions))
+        message = (
+            f"🚨 KILL-SWITCH ACTIVATED (PnL: {total_pnl:.1f}%, "
+            f"Limit: {loss_limit:.1f}%) | 자동 청산을 실행하지 않았습니다. "
+            f"미해결 활성 포지션: {len(unresolved_codes)}개"
+        )
+        logger.critical(message)
+
+        try:
+            self.notifier.notify_critical(message)
+        except (Exception, KeyboardInterrupt) as error:
+            logger.exception("Critical notifier callable raised during kill-switch stop.")
+            return TradingSessionResult(
+                reason=SessionEndReason.KILL_SWITCH,
+                total_pnl=total_pnl,
+                loss_limit=loss_limit,
+                unresolved_position_codes=unresolved_codes,
+                critical_notification_outcome=CriticalNotificationOutcome.CALL_RAISED,
+                critical_notification_error_type=type(error).__name__,
+            )
+
+        return TradingSessionResult(
+            reason=SessionEndReason.KILL_SWITCH,
+            total_pnl=total_pnl,
+            loss_limit=loss_limit,
+            unresolved_position_codes=unresolved_codes,
+            critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
+        )
+
     def _prepare_cycle(self, targets: List[str]):
         """[Pre-process] 선택된 타겟(Fast or Slow)의 최신 API 데이터만 선별 수집"""
+        self._assert_open_for_work()
         for stock_code in targets:
             if stock_code not in self.state_tracker._l1_cache:
                 self.state_tracker.recover_state_from_crash(stock_code)
@@ -158,6 +402,7 @@ class TradingEngine:
 
     def _evaluate_stocks(self, targets: List[str]) -> List[Dict]:
         """[Parallel] 워커 스레드를 통한 전략 평가"""
+        self._assert_open_for_work()
         results = []
         futures = {self.executor.submit(self._worker_task, code): code for code in targets}
         
@@ -170,7 +415,7 @@ class TradingEngine:
 
     def _worker_task(self, code: str) -> Optional[Dict]:
         """[Worker] 단위 작업: 데이터 조회 + 전략 계산"""
-        metrics: SupplyData = self.analyzer.supply_cache.get(code)
+        metrics = self.analyzer.supply_cache.get(code)
         if not metrics: return None
         
         if verdict := self.strategy.evaluate(metrics):
@@ -226,11 +471,6 @@ class TradingEngine:
 
         if not success:
             logger.error(f"❌ {side} Order Failed: {code}")
-
-    def _force_liquidate(self):
-        """[Emergency] 전량 매도 (비상 시)"""
-        for code in list(self.stock_mgr.active_positions.keys()):
-            self.stock_mgr.sell_stock(code, "KILL-SWITCH")
 
     def _log_status(self, verdict: Dict):
         """Notifier로 상태 전송"""

@@ -1,43 +1,78 @@
-# Byte-compiled / optimized / DLL files
+# Python bytecode and native extensions
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
-# Distribution / packaging
-bin/
+# Packaging and build artifacts
 build/
-develop-eggs/
 dist/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+.eggs/
 *.egg-info/
-.installed.cfg
 *.egg
+wheels/
+pip-wheel-metadata/
 
-# Virtual Environment
-venv/
-ENV/
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
 
-# Configuration and Secrets (중요!)
-config/
-*.txt
-*.csv
+# Test, coverage, and type-checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local environment variables and secrets
 .env
-*.db
-logs/
-etc/
-output/
+.env.*
+!.env.example
+!.env.*.example
+.secrets/
+*.pem
+*.key
 
-# IDEs
+# Runtime configuration (templates and documentation remain trackable)
+/config/*
+!/config/.gitkeep
+!/config/README.md
+!/config/*.example.json
+
+# Runtime data, databases, logs, and generated reports
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+/logs/
+/output/
+/physics_trade_analysis_*.csv
+/*_1min_*.csv
+
+# Local Codex agent-chain installation and generated work artifacts
+# These entries currently contain machine-specific absolute symlinks.
+/.codex/
+/AGENTS.md
+/docs/codex/
+
+# Editors and operating systems
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

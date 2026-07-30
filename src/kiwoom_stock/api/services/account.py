@@ -4,4 +4,9 @@ class AccountService:
         self.base = base
 
     def get_portfolio(self):
-        return self.base.request("/api/dostk/acnt", "kt00004", {"qry_tp": "0", "dmst_stex_tp": "KRX"})
+        return self.base.request(
+            "/api/dostk/acnt",
+            "kt00004",
+            {"qry_tp": "0", "dmst_stex_tp": "KRX"},
+            read_only=True,
+        )

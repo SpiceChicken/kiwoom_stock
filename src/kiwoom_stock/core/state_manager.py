@@ -1,30 +1,40 @@
 # src/kiwoom_stock/core/state_manager.py
-import math
 import logging
-import asyncio
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Tuple, Any
-from kiwoom_stock.core.database import TradeLogger
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, cast
+from kiwoom_stock.application.ports import PhysicalStateRepository
 from kiwoom_stock.core.physics_engine import calculate_net_velocity
+from kiwoom_stock.domain.state import (
+    calculate_elapsed_hours,
+    calculate_initial_velocity_from_rsi,
+    calculate_interval_impulse,
+    calculate_recovered_velocity,
+    calculate_reference_mass,
+    calculate_volume_interval,
+    calculate_volume_window,
+)
 
 logger = logging.getLogger(__name__)
+Clock = Callable[[], datetime]
+
+
+def _system_now() -> datetime:
+    return cast(datetime, getattr(datetime, "now")())
+
 
 class PhysicalStateTracker:
-    def __init__(self, db_logger: TradeLogger):
+    def __init__(self, state_repository: PhysicalStateRepository, clock: Optional[Clock] = None):
         self._l1_cache: Dict[str, float] = {}
         self._strength_history: Dict[str, List[Tuple[datetime, float]]] = {}
         self._last_volume: Dict[str, float] = {} # 거래량 추적용 캐시
         self._last_price: Dict[str, float] = {} # 직전 가격 추적용 캐시
         self._vol_history: Dict[str, List[float]] = {} # 💡 틱 거래량 타임스탬프 캐시
-        self.db = db_logger
-        
-        # [방어 로직] 메인 스레드 블로킹을 막기 위한 전용 백그라운드 워커 1개 배정
-        self._db_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PhysDBWorker")
+        self.state_repository = state_repository
+        self._clock = clock or _system_now
 
     def _get_and_update_prev_strength(self, stock_code: str, current_strength: float) -> float:
         """내부 캐시를 활용하여 5분(300초) 전의 체결강도를 추출합니다."""
-        now = datetime.now()
+        now = self._clock()
         history = self._strength_history.setdefault(stock_code, [])
         history.append((now, current_strength))
         
@@ -40,25 +50,19 @@ class PhysicalStateTracker:
         
     def recover_state_from_crash(self, stock_code: str, decay_constant: float = 0.5):
         """[크래시 복구: Time-Decayed Inertia]"""
-        last_state = self.db.get_last_physical_state(stock_code)
+        last_state = self.state_repository.get_last_physical_state(stock_code)
         if not last_state:
             self._l1_cache[stock_code] = 0.0
             return
             
         db_velocity = last_state['velocity']
         db_timestamp = last_state['timestamp']
-        delta_t_hours = (datetime.now() - db_timestamp).total_seconds() / 3600.0
+        now = self._clock()
+        delta_t_hours = calculate_elapsed_hours(db_timestamp, now)
         
-        decayed_velocity = db_velocity * math.exp(-decay_constant * delta_t_hours)
+        decayed_velocity = calculate_recovered_velocity(db_velocity, db_timestamp, now, decay_constant)
         self._l1_cache[stock_code] = decayed_velocity
         logger.info(f"[{stock_code}] V:{db_velocity:.2f} -> {decayed_velocity:.2f} ({delta_t_hours:.2f}h 경과)")
-
-    def _background_async_log(self, stock_code: str, forces_dict: Dict[str, Any]):
-        """[내부 헬퍼] 격리된 스레드에서 자체 이벤트 루프를 생성하여 비동기 DB 함수를 안전하게 실행"""
-        try:
-            asyncio.run(self.db.async_log_physical_state(stock_code, forces_dict))
-        except Exception as e:
-            logger.error(f"[{stock_code}] 백그라운드 DB 기록 중 치명적 오류: {e}", exc_info=True)
 
     def process_tick(
         self, stock_code: str, strength: float, current_price: float, vwap: float, 
@@ -68,36 +72,17 @@ class PhysicalStateTracker:
         
         # 1. 거래량 동결 여부 판독 (시간 정지 방어)
         last_vol = self._last_volume.get(stock_code, -1.0)
-        is_frozen = False
-        interval_volume = 0.0
-
-        if last_vol == total_volume and total_volume >= 0.0:
-            is_frozen = True  # 거래량이 멈춰있음을 플래그로 저장
-        elif last_vol >= 0.0:
-            interval_volume = total_volume - last_vol
+        volume_interval = calculate_volume_interval(last_vol, total_volume)
+        is_frozen = volume_interval.is_frozen  # 거래량이 멈춰있음을 플래그로 저장
+        interval_volume = volume_interval.interval_volume
             
         self._last_volume[stock_code] = total_volume
 
         # 🟢 실시간 거래량 가속도 추적 (Fuel Exhaustion / Zero-Time Sliding Window)
         vol_history = self._vol_history.setdefault(stock_code, [])
-        
-        # 틱 데이터가 들어올 때마다 시간 계산 없이 순수하게 리스트에 밀어 넣음
-        if not is_frozen and interval_volume > 0:
-            vol_history.append(interval_volume)
-            
-        # 💡 슬라이딩 윈도우 크기 고정 (최대 120틱 유지. 엔진 1초 1주기 기준 약 2분 분량)
-        if len(vol_history) > 120:
-            vol_history.pop(0)  # 제일 오래된 틱 데이터를 방출 (FIFO)
-            
-        # 최근 60틱(약 1분) vs 과거 60틱(약 1~2분 전)을 배열 슬라이싱으로 우아하게 분리
-        current_window = vol_history[-60:]
-        prev_window = vol_history[:-60]
-        
-        current_1m_vol = sum(current_window)
-        prev_1m_vol = sum(prev_window)
-        
-        # 거래량 급감 비율 계산 (이전 윈도우가 비어있으면 기본값 1.0 유지)
-        volume_drop_ratio = (current_1m_vol / prev_1m_vol) if prev_1m_vol > 0 else 1.0
+        volume_window = calculate_volume_window(vol_history, interval_volume, is_frozen)
+        vol_history[:] = volume_window.history
+        volume_drop_ratio = volume_window.drop_ratio
 
         # 🟢 직전 가격(Previous Price) 로드 및 갱신
         previous_price = self._last_price.get(stock_code, current_price)
@@ -106,21 +91,15 @@ class PhysicalStateTracker:
         if current_price > 0.0:
             self._last_price[stock_code] = current_price
         
-        if market_cap < 100_000_000_000:
-            dynamic_cutoff = 10_000_000.0
-        else:
-            log_scale = math.log10(market_cap) - 11.0
-            dynamic_cutoff = 10_000_000.0 * (3.5 ** log_scale)
-
-        interval_impulse = 0.0
-        interval_amount_krw = 0.0
-        
-        if not is_frozen and interval_volume > 0:
-            interval_amount_krw = interval_volume * current_price
-            
-            # 단일 틱 센서를 폐기했으므로, 2.5배 억지 가중치 없이 컷오프 그대로 사용!
-            if interval_amount_krw >= dynamic_cutoff:
-                interval_impulse = interval_amount_krw / dynamic_cutoff
+        dynamic_cutoff = calculate_reference_mass(market_cap)
+        impulse = calculate_interval_impulse(
+            interval_volume=interval_volume,
+            current_price=current_price,
+            reference_mass=dynamic_cutoff,
+            is_frozen=is_frozen,
+        )
+        interval_impulse = impulse.interval_impulse
+        interval_amount_krw = impulse.interval_amount_krw
 
         if is_frozen:
             strength = 0.0
@@ -129,7 +108,7 @@ class PhysicalStateTracker:
         
         # 2. 초기 속도 주입 (첫 감시 종목은 RSI 기반으로 초기 관성 세팅)
         if stock_code not in self._l1_cache:
-            self._l1_cache[stock_code] = max(0.0, (rsi - 50.0) / 10.0)
+            self._l1_cache[stock_code] = calculate_initial_velocity_from_rsi(rsi)
             
         previous_velocity = self._l1_cache[stock_code]
         prev_strength_5m = self._get_and_update_prev_strength(stock_code, strength)
@@ -152,6 +131,6 @@ class PhysicalStateTracker:
         self._l1_cache[stock_code] = current_velocity
 
         if not is_frozen:
-            self._db_executor.submit(self._background_async_log, stock_code, forces_dict)
+            self.state_repository.submit_physical_state(stock_code, cast(Mapping[str, Any], forces_dict))
             
         return {"forces": forces_dict}

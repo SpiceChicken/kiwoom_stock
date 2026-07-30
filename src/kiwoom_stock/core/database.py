@@ -1,25 +1,70 @@
 # src/kiwoom_stock/core/database.py
+import copy
+from dataclasses import dataclass
+from datetime import datetime
+import logging
+import os
+import queue
 import sqlite3
 import threading
-import queue
-import logging
-from datetime import datetime
-from typing import List, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
-from kiwoom_stock.monitoring.manager import Position
+from kiwoom_stock.domain.models import Position
 
 logger = logging.getLogger(__name__)
 
+
+class PhysicalStatePersistenceError(RuntimeError):
+    """One or more accepted physical-state snapshots could not be persisted."""
+
+
+class TradeLoggerLifecycleError(RuntimeError):
+    """TradeLogger could not complete one or more shutdown phases."""
+
+
+@dataclass(frozen=True)
+class _PhysicalStateTask:
+    stock_code: str
+    forces: Tuple[Tuple[str, Any], ...]
+    timestamp_str: str
+
+
+_QUEUE_SENTINEL = object()
+
+
 class TradeLogger:
-    def __init__(self, db_name="trades.db"):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+    def __init__(self, db_name: Union[str, os.PathLike[str]] = "trades.db"):
+        self.db_path = os.path.normpath(os.path.abspath(os.fspath(db_name)))
+        self._async_queue: queue.Queue[object] = queue.Queue()
+        self._state_lock = threading.Lock()
+        self._close_complete = threading.Event()
+        self._accepting_submissions = True
+        self._closing = False
+        self._closed = False
+        self._worker_failure: Optional[Tuple[str, str]] = None
+        self._close_failure: Optional[Tuple[str, BaseException]] = None
+        self._sentinel_enqueued = False
+        self._main_connection_closed = False
+        self._worker_connection_closed = False
+
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self._create_table()
-        
-        # L2 Backup용 비동기 작업 큐 및 데몬 스레드 초기화
-        self._async_queue = queue.Queue()
-        self._worker_thread = threading.Thread(target=self._async_worker, daemon=True)
-        self._worker_thread.start()
+        worker_conn: Optional[sqlite3.Connection] = None
+        try:
+            self._create_table()
+            worker_conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._worker_conn = worker_conn
+            self._worker_thread = threading.Thread(
+                target=self._async_worker,
+                name="TradeLoggerPhysicalState",
+                daemon=True,
+            )
+            self._worker_thread.start()
+        except BaseException:
+            if worker_conn is not None:
+                worker_conn.close()
+            self.conn.close()
+            raise
 
     def _create_table(self):
         """기존 거래 내역 테이블과 물리학적 상태 저장을 위한 신규 테이블 생성"""
@@ -66,49 +111,276 @@ class TradeLogger:
     # =========================================================
     # 비동기 물리 상태 백업 (L2 Backup)
     # =========================================================
-    def _async_worker(self):
-        worker_conn = sqlite3.connect("trades.db", check_same_thread=False)
-        while True:
-            try:
+    def _async_worker(self) -> None:
+        try:
+            while True:
                 task = self._async_queue.get()
-                if task is None: break
-                
-                stock_code, forces, timestamp_str = task
-                query = """
-                INSERT INTO physics_state 
-                (stock_code, velocity, thrust, gravity, drag, magnetic, jerk, impulse, net_force, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(stock_code) DO UPDATE SET 
-                    velocity=excluded.velocity, 
-                    thrust=excluded.thrust,
-                    gravity=excluded.gravity,
-                    drag=excluded.drag,
-                    magnetic=excluded.magnetic,
-                    jerk=excluded.jerk,
-                    impulse=excluded.impulse,
-                    net_force=excluded.net_force,
-                    last_updated=excluded.last_updated
-                """
-                params = (
-                    stock_code,
-                    forces["current_velocity"],
-                    forces["thrust"], forces["gravity"], forces["drag"],
-                    forces["magnetic"], forces["jerk"], forces["impulse"],
-                    forces["net_force"],
-                    timestamp_str
-                )
-                worker_conn.execute(query, params)
-                worker_conn.commit()
-                
-            except Exception as e:
-                logger.error(f"비동기 DB 로깅 실패: {e}")
-            finally:
-                self._async_queue.task_done()
+                try:
+                    if task is _QUEUE_SENTINEL:
+                        return
+                    if not isinstance(task, _PhysicalStateTask):
+                        raise TypeError("physical-state queue received an invalid task")
 
-    async def async_log_physical_state(self, stock_code: str, forces_dict: Dict[str, float]):
-        """[수정] 단일 속도 대신 전체 힘 딕셔너리를 큐에 넣습니다."""
-        timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        self._async_queue.put((stock_code, forces_dict, timestamp_str))
+                    forces = dict(task.forces)
+                    query = """
+                    INSERT INTO physics_state
+                    (stock_code, velocity, thrust, gravity, drag, magnetic, jerk, impulse,
+                     net_force, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(stock_code) DO UPDATE SET
+                        velocity=excluded.velocity,
+                        thrust=excluded.thrust,
+                        gravity=excluded.gravity,
+                        drag=excluded.drag,
+                        magnetic=excluded.magnetic,
+                        jerk=excluded.jerk,
+                        impulse=excluded.impulse,
+                        net_force=excluded.net_force,
+                        last_updated=excluded.last_updated
+                    """
+                    params = (
+                        task.stock_code,
+                        forces["current_velocity"],
+                        forces["thrust"], forces["gravity"], forces["drag"],
+                        forces["magnetic"], forces["jerk"], forces["impulse"],
+                        forces["net_force"],
+                        task.timestamp_str,
+                    )
+                    self._worker_conn.execute(query, params)
+                    self._worker_conn.commit()
+                except Exception as error:
+                    self._record_worker_failure(error)
+                    logger.error(f"비동기 DB 로깅 실패: {error}")
+                finally:
+                    self._async_queue.task_done()
+        except BaseException as error:
+            self._record_close_failure("physical-state worker", error)
+        finally:
+            try:
+                self._worker_conn.close()
+            except BaseException as error:
+                self._record_close_failure("worker connection close", error)
+            else:
+                with self._state_lock:
+                    self._worker_connection_closed = True
+
+    def _record_worker_failure(self, error: Exception) -> None:
+        with self._state_lock:
+            if self._worker_failure is None:
+                self._worker_failure = (type(error).__name__, str(error))
+
+    def _raise_worker_failure(self) -> None:
+        with self._state_lock:
+            failure = self._worker_failure
+        if failure is not None:
+            error_type, message = failure
+            raise PhysicalStatePersistenceError(
+                f"physical-state persistence failed ({error_type}): {message}"
+            )
+
+    def _record_close_failure(self, phase: str, error: BaseException) -> None:
+        with self._state_lock:
+            current = self._close_failure
+            process_control = isinstance(error, (KeyboardInterrupt, SystemExit))
+            current_is_process_control = (
+                current is not None
+                and isinstance(current[1], (KeyboardInterrupt, SystemExit))
+            )
+            if current is None or (process_control and not current_is_process_control):
+                self._close_failure = (phase, error)
+
+    def _raise_close_failure(self) -> None:
+        with self._state_lock:
+            failure = self._close_failure
+        if failure is None:
+            return
+
+        phase, error = failure
+        if isinstance(error, KeyboardInterrupt):
+            raise KeyboardInterrupt(*error.args)
+        if isinstance(error, SystemExit):
+            raise SystemExit(*error.args)
+        raise TradeLoggerLifecycleError(
+            f"TradeLogger close failed during {phase} "
+            f"({type(error).__name__}): {error}"
+        ) from error
+
+    def submit_physical_state(
+        self,
+        stock_code: str,
+        forces: Mapping[str, Any],
+    ) -> None:
+        """Enqueue an immutable snapshot for the single SQLite queue worker."""
+        task = _PhysicalStateTask(
+            stock_code=stock_code,
+            forces=tuple(
+                (key, copy.deepcopy(value))
+                for key, value in dict(forces).items()
+            ),
+            timestamp_str=datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+        )
+        with self._state_lock:
+            if not self._accepting_submissions:
+                raise RuntimeError("TradeLogger is closed and rejects new physical-state tasks")
+            self._async_queue.put(task)
+
+    async def async_log_physical_state(
+        self,
+        stock_code: str,
+        forces_dict: Dict[str, float],
+    ) -> None:
+        """Compatibility shim that delegates to synchronous queue submission."""
+        self.submit_physical_state(stock_code, forces_dict)
+
+    def flush(self) -> None:
+        """Drain all accepted queue tasks and surface the first worker failure."""
+        self._async_queue.join()
+        self._raise_worker_failure()
+
+    @property
+    def is_closed(self) -> bool:
+        """Return whether every owned worker, queue, and connection is terminal."""
+        with self._state_lock:
+            return self._closed
+
+    def close(self) -> None:
+        """Idempotently drain the queue, stop the worker, and close both connections."""
+        with self._state_lock:
+            if self._closed:
+                close_owner = False
+                close_event = None
+            elif self._closing:
+                close_owner = False
+                close_event = self._close_complete
+            else:
+                self._accepting_submissions = False
+                self._closing = True
+                self._close_complete = threading.Event()
+                close_owner = True
+                close_event = self._close_complete
+
+        if not close_owner and close_event is not None:
+            close_event.wait()
+        elif close_owner:
+            try:
+                self._close_owned_resources()
+            except BaseException as error:
+                self._record_close_failure("close orchestration", error)
+            finally:
+                with self._state_lock:
+                    self._closing = False
+                assert close_event is not None
+                close_event.set()
+
+        self._raise_close_failure()
+        self._raise_worker_failure()
+
+        with self._state_lock:
+            closed = self._closed
+        if not closed:
+            raise TradeLoggerLifecycleError(
+                "TradeLogger close did not reach a terminal state"
+            )
+
+    def _close_owned_resources(self) -> None:
+        for _ in range(2):
+            self._close_resource_pass()
+            with self._state_lock:
+                if self._closed:
+                    return
+
+    def _close_resource_pass(self) -> None:
+        with self._state_lock:
+            sentinel_enqueued = self._sentinel_enqueued
+
+        if not sentinel_enqueued and self._worker_thread.is_alive():
+            try:
+                self._async_queue.put(_QUEUE_SENTINEL)
+            except BaseException as error:
+                self._record_close_failure("sentinel enqueue", error)
+            else:
+                with self._state_lock:
+                    self._sentinel_enqueued = True
+                sentinel_enqueued = True
+
+        if sentinel_enqueued:
+            try:
+                self._worker_thread.join()
+            except BaseException as error:
+                self._record_close_failure("worker thread join", error)
+
+        worker_stopped = not self._worker_thread.is_alive()
+        queue_drained = self._async_queue.unfinished_tasks == 0
+
+        if worker_stopped and not queue_drained:
+            self._consume_orphaned_sentinels()
+            queue_drained = self._async_queue.unfinished_tasks == 0
+
+        if worker_stopped and queue_drained:
+            try:
+                self._async_queue.join()
+            except BaseException as error:
+                self._record_close_failure("queue drain", error)
+        elif worker_stopped:
+            self._record_close_failure(
+                "queue drain",
+                RuntimeError(
+                    f"{self._async_queue.unfinished_tasks} queue task(s) remain unfinished"
+                ),
+            )
+
+        if worker_stopped:
+            with self._state_lock:
+                worker_connection_closed = self._worker_connection_closed
+            if not worker_connection_closed:
+                try:
+                    self._worker_conn.close()
+                except BaseException as error:
+                    self._record_close_failure("worker connection close", error)
+                else:
+                    with self._state_lock:
+                        self._worker_connection_closed = True
+
+        with self._state_lock:
+            main_connection_closed = self._main_connection_closed
+        if not main_connection_closed:
+            try:
+                self.conn.close()
+            except BaseException as error:
+                self._record_close_failure("main connection close", error)
+            else:
+                with self._state_lock:
+                    self._main_connection_closed = True
+
+        with self._state_lock:
+            terminal = (
+                not self._worker_thread.is_alive()
+                and self._async_queue.unfinished_tasks == 0
+                and self._async_queue.empty()
+                and self._worker_connection_closed
+                and self._main_connection_closed
+            )
+            self._closed = terminal
+
+    def _consume_orphaned_sentinels(self) -> None:
+        with self._state_lock:
+            submissions_latched = not self._accepting_submissions
+        if not submissions_latched:
+            return
+
+        with self._async_queue.mutex:
+            queued_items = tuple(self._async_queue.queue)
+            only_sentinels = bool(queued_items) and all(
+                item is _QUEUE_SENTINEL for item in queued_items
+            )
+            if not only_sentinels:
+                return
+            for _ in queued_items:
+                self._async_queue._get()
+            self._async_queue.unfinished_tasks -= len(queued_items)
+            if self._async_queue.unfinished_tasks == 0:
+                self._async_queue.all_tasks_done.notify_all()
+            self._async_queue.not_full.notify_all()
         
     def get_last_physical_state(self, stock_code: str) -> Optional[dict]:
         # [수정] 크래시 복구를 위해 velocity 추출

@@ -3,12 +3,17 @@ import logging
 import requests
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Any, Callable, Dict, List, Optional, Sequence, cast
 
 # Slack SDK Import 추가
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from kiwoom_stock.application.reporting import (
+    DailyReportRequest,
+    DailyReportStats,
+    ReportArtifact,
+)
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.utils.gemini_client import GeminiClient
 
@@ -17,6 +22,59 @@ logger = logging.getLogger(__name__)
 
 # [2] 상태 테이블 전용
 status_logger = logging.getLogger("status")
+
+
+def _build_daily_summary_blocks(
+    *,
+    report_date: str,
+    win_rate: str,
+    total_pnl: float | str,
+    defense_count: int,
+    narrative: str,
+) -> List[Dict[str, Any]]:
+    """Build the byte-compatible summary blocks for both public paths."""
+    return [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "📈 일일 마감 부검 리포트",
+            },
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*📅 날짜:*\n{report_date}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*✅ 승률:*\n{win_rate}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*💰 총 수익률:*\n*{total_pnl}*",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "*🛡️ 쉴드 방어 (수급 락 등):*\n"
+                        f"{defense_count}건 차단"
+                    ),
+                },
+            ],
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*📝 아키텍트 AI 총평*\n{narrative}",
+            },
+        },
+    ]
+
 
 class SlackUploader:
     def __init__(self, token: str, channel_id: str):
@@ -88,9 +146,18 @@ class SlackUploader:
         return success
 
 class Notifier:
-    def __init__(self, stock_names: Dict[str, str], config: Dict):
+    def __init__(
+        self,
+        stock_names: Dict[str, str],
+        config: Dict[str, Any],
+        *,
+        uploader_factory: Optional[Callable[..., SlackUploader]] = None,
+    ):
         self.stock_names = stock_names
         self.webhook_url = config.get("webhook_url")
+        self.slack_token = config.get("slack_token")
+        self.slack_channel = config.get("slack_channel")
+        self._uploader_factory = uploader_factory or SlackUploader
 
         gemini_api_key = config.get("gemini_api_key")
         self.ai_client = GeminiClient(api_key=gemini_api_key, model="gemini-2.5-flash")
@@ -116,10 +183,20 @@ class Notifier:
         if not self.webhook_url:
             return
         try:
-            response = requests.post(self.webhook_url, json={"blocks": blocks}, timeout=5)
-            response.raise_for_status()
+            self._post_slack_blocks(blocks)
         except Exception as e:
             logger.error(f"Slack Block Kit 전송 실패: {e}")
+
+    def _post_slack_blocks(self, blocks: List[Dict[str, Any]]) -> None:
+        webhook_url = self.webhook_url
+        if not isinstance(webhook_url, str) or not webhook_url:
+            raise RuntimeError("Slack webhook is not configured")
+        response = requests.post(
+            webhook_url,
+            json={"blocks": blocks},
+            timeout=5,
+        )
+        response.raise_for_status()
 
     def start_status_session(self):
         """루프 시작 시 데이터 저장소 초기화"""
@@ -240,52 +317,102 @@ class Notifier:
             result = self.ai_client.generate_daily_report(stats=stats, csv_path=csv_path)
             
             if result.get('success'):
-                ai_comment = result.get('output')
+                ai_comment = cast(str, result.get('output'))
             else:
                 logger.error(f"AI 분석 중 오류 발생: {result.get('error')}")
                 ai_comment = f"AI 분석 중 오류 발생: {result.get('error')}"
 
-        # 4. Slack Block Kit 조립 (이전과 동일)
-        blocks: List[Dict[str, Any]] = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text", 
-                    "text": "📈 일일 마감 부검 리포트"
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn", 
-                        "text": f"*📅 날짜:*\n{stats.get('date', 'N/A')}"
-                    },
-                    {
-                        "type": "mrkdwn", 
-                        "text": f"*✅ 승률:*\n{stats.get('win_rate', 'N/A')}"
-                    },
-                    {
-                        "type": "mrkdwn", 
-                        "text": f"*💰 총 수익률:*\n*{stats.get('total_pnl', '0.00%')}*"
-                    },
-                    {
-                        "type": "mrkdwn", 
-                        "text": f"*🛡️ 쉴드 방어 (수급 락 등):*\n{stats.get('defense_count', 0)}건 차단"
-                    }
-                ]
-            },
-            {
-                "type": "divider"
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn", 
-                    "text": f"*📝 아키텍트 AI 총평*\n{ai_comment}"
-                }
-            }
-        ]
+        blocks = _build_daily_summary_blocks(
+            report_date=stats.get('date', 'N/A'),
+            win_rate=stats.get('win_rate', 'N/A'),
+            total_pnl=stats.get('total_pnl', '0.00%'),
+            defense_count=stats.get('defense_count', 0),
+            narrative=ai_comment,
+        )
         
         self.send_slack_blocks(blocks)
         logger.info("일일 마감 부검 리포트 Slack 전송 완료.")
+
+    def summary_enabled(self) -> bool:
+        """Return whether the typed summary path has a webhook."""
+        return bool(self.webhook_url)
+
+    def publish_summary(
+        self,
+        *,
+        request: DailyReportRequest,
+        stats: DailyReportStats,
+        narrative: str,
+        trade_artifact: Optional[ReportArtifact],
+    ) -> bool:
+        """Publish typed daily summary blocks with safe failure detail."""
+        if not self.webhook_url:
+            return False
+
+        blocks = _build_daily_summary_blocks(
+            report_date=request.report_date,
+            win_rate=stats.win_rate,
+            total_pnl=stats.total_pnl,
+            defense_count=stats.defense_count,
+            narrative=narrative,
+        )
+        try:
+            self._post_slack_blocks(blocks)
+        except Exception as error:
+            logger.error(
+                "Slack summary publication failed (%s)",
+                type(error).__name__,
+            )
+            raise RuntimeError("report summary publication failed") from None
+        logger.info("일일 마감 부검 리포트 Slack 전송 완료.")
+        return True
+
+    def publish_telemetry(
+        self,
+        *,
+        request: DailyReportRequest,
+        trade_artifact: Optional[ReportArtifact],
+        minute_artifacts: Sequence[ReportArtifact],
+    ) -> bool:
+        """Upload typed report artifact references using legacy chunking."""
+        if not self.slack_token or not self.slack_channel:
+            return False
+
+        minute_paths = [artifact.reference for artifact in minute_artifacts]
+        trade_path = (
+            trade_artifact.reference
+            if trade_artifact is not None
+            else None
+        )
+        if trade_path is None and not minute_paths:
+            return False
+
+        report_day = request.report_date.replace("-", "")
+        try:
+            uploader = self._uploader_factory(
+                token=self.slack_token,
+                channel_id=self.slack_channel,
+            )
+            upload_failed = False
+            if trade_path and not uploader.upload_csv(
+                trade_path,
+                f"📊 *[{report_day}] V3.0 엔진 매매 분석 리포트*",
+            ):
+                upload_failed = True
+            if minute_paths and not uploader.upload_multiple_files(
+                minute_paths,
+                (
+                    f"📈 *[{report_day}] 1분봉 백업 데이터 일괄 업로드 "
+                    f"({len(minute_paths)}개 종목)*"
+                ),
+            ):
+                upload_failed = True
+            if upload_failed:
+                raise RuntimeError("one or more artifact uploads failed")
+        except Exception as error:
+            logger.error(
+                "Slack telemetry publication failed (%s)",
+                type(error).__name__,
+            )
+            raise RuntimeError("report telemetry publication failed") from None
+        return True

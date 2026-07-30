@@ -1,0 +1,46 @@
+services:
+  app:
+    image: ${KIWOOM_IMAGE:?set the exact public GHCR image digest}
+    init: true
+    user: "0:0"
+    network_mode: none
+    privileged: false
+    read_only: true
+    cpus: 0.75
+    mem_limit: 512m
+    pids_limit: 128
+    labels:
+      io.kiwoom-stock.project: kiwoom-stock
+      io.kiwoom-stock.lifecycle: production-check-only
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp
+      - /run/secrets:mode=0700
+      - /run/kiwoom-secrets:mode=0700
+    environment:
+      KIWOOM_API_MODE: prod
+      KIWOOM_APP_ENV: prod
+      KIWOOM_PROCESS_NAME: ${KIWOOM_PROCESS_NAME:-paper-monitor}
+      KIWOOM_CREDENTIALS_DIR: /run/secrets
+    secrets:
+      - source: kiwoom_prod_app_key
+        target: KIWOOM_APP_KEY
+      - source: kiwoom_prod_secret_key
+        target: KIWOOM_SECRET_KEY
+    volumes:
+      - type: bind
+        source: ${KIWOOM_CHECK_DATA_DIR:?set an absolute ephemeral check data directory}
+        target: /var/lib/kiwoom
+        read_only: true
+
+secrets:
+  kiwoom_prod_app_key:
+    file: ${KIWOOM_PROD_APP_KEY_FILE:?set an absolute external prod app-key file}
+  kiwoom_prod_secret_key:
+    file: ${KIWOOM_PROD_SECRET_KEY_FILE:?set an absolute external prod secret-key file}

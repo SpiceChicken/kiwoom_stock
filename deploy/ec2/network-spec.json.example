@@ -1,0 +1,38 @@
+{
+  "$schema": "kiwoom-stock/ec2-clean-rebuild-network-intent/v1",
+  "executableArtifact": "deploy/ec2/apply_clean_rebuild.sh",
+  "region": "ap-northeast-2",
+  "vpc": {
+    "cidrBlock": "10.77.0.0/20",
+    "enableDnsSupport": true,
+    "enableDnsHostnames": true
+  },
+  "subnet": {
+    "cidrBlock": "10.77.0.0/24",
+    "availabilityZone": "ap-northeast-2a",
+    "mapPublicIpOnLaunch": false
+  },
+  "internetGateway": {"count": 1, "attachToVpc": true},
+  "routeTable": {
+    "custom": true,
+    "associateSubnet": true,
+    "routes": [{"destinationCidrBlock": "0.0.0.0/0", "target": "internetGateway"}]
+  },
+  "securityGroup": {
+    "dedicated": true,
+    "revokeDefaultAllowAllEgressBeforeAuthorize": true,
+    "postcondition": "ingress=0; ipv4-egress=exactly tcp/443/0.0.0.0/0; ipv6-egress=0",
+    "ingress": [],
+    "egress": [
+      {"ipProtocol": "tcp", "fromPort": 443, "toPort": 443, "cidrIpv4": "0.0.0.0/0"}
+    ]
+  },
+  "elasticIp": {"domain": "vpc", "count": 1, "association": "precreatedPrimaryEniBeforeLaunch"},
+  "prohibitedResources": {
+    "natGateways": 0,
+    "vpcEndpoints": 0,
+    "loadBalancers": 0,
+    "bastions": 0,
+    "ipv6Cidrs": 0
+  }
+}

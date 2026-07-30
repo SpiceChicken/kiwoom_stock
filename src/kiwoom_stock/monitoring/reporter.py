@@ -2,21 +2,26 @@ import os
 import logging
 import pandas as pd
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 
 from kiwoom_stock.core import config
 from kiwoom_stock.monitoring.notifier import Notifier, SlackUploader
-from tools.trade_validator import analyze_trade_efficiency
-from tools.extract_1min_chart import extract_and_save_1min_chart
+from kiwoom_stock.reporting.trade_analysis import analyze_trade_efficiency
+from kiwoom_stock.reporting.minute_chart import extract_and_save_1min_chart
+from kiwoom_stock.application.reporting import DailyReportRequest, PostMarketReportUseCase
 
 logger = logging.getLogger(__name__)
 
 class DailyReporter:
-    def __init__(self, notifier: Notifier):
+    """Compatibility facade with optional pure application use case."""
+    def __init__(self, notifier: Notifier, *, use_case: Optional[PostMarketReportUseCase] = None,
+                 clock: Optional[Callable[[], datetime]] = None):
         self.notifier = notifier
+        self._use_case = use_case
+        self._clock = clock or (lambda: datetime.now())
 
     # 💡 [변경] 디렉토리 경로 대신 명시적인 'minute_chart_list'를 파라미터로 받습니다.
-    def execute_slack_telemetry(self, trade_csv_path: str, minute_chart_list: list):
+    def execute_slack_telemetry(self, trade_csv_path: Optional[str], minute_chart_list: list):
         """ EC2 Slack Telemetry 파이프라인 가동기"""
         system_config = getattr(config, 'CONFIG', {})
         token = system_config.get("slack_token")
@@ -26,7 +31,7 @@ class DailyReporter:
             logger.warning("⚠️ 슬랙 토큰(slack_token) 또는 채널 ID(slack_channel)가 설정되지 않아 파일 업로드를 건너뜁니다.")
             return
 
-        today_str = datetime.now().strftime("%Y%m%d")
+        today_str = self._clock().strftime("%Y%m%d")
         uploader = SlackUploader(token=token, channel_id=channel)
         
         logger.info("🚀 [Telemetry] 일일 슬랙 텔레메트리 파이프라인 가동...")
@@ -48,7 +53,13 @@ class DailyReporter:
 
     def run_pipeline(self, target_date_str: Optional[str] = None):
         if target_date_str is None:
-            target_date_str = datetime.now().strftime('%Y-%m-%d')
+            target_date_str = self._clock().strftime('%Y-%m-%d')
+
+        if self._use_case is not None:
+            return self._use_case.execute(DailyReportRequest(
+                target_date=target_date_str,
+                report_date=target_date_str,
+            ))
         
         logger.info("🔄 [Daily Post-Mortem] 1단계: 1분봉 데이터 추출 시작")
         try:
@@ -71,9 +82,9 @@ class DailyReporter:
         except Exception as e:
             logger.error(f"부검 파이프라인 처리 중 오류: {e}", exc_info=True)
 
-    def _load_and_parse_stats(self, csv_path: str) -> Dict[str, Any]:
+    def _load_and_parse_stats(self, csv_path: Optional[str]) -> Dict[str, Any]:
         """trade_validator가 리턴한 CSV 경로를 받아 기초 통계 산출"""
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = self._clock().strftime("%Y-%m-%d")
         stats = {
             "date": today_str,
             "win_rate": "N/A",
