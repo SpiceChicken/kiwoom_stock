@@ -1,0 +1,599 @@
+name: Production digest promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Approved full 40-character lowercase source commit SHA
+        required: true
+        type: string
+      image_digest:
+        description: Approved exact public GHCR digest reference
+        required: true
+        type: string
+      build_run_id:
+        description: Approved candidate workflow run ID
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: kiwoom-stock-production-check-i-02cb0a404794bd43a
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  AWS_MAX_ATTEMPTS: "3"
+  EC2_INSTANCE_ID: i-02cb0a404794bd43a
+  MAX_RUNTIME_IMAGE_MIB: "850"
+
+jobs:
+  promote:
+    name: protected exact digest production check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      IMAGE_DIGEST: ${{ inputs.image_digest }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      APPROVED_SOURCE_SHA: ${{ vars.KIWOOM_APPROVED_SOURCE_SHA }}
+      APPROVED_IMAGE_DIGEST: ${{ vars.KIWOOM_APPROVED_IMAGE_DIGEST }}
+      APPROVED_BUILD_RUN_ID: ${{ vars.KIWOOM_APPROVED_BUILD_RUN_ID }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.KIWOOM_AWS_DEPLOY_ROLE_ARN }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Match protected Environment release tuple
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
+          [[ "${BUILD_RUN_ID}" =~ ^[0-9]+$ ]]
+          test "${SOURCE_SHA}" = "${APPROVED_SOURCE_SHA}"
+          test "${IMAGE_DIGEST}" = "${APPROVED_IMAGE_DIGEST}"
+          test "${BUILD_RUN_ID}" = "${APPROVED_BUILD_RUN_ID}"
+          test "${AWS_DEPLOY_ROLE_ARN}" = \
+            "arn:aws:iam::380648615401:role/kiwoom-stock-github-production-check"
+          test "${EC2_INSTANCE_ID}" = "i-02cb0a404794bd43a"
+          test "${AWS_REGION}" = "ap-northeast-2"
+
+      - name: Verify candidate run job and unique artifact provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_json="${RUNNER_TEMP}/candidate-run.json"
+          jobs_json="${RUNNER_TEMP}/candidate-jobs.json"
+          artifacts_json="${RUNNER_TEMP}/candidate-artifacts.json"
+          api_headers=(
+            -H 'Accept: application/vnd.github+json'
+            -H 'X-GitHub-Api-Version: 2022-11-28'
+            -H "Authorization: Bearer ${GH_TOKEN}"
+          )
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --max-filesize 1048576 \
+            "${api_headers[@]}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}" \
+            --output "${run_json}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --max-filesize 2097152 \
+            "${api_headers[@]}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}/jobs?per_page=100" \
+            --output "${jobs_json}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --max-filesize 1048576 \
+            "${api_headers[@]}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}/artifacts?per_page=100" \
+            --output "${artifacts_json}"
+          python3 - "${run_json}" "${jobs_json}" "${artifacts_json}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+
+          run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          jobs = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          artifacts = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          source = os.environ["SOURCE_SHA"]
+          digest = os.environ["IMAGE_DIGEST"]
+          run_id = int(os.environ["BUILD_RUN_ID"])
+          legacy = (
+              source == "90b0f00f32e8db0b327d90aa3d053f520d2d3f1b"
+              and digest == "ghcr.io/spicechicken/kiwoom_stock@sha256:faa437771719203165c2de57bfd8f12299ddfcc1c5d014772f1af86b3c71093d"
+              and run_id == 30544114256
+          )
+          required_run = {
+              "id": run_id,
+              "event": "workflow_dispatch",
+              "head_branch": "main",
+              "head_sha": source,
+              "path": ".github/workflows/cd-production-check.yml",
+              "status": "completed",
+          }
+          for key, expected in required_run.items():
+              if run.get(key) != expected:
+                  raise SystemExit(f"candidate run {key} mismatch")
+          expected_conclusion = "cancelled" if legacy else "success"
+          if run.get("conclusion") != expected_conclusion:
+              raise SystemExit("candidate run conclusion mismatch")
+          if jobs.get("total_count", 0) > 100:
+              raise SystemExit("candidate jobs pagination is not allowed")
+          matches = [
+              job for job in jobs.get("jobs", [])
+              if job.get("name") == "validate and publish immutable candidate"
+          ]
+          if len(matches) != 1:
+              raise SystemExit("exactly one candidate build job is required")
+          job = matches[0]
+          if job.get("status") != "completed" or job.get("conclusion") != "success":
+              raise SystemExit("candidate build job did not succeed")
+          job_id = job.get("id")
+          if type(job_id) is not int or job_id <= 0:
+              raise SystemExit("candidate build job id is invalid")
+          if legacy and job_id != 90875823290:
+              raise SystemExit("legacy candidate build job id mismatch")
+          if artifacts.get("total_count", 0) > 100:
+              raise SystemExit("candidate artifacts pagination is not allowed")
+          artifact_name = (
+              f"candidate-{source}"
+              if legacy
+              else f"release-manifest-{source}-{run_id}"
+          )
+          matches = [
+              artifact for artifact in artifacts.get("artifacts", [])
+              if artifact.get("name") == artifact_name
+          ]
+          if len(matches) != 1:
+              raise SystemExit("exactly one expected release artifact is required")
+          artifact = matches[0]
+          artifact_id = artifact.get("id")
+          artifact_size = artifact.get("size_in_bytes")
+          artifact_digest = artifact.get("digest")
+          artifact_run = artifact.get("workflow_run") or {}
+          size_limit = 4 * 1024 * 1024 if legacy else 64 * 1024
+          if type(artifact_id) is not int or artifact_id <= 0:
+              raise SystemExit("release artifact id is invalid")
+          if type(artifact_size) is not int or not 0 < artifact_size <= size_limit:
+              raise SystemExit("release artifact size is invalid")
+          if (
+              type(artifact_digest) is not str
+              or re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest) is None
+          ):
+              raise SystemExit("release artifact digest is invalid")
+          if artifact.get("expired") is not False:
+              raise SystemExit("release artifact is expired")
+          if artifact_run.get("id") != run_id:
+              raise SystemExit("release artifact run binding mismatch")
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"mode={'legacy' if legacy else 'manifest'}\n")
+              stream.write(f"artifact_id={artifact_id}\n")
+              stream.write(f"artifact_name={artifact_name}\n")
+              stream.write(f"artifact_size={artifact_size}\n")
+              stream.write(f"artifact_digest={artifact_digest}\n")
+              stream.write(f"build_job_id={job_id}\n")
+          PY
+
+      - name: Validate bounded release artifact and strict manifest
+        id: manifest
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.provenance.outputs.artifact_id }}
+          ARTIFACT_SIZE: ${{ steps.provenance.outputs.artifact_size }}
+          ARTIFACT_DIGEST: ${{ steps.provenance.outputs.artifact_digest }}
+          RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
+          BUILD_JOB_ID: ${{ steps.provenance.outputs.build_job_id }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/release-artifact.zip"
+          max_archive_bytes=65536
+          if [[ "${RELEASE_MODE}" == "legacy" ]]; then
+            max_archive_bytes=4194304
+          fi
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --max-filesize "${max_archive_bytes}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output "${archive}"
+          test "$(stat -c '%s' "${archive}")" = "${ARTIFACT_SIZE}"
+          test "sha256:$(sha256sum "${archive}" | cut -d' ' -f1)" = \
+            "${ARTIFACT_DIGEST}"
+          python3 - "${archive}" <<'PY'
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import stat
+          import sys
+          import zipfile
+
+          archive = Path(sys.argv[1])
+          mode = os.environ["RELEASE_MODE"]
+          expected_manifest_keys = {
+              "schema_version",
+              "source_sha",
+              "image_digest",
+              "image_size_mib",
+              "compose_sha256",
+              "compose_prod_sha256",
+              "build_run_id",
+              "build_job_id",
+          }
+          expected_names = (
+              {"release-manifest.json"}
+              if mode == "manifest"
+              else {
+                  "reports/pytest-production-check.xml",
+                  "runtime-image-inspect.json",
+              }
+          )
+          with zipfile.ZipFile(archive) as bundle:
+              infos = bundle.infolist()
+              names = {info.filename for info in infos}
+              if len(infos) != len(expected_names) or names != expected_names:
+                  raise SystemExit("release artifact member set mismatch")
+              for info in infos:
+                  path = PurePosixPath(info.filename)
+                  mode_bits = info.external_attr >> 16
+                  if (
+                      path.is_absolute()
+                      or ".." in path.parts
+                      or info.is_dir()
+                      or stat.S_ISLNK(mode_bits)
+                      or info.file_size > 16 * 1024 * 1024
+                      or info.compress_size > 4 * 1024 * 1024
+                  ):
+                      raise SystemExit("unsafe release artifact member")
+              if mode == "manifest":
+                  info = infos[0]
+                  if info.file_size > 16 * 1024:
+                      raise SystemExit("release manifest exceeds 16 KiB")
+                  payload = bundle.read("release-manifest.json")
+                  if len(payload) > 16 * 1024:
+                      raise SystemExit("release manifest exceeds 16 KiB")
+                  manifest = json.loads(payload.decode("utf-8"))
+                  if type(manifest) is not dict or set(manifest) != expected_manifest_keys:
+                      raise SystemExit("release manifest schema mismatch")
+                  string_keys = {
+                      "source_sha",
+                      "image_digest",
+                      "compose_sha256",
+                      "compose_prod_sha256",
+                  }
+                  integer_keys = {
+                      "schema_version",
+                      "image_size_mib",
+                      "build_run_id",
+                      "build_job_id",
+                  }
+                  if any(type(manifest[key]) is not str for key in string_keys):
+                      raise SystemExit("release manifest string type mismatch")
+                  if any(type(manifest[key]) is not int for key in integer_keys):
+                      raise SystemExit("release manifest integer type mismatch")
+                  if manifest["schema_version"] != 1:
+                      raise SystemExit("release manifest version mismatch")
+                  expected = {
+                      "source_sha": os.environ["SOURCE_SHA"],
+                      "image_digest": os.environ["IMAGE_DIGEST"],
+                      "build_run_id": int(os.environ["BUILD_RUN_ID"]),
+                      "build_job_id": int(os.environ["BUILD_JOB_ID"]),
+                  }
+                  if any(manifest[key] != value for key, value in expected.items()):
+                      raise SystemExit("release manifest tuple mismatch")
+                  size = manifest["image_size_mib"]
+                  if not 0 < size <= int(os.environ["MAX_RUNTIME_IMAGE_MIB"]):
+                      raise SystemExit("release manifest image size mismatch")
+                  for key in ("compose_sha256", "compose_prod_sha256"):
+                      value = manifest[key]
+                      if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                          raise SystemExit("release manifest Compose hash mismatch")
+                  output = Path(os.environ["GITHUB_OUTPUT"])
+                  with output.open("a", encoding="utf-8") as stream:
+                      stream.write(f"image_size_mib={size}\n")
+                      stream.write(f"compose_sha256={manifest['compose_sha256']}\n")
+                      stream.write(
+                          f"compose_prod_sha256={manifest['compose_prod_sha256']}\n"
+                      )
+              else:
+                  inspect_payload = bundle.read("runtime-image-inspect.json")
+                  if len(inspect_payload) > 1024 * 1024:
+                      raise SystemExit("legacy image inspection is too large")
+                  inspected = json.loads(inspect_payload.decode("utf-8"))
+                  if type(inspected) is not list or len(inspected) != 1:
+                      raise SystemExit("legacy image inspection shape mismatch")
+                  config = inspected[0].get("Config") or {}
+                  labels = config.get("Labels") or {}
+                  if labels.get("org.opencontainers.image.revision") != os.environ["SOURCE_SHA"]:
+                      raise SystemExit("legacy image revision mismatch")
+                  if config.get("Entrypoint") != [
+                      "python",
+                      "/usr/local/bin/kiwoom-runtime-entrypoint.py",
+                  ]:
+                      raise SystemExit("legacy image entrypoint mismatch")
+                  if config.get("User") != "10001:10001":
+                      raise SystemExit("legacy image user mismatch")
+          PY
+
+      - name: Verify Compose bytes from exact source commit
+        id: compose
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
+          MANIFEST_COMPOSE_SHA256: ${{ steps.manifest.outputs.compose_sha256 }}
+          MANIFEST_COMPOSE_PROD_SHA256: ${{ steps.manifest.outputs.compose_prod_sha256 }}
+        run: |
+          set -euo pipefail
+          api_headers=(
+            -H 'Accept: application/vnd.github+json'
+            -H 'X-GitHub-Api-Version: 2022-11-28'
+            -H "Authorization: Bearer ${GH_TOKEN}"
+          )
+          for compose_path in compose.yaml compose.prod.yaml; do
+            output="${RUNNER_TEMP}/${compose_path}.contents.json"
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --max-filesize 1048576 \
+              "${api_headers[@]}" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/contents/${compose_path}?ref=${SOURCE_SHA}" \
+              --output "${output}"
+          done
+          python3 \
+            "${RUNNER_TEMP}/compose.yaml.contents.json" \
+            "${RUNNER_TEMP}/compose.prod.yaml.contents.json" <<'PY'
+          import base64
+          import binascii
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          hashes = {}
+          for expected_path, response_path in zip(
+              ("compose.yaml", "compose.prod.yaml"),
+              sys.argv[1:],
+              strict=True,
+          ):
+              response = json.loads(
+                  Path(response_path).read_text(encoding="utf-8")
+              )
+              if (
+                  response.get("type") != "file"
+                  or response.get("path") != expected_path
+                  or response.get("encoding") != "base64"
+                  or type(response.get("content")) is not str
+              ):
+                  raise SystemExit("Compose Contents API contract mismatch")
+              try:
+                  encoded = response["content"].replace("\n", "")
+                  payload = base64.b64decode(
+                      encoded.encode("ascii"),
+                      validate=True,
+                  )
+              except (UnicodeEncodeError, binascii.Error) as error:
+                  raise SystemExit("invalid Compose base64 content") from error
+              if not 0 < len(payload) <= 1024 * 1024:
+                  raise SystemExit("Compose content size is invalid")
+              hashes[expected_path] = hashlib.sha256(payload).hexdigest()
+          if os.environ["RELEASE_MODE"] == "manifest":
+              expected = {
+                  "compose.yaml": os.environ["MANIFEST_COMPOSE_SHA256"],
+                  "compose.prod.yaml": os.environ[
+                      "MANIFEST_COMPOSE_PROD_SHA256"
+                  ],
+              }
+              if hashes != expected:
+                  raise SystemExit("manifest and source Compose hashes differ")
+          with Path(os.environ["GITHUB_OUTPUT"]).open(
+              "a", encoding="utf-8"
+          ) as stream:
+              stream.write(f"compose_sha256={hashes['compose.yaml']}\n")
+              stream.write(
+                  f"compose_prod_sha256={hashes['compose.prod.yaml']}\n"
+              )
+          PY
+
+      - name: Prove anonymous exact digest image contract
+        id: image
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
+          MANIFEST_IMAGE_SIZE_MIB: ${{ steps.manifest.outputs.image_size_mib }}
+        run: |
+          set -euo pipefail
+          anonymous_config="$(mktemp -d "${RUNNER_TEMP}/anonymous-docker.XXXXXX")"
+          trap 'rm -rf "${anonymous_config}"' EXIT
+          docker image rm --force "${IMAGE_DIGEST}" >/dev/null 2>&1 || true
+          DOCKER_CONFIG="${anonymous_config}" docker pull "${IMAGE_DIGEST}"
+          image_bytes="$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Size}}')"
+          image_mib="$(( (image_bytes + 1048575) / 1048576 ))"
+          (( image_mib <= MAX_RUNTIME_IMAGE_MIB ))
+          if [[ "${RELEASE_MODE}" == "manifest" ]]; then
+            test "${image_mib}" = "${MANIFEST_IMAGE_SIZE_MIB}"
+          fi
+          python3 - "${IMAGE_DIGEST}" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          image = json.loads(
+              subprocess.check_output(
+                  ["docker", "image", "inspect", sys.argv[1]],
+                  text=True,
+              )
+          )
+          if len(image) != 1:
+              raise SystemExit("exactly one image inspection result is required")
+          config = image[0].get("Config") or {}
+          labels = config.get("Labels") or {}
+          if labels.get("org.opencontainers.image.revision") != os.environ["SOURCE_SHA"]:
+              raise SystemExit("runtime revision contract mismatch")
+          if config.get("Entrypoint") != [
+              "python",
+              "/usr/local/bin/kiwoom-runtime-entrypoint.py",
+          ]:
+              raise SystemExit("runtime entrypoint contract mismatch")
+          if config.get("User") != "10001:10001":
+              raise SystemExit("runtime user contract mismatch")
+          PY
+          printf 'size_mib=%s\n' "${image_mib}" >>"${GITHUB_OUTPUT}"
+
+      - name: Configure exact AWS deploy role with OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: kiwoom-production-check
+
+      - name: Send allowlisted production-check document
+        id: ssm
+        shell: bash
+        env:
+          IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
+          COMPOSE_SHA256: ${{ steps.compose.outputs.compose_sha256 }}
+          COMPOSE_PROD_SHA256: ${{ steps.compose.outputs.compose_prod_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          values = {
+              "ImageDigest": [os.environ["IMAGE_DIGEST"]],
+              "SourceSha": [os.environ["SOURCE_SHA"]],
+              "ComposeSha256": [os.environ["COMPOSE_SHA256"]],
+              "ComposeProdSha256": [os.environ["COMPOSE_PROD_SHA256"]],
+              "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
+              "Region": [os.environ["AWS_REGION"]],
+          }
+          Path("ssm-parameters.json").write_text(
+              json.dumps(values, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+          command_id="$(aws ssm send-command \
+            --region "${AWS_REGION}" \
+            --document-name KiwoomStock-ProductionCheck \
+            --instance-ids "${EC2_INSTANCE_ID}" \
+            --timeout-seconds 750 \
+            --comment "kiwoom digest promotion ${SOURCE_SHA}" \
+            --parameters file://ssm-parameters.json \
+            --query 'Command.CommandId' --output text)"
+          [[ "${command_id}" =~ ^[0-9a-f-]{36}$ ]]
+          printf 'command_id=%s\n' "${command_id}" >>"${GITHUB_OUTPUT}"
+
+      - name: Wait for terminal SSM result and record redacted evidence
+        env:
+          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
+          IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
+          COMPOSE_SHA256: ${{ steps.compose.outputs.compose_sha256 }}
+          COMPOSE_PROD_SHA256: ${{ steps.compose.outputs.compose_prod_sha256 }}
+        run: |
+          set -euo pipefail
+          terminal_status=""
+          last_observed_status="InvocationNotObserved"
+          printf '%s\n' '{"Status":"InvocationNotObserved"}' \
+            >ssm-invocation.json
+          for attempt in $(seq 1 90); do
+            set +e
+            aws ssm get-command-invocation \
+              --region "${AWS_REGION}" \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${EC2_INSTANCE_ID}" \
+              --output json >ssm-invocation.next.json 2>/dev/null
+            query_status=$?
+            set -e
+            if (( query_status == 0 )); then
+              mv ssm-invocation.next.json ssm-invocation.json
+              status="$(python3 -c \
+                'import json; print(json.load(open("ssm-invocation.json"))["Status"])')"
+              last_observed_status="${status}"
+              case "${status}" in
+                Success|Cancelled|TimedOut|Failed)
+                  terminal_status="${status}"
+                  break
+                  ;;
+              esac
+            else
+              rm -f ssm-invocation.next.json
+            fi
+            if (( attempt < 90 )); then
+              sleep 10
+            fi
+          done
+          python3 - "${COMMAND_ID}" "${terminal_status}" \
+            "${last_observed_status}" "${attempt}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          command_id, terminal_status, last_status, poll_attempts = sys.argv[1:]
+          invocation = json.loads(
+              Path("ssm-invocation.json").read_text(encoding="utf-8")
+          )
+          stdout = invocation.get("StandardOutputContent", "")
+          stderr = invocation.get("StandardErrorContent", "")
+          expected_instance = os.environ["EC2_INSTANCE_ID"]
+          expected_marker = (
+              "production check passed: "
+              f"source_sha={os.environ['SOURCE_SHA']} "
+              f"image={os.environ['IMAGE_DIGEST']} rollback=false"
+          )
+          instance_verified = invocation.get("InstanceId") == expected_instance
+          response_code_verified = invocation.get("ResponseCode") == 0
+          pass_marker_verified = stdout.splitlines().count(expected_marker) == 1
+          evidence = {
+              "source_sha": os.environ["SOURCE_SHA"],
+              "image_digest": os.environ["IMAGE_DIGEST"],
+              "image_size_mib": int(os.environ["IMAGE_SIZE_MIB"]),
+              "compose_sha256": os.environ["COMPOSE_SHA256"],
+              "compose_prod_sha256": os.environ["COMPOSE_PROD_SHA256"],
+              "build_run_id": int(os.environ["BUILD_RUN_ID"]),
+              "instance_id": invocation.get("InstanceId"),
+              "command_id": command_id,
+              "terminal_status": terminal_status or None,
+              "last_observed_status": last_status,
+              "poll_attempts": int(poll_attempts),
+              "operator_follow_up_required": terminal_status != "Success",
+              "response_code": invocation.get("ResponseCode"),
+              "stdout_bytes": len(stdout),
+              "stderr_bytes": len(stderr),
+              "instance_verified": instance_verified,
+              "response_code_verified": response_code_verified,
+              "pass_marker_verified": pass_marker_verified,
+              "contract_expected_no_github_secrets": True,
+              "contract_expected_worker_inactive": True,
+          }
+          Path("production-check-evidence.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          checks = (
+              terminal_status == "Success",
+              last_status == "Success",
+              instance_verified,
+              response_code_verified,
+              pass_marker_verified,
+          )
+          if not all(checks):
+              raise SystemExit("production check evidence validation failed")
+          PY
+
+      - name: Upload protected promotion evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: production-check-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: production-check-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
