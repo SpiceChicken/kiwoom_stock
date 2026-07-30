@@ -716,7 +716,7 @@ def _run_compose_validator(tmp_path, prod_payload, *, expected_prod_hash):
             encoding="utf-8",
         )
         paths.append(str(response))
-    handoff = tmp_path / "compose-handoff.json"
+    handoff = tmp_path / "promotion-compose-handoff.json"
     environment = dict(os.environ)
     environment.update(
         {
@@ -726,7 +726,8 @@ def _run_compose_validator(tmp_path, prod_payload, *, expected_prod_hash):
             ).hexdigest(),
             "MANIFEST_COMPOSE_PROD_SHA256": expected_prod_hash,
             "SOURCE_SHA": "a" * 40,
-            "COMPOSE_HANDOFF_PATH": str(handoff),
+            "RUNNER_TEMP": str(tmp_path),
+            "COMPOSE_HANDOFF_FILENAME": handoff.name,
         }
     )
     return subprocess.run(
@@ -736,6 +737,38 @@ def _run_compose_validator(tmp_path, prod_payload, *, expected_prod_hash):
         check=False,
         capture_output=True,
         text=True,
+    )
+
+
+def test_promotion_pre_job_env_uses_static_filenames_without_runner_context():
+    workflow = _promotion_workflow()
+    environments = (
+        workflow["env"],
+        workflow["jobs"]["promote"]["env"],
+    )
+
+    for environment in environments:
+        assert all(
+            "${{ runner." not in value
+            for value in environment.values()
+            if isinstance(value, str)
+        )
+    assert workflow["env"]["COMPOSE_HANDOFF_FILENAME"] == (
+        "promotion-compose-handoff.json"
+    )
+    assert workflow["env"]["SSM_PARAMETERS_FILENAME"] == (
+        "promotion-ssm-parameters.json"
+    )
+    assert workflow["env"]["EVIDENCE_FILENAME"] == (
+        "production-check-evidence.json"
+    )
+    assert all(
+        "/" not in workflow["env"][name]
+        for name in (
+            "COMPOSE_HANDOFF_FILENAME",
+            "SSM_PARAMETERS_FILENAME",
+            "EVIDENCE_FILENAME",
+        )
     )
 
 
@@ -775,7 +808,7 @@ def _run_compose_handoff_preflight(tmp_path, mutation=None):
     )
     assert compose.returncode == 0, compose.stderr
 
-    handoff_path = tmp_path / "compose-handoff.json"
+    handoff_path = tmp_path / "promotion-compose-handoff.json"
     if mutation == "empty":
         payload = json.loads(handoff_path.read_text(encoding="utf-8"))
         payload["compose_prod_sha256"] = ""
@@ -795,7 +828,7 @@ def _run_compose_handoff_preflight(tmp_path, mutation=None):
         if step["name"]
         == "Revalidate Compose handoff and prepare redacted request evidence"
     )
-    parameters_path = tmp_path / "ssm-parameters.json"
+    parameters_path = tmp_path / "promotion-ssm-parameters.json"
     evidence_path = tmp_path / "production-check-evidence.json"
     environment = dict(os.environ)
     environment.update(
@@ -809,15 +842,17 @@ def _run_compose_handoff_preflight(tmp_path, mutation=None):
             "MAX_RUNTIME_IMAGE_MIB": "850",
             "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
             "AWS_REGION": "ap-northeast-2",
-            "COMPOSE_HANDOFF_PATH": str(handoff_path),
-            "SSM_PARAMETERS_PATH": str(parameters_path),
-            "EVIDENCE_PATH": str(evidence_path),
+            "RUNNER_TEMP": str(tmp_path),
+            "COMPOSE_HANDOFF_FILENAME": handoff_path.name,
+            "SSM_PARAMETERS_FILENAME": parameters_path.name,
+            "EVIDENCE_FILENAME": evidence_path.name,
         }
     )
     completed = subprocess.run(
         [sys.executable, "-"],
         input=_single_python_heredoc(step),
         env=environment,
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
@@ -892,14 +927,16 @@ def test_promotion_send_failure_preserves_redacted_evidence_without_command_id(
             "AWS_REGION": "ap-northeast-2",
             "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
             "SOURCE_SHA": "a" * 40,
-            "SSM_PARAMETERS_PATH": str(tmp_path / "ssm-parameters.json"),
-            "EVIDENCE_PATH": str(evidence_path),
+            "RUNNER_TEMP": str(tmp_path),
+            "SSM_PARAMETERS_FILENAME": "promotion-ssm-parameters.json",
+            "EVIDENCE_FILENAME": evidence_path.name,
             "GITHUB_OUTPUT": str(output),
         }
     )
     sent = subprocess.run(
         ["bash", "-c", step["run"]],
         env=environment,
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
@@ -944,14 +981,16 @@ def test_promotion_send_success_records_command_id_before_polling(tmp_path):
             "AWS_REGION": "ap-northeast-2",
             "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
             "SOURCE_SHA": "a" * 40,
-            "SSM_PARAMETERS_PATH": str(tmp_path / "ssm-parameters.json"),
-            "EVIDENCE_PATH": str(evidence_path),
+            "RUNNER_TEMP": str(tmp_path),
+            "SSM_PARAMETERS_FILENAME": "promotion-ssm-parameters.json",
+            "EVIDENCE_FILENAME": evidence_path.name,
             "GITHUB_OUTPUT": str(output),
         }
     )
     sent = subprocess.run(
         ["bash", "-c", step["run"]],
         env=environment,
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,

@@ -27,9 +27,9 @@ env:
   AWS_MAX_ATTEMPTS: "3"
   EC2_INSTANCE_ID: i-02cb0a404794bd43a
   MAX_RUNTIME_IMAGE_MIB: "850"
-  COMPOSE_HANDOFF_PATH: ${{ runner.temp }}/promotion-compose-handoff.json
-  SSM_PARAMETERS_PATH: ${{ runner.temp }}/promotion-ssm-parameters.json
-  EVIDENCE_PATH: production-check-evidence.json
+  COMPOSE_HANDOFF_FILENAME: promotion-compose-handoff.json
+  SSM_PARAMETERS_FILENAME: promotion-ssm-parameters.json
+  EVIDENCE_FILENAME: production-check-evidence.json
 
 jobs:
   promote:
@@ -404,7 +404,10 @@ jobs:
               "compose_sha256": hashes["compose.yaml"],
               "compose_prod_sha256": hashes["compose.prod.yaml"],
           }
-          destination = Path(os.environ["COMPOSE_HANDOFF_PATH"])
+          destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / os.environ["COMPOSE_HANDOFF_FILENAME"]
+          )
           destination.parent.mkdir(parents=True, exist_ok=True)
           with tempfile.NamedTemporaryFile(
               mode="w",
@@ -487,7 +490,10 @@ jobs:
           import tempfile
 
           def read_compose_handoff():
-              path = Path(os.environ["COMPOSE_HANDOFF_PATH"])
+              path = (
+                  Path(os.environ["RUNNER_TEMP"])
+                  / os.environ["COMPOSE_HANDOFF_FILENAME"]
+              )
               metadata = path.lstat()
               if (
                   not stat.S_ISREG(metadata.st_mode)
@@ -545,7 +551,8 @@ jobs:
               "Region": [os.environ["AWS_REGION"]],
           }
           write_private_json(
-              Path(os.environ["SSM_PARAMETERS_PATH"]),
+              Path(os.environ["RUNNER_TEMP"])
+              / os.environ["SSM_PARAMETERS_FILENAME"],
               parameters,
           )
           evidence = {
@@ -570,7 +577,7 @@ jobs:
               "contract_expected_no_github_secrets": True,
               "contract_expected_worker_inactive": True,
           }
-          write_private_json(Path(os.environ["EVIDENCE_PATH"]), evidence)
+          write_private_json(Path(os.environ["EVIDENCE_FILENAME"]), evidence)
           PY
 
       - name: Configure exact AWS deploy role with OIDC
@@ -592,7 +599,8 @@ jobs:
             --instance-ids "${EC2_INSTANCE_ID}" \
             --timeout-seconds 750 \
             --comment "kiwoom digest promotion ${SOURCE_SHA}" \
-            --parameters "file://${SSM_PARAMETERS_PATH}" \
+            --parameters \
+              "file://${RUNNER_TEMP}/${SSM_PARAMETERS_FILENAME}" \
             --query 'Command.CommandId' --output text)"
           send_status=$?
           set -e
@@ -602,7 +610,7 @@ jobs:
           import os
           from pathlib import Path
           import sys
-          path = Path(os.environ["EVIDENCE_PATH"])
+          path = Path(os.environ["EVIDENCE_FILENAME"])
           evidence = json.loads(path.read_text(encoding="utf-8"))
           evidence["last_observed_status"] = "SendCommandFailedBeforeCommandId"
           evidence["send_command_exit_code"] = int(sys.argv[1])
@@ -619,7 +627,7 @@ jobs:
           import os
           from pathlib import Path
           import sys
-          path = Path(os.environ["EVIDENCE_PATH"])
+          path = Path(os.environ["EVIDENCE_FILENAME"])
           evidence = json.loads(path.read_text(encoding="utf-8"))
           evidence["command_id"] = sys.argv[1]
           evidence["last_observed_status"] = "CommandCreatedAwaitingInvocation"
@@ -676,7 +684,10 @@ jobs:
           import stat
           import sys
           command_id, terminal_status, last_status, poll_attempts = sys.argv[1:]
-          handoff_path = Path(os.environ["COMPOSE_HANDOFF_PATH"])
+          handoff_path = (
+              Path(os.environ["RUNNER_TEMP"])
+              / os.environ["COMPOSE_HANDOFF_FILENAME"]
+          )
           metadata = handoff_path.lstat()
           if (
               not stat.S_ISREG(metadata.st_mode)
@@ -740,7 +751,7 @@ jobs:
               "contract_expected_no_github_secrets": True,
               "contract_expected_worker_inactive": True,
           }
-          Path(os.environ["EVIDENCE_PATH"]).write_text(
+          Path(os.environ["EVIDENCE_FILENAME"]).write_text(
               json.dumps(evidence, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
@@ -760,6 +771,6 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: production-check-${{ inputs.source_sha }}-${{ github.run_id }}
-          path: ${{ env.EVIDENCE_PATH }}
+          path: ${{ env.EVIDENCE_FILENAME }}
           if-no-files-found: error
           retention-days: 14
