@@ -35,7 +35,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.release.outputs.source_sha }}
       image_digest: ${{ steps.publish.outputs.digest }}
-      image_size_mib: ${{ steps.image.outputs.size_mib }}
+      image_size_mib: ${{ steps.verified.outputs.size_mib }}
       compose_sha256: ${{ steps.release.outputs.compose_sha256 }}
       compose_prod_sha256: ${{ steps.release.outputs.compose_prod_sha256 }}
 
@@ -239,14 +239,6 @@ jobs:
           done
           if [[ "${tag_exists}" == "true" ]]; then
             docker pull "${{ steps.image.outputs.remote_tag }}"
-            local_id="$(docker image inspect "${{ steps.image.outputs.local }}" \
-              --format '{{.Id}}')"
-            remote_id="$(docker image inspect "${{ steps.image.outputs.remote_tag }}" \
-              --format '{{.Id}}')"
-            test "${local_id}" = "${remote_id}" || {
-              echo "existing full-SHA tag differs; overwrite refused" >&2
-              exit 1
-            }
           elif [[ "${package_exists}" == "false" || "${tag_exists}" == "false" ]]; then
             docker tag "${{ steps.image.outputs.local }}" \
               "${{ steps.image.outputs.remote_tag }}"
@@ -262,8 +254,10 @@ jobs:
           docker logout ghcr.io
 
       - name: Prove anonymous public digest pull
+        id: verified
         env:
           IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
           docker image rm --force "${{ steps.image.outputs.remote_tag }}" \
@@ -273,7 +267,32 @@ jobs:
           DOCKER_CONFIG="${anonymous_config}" docker pull "${IMAGE_DIGEST}"
           revision="$(docker image inspect "${IMAGE_DIGEST}" \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
-          test "${revision}" = "${{ steps.release.outputs.source_sha }}"
+          test "${revision}" = "${SOURCE_SHA}"
+          image_bytes="$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Size}}')"
+          image_mib="$(( (image_bytes + 1048575) / 1048576 ))"
+          (( image_mib <= MAX_RUNTIME_IMAGE_MIB ))
+          python3 - "${IMAGE_DIGEST}" <<'PY'
+          import json
+          import subprocess
+          import sys
+          image = json.loads(
+              subprocess.check_output(
+                  ["docker", "image", "inspect", sys.argv[1]],
+                  text=True,
+              )
+          )
+          if len(image) != 1:
+              raise SystemExit("exactly one image inspection result is required")
+          config = image[0].get("Config") or {}
+          if config.get("Entrypoint") != [
+              "python",
+              "/usr/local/bin/kiwoom-runtime-entrypoint.py",
+          ]:
+              raise SystemExit("runtime entrypoint contract mismatch")
+          if config.get("User") != "10001:10001":
+              raise SystemExit("runtime user contract mismatch")
+          PY
+          printf 'size_mib=%s\n' "${image_mib}" >>"${GITHUB_OUTPUT}"
 
       - name: Upload unprivileged build evidence
         if: always()
@@ -286,25 +305,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  deploy:
-    name: protected EC2 production check
+  seal_release_manifest:
+    name: seal immutable release manifest
     if: github.ref == 'refs/heads/main'
     needs: build_publish
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: production
+    timeout-minutes: 5
     permissions:
-      id-token: write
+      actions: read
     env:
       SOURCE_SHA: ${{ needs.build_publish.outputs.source_sha }}
       IMAGE_DIGEST: ${{ needs.build_publish.outputs.image_digest }}
       IMAGE_SIZE_MIB: ${{ needs.build_publish.outputs.image_size_mib }}
       COMPOSE_SHA256: ${{ needs.build_publish.outputs.compose_sha256 }}
       COMPOSE_PROD_SHA256: ${{ needs.build_publish.outputs.compose_prod_sha256 }}
-      AWS_DEPLOY_ROLE_ARN: ${{ vars.KIWOOM_AWS_DEPLOY_ROLE_ARN }}
+      BUILD_RUN_ID: ${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Revalidate protected release tuple
+      - name: Resolve exact successful build job and seal manifest
         shell: bash
         run: |
           set -euo pipefail
@@ -314,149 +333,68 @@ jobs:
           [[ "${COMPOSE_PROD_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           [[ "${IMAGE_SIZE_MIB}" =~ ^[0-9]+$ ]]
           (( IMAGE_SIZE_MIB <= MAX_RUNTIME_IMAGE_MIB ))
-          test "${AWS_DEPLOY_ROLE_ARN}" = \
-            "arn:aws:iam::380648615401:role/kiwoom-stock-github-production-check"
-          test "${EC2_INSTANCE_ID}" = "i-02cb0a404794bd43a"
-          test "${AWS_REGION}" = "ap-northeast-2"
-
-      - name: Configure exact AWS deploy role with OIDC
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: kiwoom-production-check
-
-      - name: Send allowlisted production-check document
-        id: ssm
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
+          [[ "${BUILD_RUN_ID}" =~ ^[0-9]+$ ]]
+          jobs_json="${RUNNER_TEMP}/build-jobs.json"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}/jobs?per_page=100" \
+            --output "${jobs_json}"
+          build_job_id="$(
+            python3 - "${jobs_json}" <<'PY'
           import json
-          import os
           from pathlib import Path
-          values = {
-              "ImageDigest": [os.environ["IMAGE_DIGEST"]],
-              "SourceSha": [os.environ["SOURCE_SHA"]],
-              "ComposeSha256": [os.environ["COMPOSE_SHA256"]],
-              "ComposeProdSha256": [os.environ["COMPOSE_PROD_SHA256"]],
-              "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
-              "Region": [os.environ["AWS_REGION"]],
-          }
-          Path("ssm-parameters.json").write_text(
-              json.dumps(values, sort_keys=True),
-              encoding="utf-8",
-          )
+          import sys
+          data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if data.get("total_count", 0) > 100:
+              raise SystemExit("build job pagination is not allowed")
+          matches = [
+              job for job in data.get("jobs", [])
+              if job.get("name") == "validate and publish immutable candidate"
+          ]
+          if len(matches) != 1:
+              raise SystemExit("exactly one candidate build job is required")
+          job = matches[0]
+          if job.get("status") != "completed" or job.get("conclusion") != "success":
+              raise SystemExit("candidate build job did not succeed")
+          job_id = job.get("id")
+          if type(job_id) is not int or job_id <= 0:
+              raise SystemExit("candidate build job id is invalid")
+          print(job_id)
           PY
-          command_id="$(aws ssm send-command \
-            --region "${AWS_REGION}" \
-            --document-name KiwoomStock-ProductionCheck \
-            --instance-ids "${EC2_INSTANCE_ID}" \
-            --timeout-seconds 750 \
-            --comment "kiwoom production check ${SOURCE_SHA}" \
-            --parameters file://ssm-parameters.json \
-            --query 'Command.CommandId' --output text)"
-          [[ "${command_id}" =~ ^[0-9a-f-]{36}$ ]]
-          printf 'command_id=%s\n' "${command_id}" >>"${GITHUB_OUTPUT}"
-
-      - name: Wait for terminal SSM result and record redacted evidence
-        env:
-          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
-        run: |
-          set -euo pipefail
-          terminal_status=""
-          last_observed_status="InvocationNotObserved"
-          printf '%s\n' '{"Status":"InvocationNotObserved"}' \
-            >ssm-invocation.json
-          for attempt in $(seq 1 90); do
-            set +e
-            aws ssm get-command-invocation \
-              --region "${AWS_REGION}" \
-              --command-id "${COMMAND_ID}" \
-              --instance-id "${EC2_INSTANCE_ID}" \
-              --output json >ssm-invocation.next.json 2>/dev/null
-            query_status=$?
-            set -e
-            if (( query_status == 0 )); then
-              mv ssm-invocation.next.json ssm-invocation.json
-              status="$(python3 -c \
-                'import json; print(json.load(open("ssm-invocation.json"))["Status"])')"
-              last_observed_status="${status}"
-              case "${status}" in
-                Success|Cancelled|TimedOut|Failed)
-                  terminal_status="${status}"
-                  break
-                  ;;
-              esac
-            else
-              rm -f ssm-invocation.next.json
-            fi
-            if (( attempt < 90 )); then
-              sleep 10
-            fi
-          done
-          python3 - "${COMMAND_ID}" "${terminal_status}" \
-            "${last_observed_status}" "${attempt}" <<'PY'
+          )"
+          python3 - "${build_job_id}" <<'PY'
           import json
           import os
           from pathlib import Path
           import sys
-          command_id, terminal_status, last_status, poll_attempts = sys.argv[1:]
-          invocation = json.loads(
-              Path("ssm-invocation.json").read_text(encoding="utf-8")
-          )
-          stdout = invocation.get("StandardOutputContent", "")
-          stderr = invocation.get("StandardErrorContent", "")
-          expected_instance = os.environ["EC2_INSTANCE_ID"]
-          expected_marker = (
-              "production check passed: "
-              f"source_sha={os.environ['SOURCE_SHA']} "
-              f"image={os.environ['IMAGE_DIGEST']} rollback=false"
-          )
-          instance_verified = invocation.get("InstanceId") == expected_instance
-          response_code_verified = invocation.get("ResponseCode") == 0
-          pass_marker_verified = stdout.splitlines().count(expected_marker) == 1
-          evidence = {
+          manifest = {
+              "schema_version": 1,
               "source_sha": os.environ["SOURCE_SHA"],
               "image_digest": os.environ["IMAGE_DIGEST"],
               "image_size_mib": int(os.environ["IMAGE_SIZE_MIB"]),
               "compose_sha256": os.environ["COMPOSE_SHA256"],
               "compose_prod_sha256": os.environ["COMPOSE_PROD_SHA256"],
-              "instance_id": invocation.get("InstanceId"),
-              "command_id": command_id,
-              "terminal_status": terminal_status or None,
-              "last_observed_status": last_status,
-              "poll_attempts": int(poll_attempts),
-              "operator_follow_up_required": terminal_status != "Success",
-              "response_code": invocation.get("ResponseCode"),
-              "stdout_bytes": len(stdout),
-              "stderr_bytes": len(stderr),
-              "instance_verified": instance_verified,
-              "response_code_verified": response_code_verified,
-              "pass_marker_verified": pass_marker_verified,
-              "contract_expected_no_github_secrets": True,
-              "contract_expected_worker_inactive": True,
+              "build_run_id": int(os.environ["BUILD_RUN_ID"]),
+              "build_job_id": int(sys.argv[1]),
           }
-          Path("production-check-evidence.json").write_text(
-              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          checks = (
-              terminal_status == "Success",
-              last_status == "Success",
-              instance_verified,
-              response_code_verified,
-              pass_marker_verified,
-          )
-          if not all(checks):
-              raise SystemExit("production check evidence validation failed")
+          payload = json.dumps(
+              manifest,
+              ensure_ascii=True,
+              separators=(",", ":"),
+              sort_keys=True,
+          ).encode("utf-8") + b"\n"
+          if len(payload) > 16 * 1024:
+              raise SystemExit("release manifest exceeds 16 KiB")
+          Path("release-manifest.json").write_bytes(payload)
           PY
 
-      - name: Upload protected deployment evidence
-        if: always()
+      - name: Upload unique release manifest
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: production-check-${{ needs.build_publish.outputs.source_sha }}
-          path: production-check-evidence.json
-          if-no-files-found: warn
+          name: release-manifest-${{ needs.build_publish.outputs.source_sha }}-${{ github.run_id }}
+          path: release-manifest.json
+          if-no-files-found: error
           retention-days: 14

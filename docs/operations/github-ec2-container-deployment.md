@@ -6,13 +6,16 @@
 ## 한눈에 보는 흐름
 
 ```text
-manual GitHub workflow
+manual candidate workflow
   → full 40-hex source SHA 입력
   → lint/type/test/package/container 검증
-  → ghcr.io/spicechicken/kiwoom_stock:sha-<40 hex> push
-  → OCI digest 확인 + 로그아웃 상태 익명 pull
-  → production 승인
-  → checkout 없는 deploy job이 GitHub OIDC로 SSM-only AWS role 사용
+  → 새 tag만 ghcr.io/spicechicken/kiwoom_stock:sha-<40 hex> push
+  → 기존 tag면 덮어쓰지 않고 remote digest 재사용
+  → OCI digest/계약 익명 검사 + release-manifest JSON sealing
+manual protected promotion workflow
+  → approved source SHA + exact digest + build run ID 입력
+  → Environment tuple/run/job/artifact/Compose/image 검증
+  → checkout 없는 promotion job이 GitHub OIDC로 SSM-only AWS role 사용
   → i-02cb0a404794bd43a에서 잠금/자원/secret metadata 검사
   → network/운영 volume/실제 key 없는 digest image로 일회성 --check-config
   → current/previous full release tuple을 하나의 JSON으로 기록
@@ -35,7 +38,12 @@ metadata만 검사한다. candidate container에는 별도의 정적 non-secret 
 4. Environment variable `KIWOOM_AWS_DEPLOY_ROLE_ARN`에 exact deploy role ARN을
    등록한다. 현재 허용값은
    `arn:aws:iam::380648615401:role/kiwoom-stock-github-production-check` 하나다.
-5. Kiwoom key, AWS access key, `.env` 내용은 GitHub Secret/Variable에 등록하지
+5. 다음 세 Environment variable에 검토·승인한 release tuple을 등록한다.
+   - `KIWOOM_APPROVED_SOURCE_SHA`: full 40-character lowercase source SHA
+   - `KIWOOM_APPROVED_IMAGE_DIGEST`:
+     `ghcr.io/spicechicken/kiwoom_stock@sha256:<64 hex>`
+   - `KIWOOM_APPROVED_BUILD_RUN_ID`: candidate workflow의 numeric run ID
+6. Kiwoom key, AWS access key, `.env` 내용은 GitHub Secret/Variable에 등록하지
    않는다.
 
 첫 GHCR push 뒤 Packages에서 `kiwoom_stock` package를 public으로 설정해야 할 수
@@ -58,14 +66,18 @@ metadata만 검사한다. candidate container에는 별도의 정적 non-secret 
 자세한 trust와 policy 적용 순서는
 [OIDC/AWS bootstrap](github-oidc-aws-bootstrap.md)을 따른다.
 
-## 2. 수동 production-check 실행
+## 2. candidate 생성과 production promotion
+
+### 2.1 candidate 생성
 
 1. Actions → `Production container check` → Run workflow를 연다.
 2. `source_sha`에 full 40-character lowercase commit SHA를 입력한다. branch와
    tag 같은 mutable ref는 허용하지 않는다.
-3. OIDC가 없는 `build_publish` job이 끝날 때까지 기다린다.
-4. `production` Environment 승인 화면에서 immutable source SHA, digest, image
-   size와 Compose hash evidence를 확인하고 승인한다.
+3. OIDC가 없는 `build_publish`와 `seal_release_manifest` job이 성공할 때까지
+   기다린다.
+4. artifact
+   `release-manifest-<source_sha>-<build_run_id>`의 exact digest, image size,
+   Compose hash, build run/job ID를 검토한다.
 
 workflow는 다음 순서를 바꾸지 않는다.
 
@@ -73,23 +85,51 @@ workflow는 다음 순서를 바꾸지 않는다.
 2. pip editable install, lint, mypy, 전체 테스트
 3. package build, 설치된 wheel import/config smoke
 4. Docker test/runtime build와 runtime image 검사
-5. full-SHA tag만 GHCR push
-6. exact digest 해소, image size 850 MiB 상한 확인
-7. clean anonymous digest pull
-8. 별도 checkout-free deploy job의 OIDC role assumption
-9. exact EC2에 account-owned custom SSM document 실행
-10. terminal SSM result와 redacted evidence artifact 기록
+5. 새 full-SHA tag만 GHCR push; 기존 tag는 remote image 그대로 재사용
+6. clean anonymous exact-digest pull과 revision/entrypoint/user/850 MiB 상한 검사
+7. 최대 16 KiB strict release manifest sealing
 
 `latest` tag는 만들지 않는다. EC2에는
 `ghcr.io/spicechicken/kiwoom_stock@sha256:<64 hex>` 형식만 전달한다.
-full-SHA tag가 이미 존재하면 먼저 인증 pull한다. 새 local candidate와 remote image
-ID가 완전히 같을 때만 기존 digest를 재사용하며, 다르면 overwrite하지 않고
-실패한다. 첫 push 뒤 package가 private여서 anonymous gate가 실패한 경우 package를
-public으로 바꾸고 같은 SHA를 재실행할 수 있다.
+full-SHA tag가 이미 존재하면 remote image를 pull하며 새 local rebuild와 비교하거나
+tag를 덮어쓰지 않는다. remote digest의 image contract가 source SHA와 다르면
+manifest를 만들기 전에 실패한다.
 
-protected deploy job에는 checkout, setup-python, pip, test, Docker 실행이 없다.
-`needs.build_publish.outputs`의 SHA/digest/size/두 Compose hash를 형식·상한까지 다시
-검사한 뒤 document parameter로만 전달한다.
+### 2.2 protected digest promotion
+
+1. release manifest를 검토한 뒤 `production` Environment의 승인 tuple 세 값을
+   manifest와 동일하게 등록한다.
+2. Actions → `Production digest promotion` → Run workflow를 연다.
+3. `source_sha`, exact `image_digest`, numeric `build_run_id`를 입력한다.
+4. Environment 승인 화면에서 같은 tuple인지 확인하고 승인한다.
+5. workflow가 원본 candidate run의 repository/path/event/head/ref/status,
+   exact successful build job, unique non-expired artifact, strict ZIP/JSON,
+   exact commit의 두 Compose byte hash, anonymous image revision/entrypoint/user/
+   size를 검증한다.
+6. 이 모든 검증 뒤에만 OIDC role을 얻어 exact custom SSM document를 실행한다.
+7. terminal result와 `production-check-<source>-<promotion run>` evidence를
+   확인한다.
+
+promotion job에는 checkout, setup-python, pip, candidate build/push가 없다.
+Environment, provenance, artifact, Compose 또는 image 검증이 하나라도 실패하면 OIDC와
+SSM에 도달하지 않는다. tag나 arbitrary command는 입력 또는 SSM parameter로
+전달하지 않는다.
+
+### 2.3 Stage I legacy bootstrap 1회
+
+manifest 도입 전에 게시된 아래 tuple만 코드에 고정된 compatibility path를 통과할
+수 있다.
+
+- source SHA: `90b0f00f32e8db0b327d90aa3d053f520d2d3f1b`
+- exact digest:
+  `ghcr.io/spicechicken/kiwoom_stock@sha256:faa437771719203165c2de57bfd8f12299ddfcc1c5d014772f1af86b3c71093d`
+- candidate run/job: `30544114256` / `90875823290`
+
+별도 boolean이나 우회 입력은 없다. Environment tuple까지 위 값과 exact match하고
+legacy candidate artifact가 unique/non-expired일 때만 진행한다. 성공 직후 세
+승인 변수를 제거하거나 다음 manifest-backed tuple로 교체해 read-back하고, Stage II
+변경에서 이 compatibility code를 삭제한다. artifact가 만료되면 재생성하거나 direct
+SSM으로 우회하지 않는다.
 
 ## 3. EC2에서 실제로 검사하는 것
 
@@ -136,7 +176,8 @@ override, restart, scale, volume prune는 없다.
 
 ## 4. 성공 증거
 
-GitHub artifact `production-check-<source SHA>`에는 비밀이 아닌 정보만 남긴다.
+GitHub artifact `production-check-<source SHA>-<promotion run ID>`에는 비밀이 아닌
+정보만 남긴다.
 
 - source SHA
 - OCI digest와 runner에서 측정한 image size

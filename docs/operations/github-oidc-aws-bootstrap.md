@@ -15,7 +15,8 @@
   - audience: `sts.amazonaws.com`
 - container registry: public GHCR
   `ghcr.io/spicechicken/kiwoom_stock`
-  - workflow는 full source SHA tag 하나만 push하고 `latest`를 만들지 않는다.
+  - candidate workflow는 새 full source SHA tag만 한 번 push하고 기존 tag는
+    덮어쓰지 않으며 `latest`를 만들지 않는다.
   - package가 실제로 public인지와 익명 digest pull은 첫 SSM 명령 전에 검증한다.
   - 기존 빈 private ECR repository가 있더라도 이 경로는 사용하지 않는다.
 - `/kiwoom-stock/prod/oauth/app-key`,
@@ -159,9 +160,15 @@ reviewer/verifier가 검토하며, 차이를 자동 반영하지 않는다.
    `/usr/local/sbin/kiwoom-production-check`로 설치한다. 두 artifact의 hash와
    document version을 기록한다.
 6. GitHub `production` Environment에 required reviewer를 설정하고
-   `KIWOOM_AWS_DEPLOY_ROLE_ARN` variable만 등록한다. Kiwoom key는 등록하지 않는다.
-7. GHCR package visibility를 public으로 바꾸고 로그아웃한 clean Docker config에서
-   exact digest pull을 확인한다.
+   `KIWOOM_AWS_DEPLOY_ROLE_ARN` 및 아래 승인 tuple variable을 등록한다.
+   - `KIWOOM_APPROVED_SOURCE_SHA`
+   - `KIWOOM_APPROVED_IMAGE_DIGEST`
+   - `KIWOOM_APPROVED_BUILD_RUN_ID`
+   세 tuple 값은 검토한 release manifest와 byte-for-byte 같아야 한다. promotion
+   workflow input과도 exact match해야 하며 Kiwoom key는 등록하지 않는다.
+7. GHCR package visibility를 public으로 확인하고 로그아웃한 clean Docker config에서
+   exact digest pull을 확인한다. candidate build와 protected promotion을 분리하고,
+   promotion은 원본 run/job/artifact/Compose/image 검증 전 OIDC를 얻지 않는다.
 8. EC2 runtime exact policy와 parameter read가 없는 custom SSM core policy를
    함께 준비하고 JSON, Access Analyzer, custom policy 단독 simulation을 통과시킨다.
 9. custom core와 runtime inline policy를 **먼저** role에 연결한다. 이 시점의 SSM
@@ -176,6 +183,13 @@ reviewer/verifier가 검토하며, 차이를 자동 반영하지 않는다.
     deny를 IAM simulation 및 read-only validator로 확인한다.
 14. Kiwoom SecureString은 운영자가 숨김 입력으로 생성하며 GitHub workflow가 값을
     읽지 못하는지 확인한다.
+
+Stage I의 manifest 이전 release를 한 번 검증한 직후
+`KIWOOM_APPROVED_SOURCE_SHA`, `KIWOOM_APPROVED_IMAGE_DIGEST`,
+`KIWOOM_APPROVED_BUILD_RUN_ID`를 제거하거나 다음 manifest-backed release로
+교체하고 API로 read-back한다. 이후 Stage II에서 exact legacy tuple 코드를
+삭제한다. direct `aws ssm send-command`, generic document, tag 기반 배포는 이
+회수 절차의 대안이 아니다.
 
 `github-deploy-policy.json.example`은 SSM-only다. GHCR push는 AWS role이 아니라
 GitHub의 job-scoped `GITHUB_TOKEN`과 workflow의 `packages: write` 권한을 사용한다.

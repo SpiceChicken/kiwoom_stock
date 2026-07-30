@@ -13,23 +13,37 @@ or invoke Slack, S3, or Gemini.
 
 ## Four separate activation boundaries
 
-1. **Image publication** builds an immutable `sha-<full commit SHA>` image and
-   publishes it to the public GitHub Container Registry. It does not contact EC2.
-2. **Production check deployment** proves anonymous digest pull, sends one
-   bounded SSM command, and runs only `--check-config`.
+1. **Candidate publication** builds and tests an immutable
+   `sha-<full commit SHA>` image. A new tag is published once; an existing tag is
+   never overwritten. The exact remote digest is inspected anonymously and
+   sealed in a bounded release manifest. This workflow has no AWS, OIDC, SSM, or
+   production Environment access.
+2. **Production digest promotion** accepts only an approved source SHA, exact OCI
+   digest, and candidate run ID. A protected checkout-free workflow validates
+   that tuple against the original run, build job, unique artifact, exact source
+   Compose bytes, and public image contract before it obtains AWS OIDC and sends
+   one bounded SSM command that runs only `--check-config`.
 3. **Shadow worker activation** remains RED until the process, shutdown, calendar,
    database, and side-effect boundaries below have real-path evidence.
 4. **Live trading activation** is a separate, explicit approval. No workflow in
    this repository grants it.
 
-The production-check workflow is manual (`workflow_dispatch`) and accepts only a
-full 40-character lowercase commit SHA. Its unprivileged build/publish job has no
-OIDC permission or production Environment. A separate checkout-free deploy job
-uses the protected GitHub `production` Environment and OIDC only after the exact
-SHA/digest/Compose-hash tuple is available. It does not cancel an in-progress run
-and cannot read the Kiwoom SecureString parameters. AWS permits only the
-account-owned `KiwoomStock-ProductionCheck` document, not generic
-`AWS-RunShellScript`.
+The candidate workflow and the production promotion workflow are separate manual
+`workflow_dispatch` command planes sharing one non-cancelling concurrency group.
+The candidate accepts one full 40-character lowercase commit SHA and produces a
+strict release manifest. It cannot contact AWS. The promotion accepts exactly
+`source_sha`, `image_digest`, and `build_run_id`; it has no tag, legacy-bypass, or
+arbitrary-command input. Its protected `production` Environment must contain the
+same approved tuple byte-for-byte. Only after provenance, artifact/ZIP, manifest,
+Compose-content, and anonymous image checks pass can it obtain OIDC. AWS permits
+only the account-owned `KiwoomStock-ProductionCheck` document, not generic
+`AWS-RunShellScript`, and the role cannot read Kiwoom SecureString parameters.
+
+Stage I contains one exact, tuple-bound compatibility path for candidate run
+`30544114256`, build job `90875823290`, and its already published digest. It is
+not controlled by an input or flag. After that production check succeeds, the
+three approval variables must be removed or replaced and the compatibility path
+must be deleted in Stage II.
 
 ## Production-check completion gate
 
