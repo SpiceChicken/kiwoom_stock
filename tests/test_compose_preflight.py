@@ -179,7 +179,7 @@ def test_effective_prod_compose_has_no_network_or_production_named_volume(
     effective = json.loads(completed.stdout)
     app_service = effective["services"]["app"]
     assert app_service["network_mode"] == "none"
-    assert app_service["privileged"] is False
+    assert app_service.get("privileged", False) is False
     assert app_service["read_only"] is True
     assert app_service["user"] == "0:0"
     assert app_service["cap_drop"] == ["ALL"]
