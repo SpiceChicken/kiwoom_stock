@@ -27,6 +27,9 @@ env:
   AWS_MAX_ATTEMPTS: "3"
   EC2_INSTANCE_ID: i-02cb0a404794bd43a
   MAX_RUNTIME_IMAGE_MIB: "850"
+  COMPOSE_HANDOFF_PATH: ${{ runner.temp }}/promotion-compose-handoff.json
+  SSM_PARAMETERS_PATH: ${{ runner.temp }}/promotion-ssm-parameters.json
+  EVIDENCE_PATH: production-check-evidence.json
 
 jobs:
   promote:
@@ -326,7 +329,6 @@ jobs:
           PY
 
       - name: Verify Compose bytes from exact source commit
-        id: compose
         shell: bash
         env:
           RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
@@ -356,7 +358,9 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import stat
           import sys
+          import tempfile
 
           hashes = {}
           for expected_path, response_path in zip(
@@ -394,13 +398,33 @@ jobs:
               }
               if hashes != expected:
                   raise SystemExit("manifest and source Compose hashes differ")
-          with Path(os.environ["GITHUB_OUTPUT"]).open(
-              "a", encoding="utf-8"
+          handoff = {
+              "schema_version": 1,
+              "source_sha": os.environ["SOURCE_SHA"],
+              "compose_sha256": hashes["compose.yaml"],
+              "compose_prod_sha256": hashes["compose.prod.yaml"],
+          }
+          destination = Path(os.environ["COMPOSE_HANDOFF_PATH"])
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          with tempfile.NamedTemporaryFile(
+              mode="w",
+              encoding="utf-8",
+              dir=destination.parent,
+              prefix=f".{destination.name}.",
+              delete=False,
           ) as stream:
-              stream.write(f"compose_sha256={hashes['compose.yaml']}\n")
-              stream.write(
-                  f"compose_prod_sha256={hashes['compose.prod.yaml']}\n"
-              )
+              temporary = Path(stream.name)
+              json.dump(handoff, stream, sort_keys=True)
+              stream.write("\n")
+          temporary.chmod(0o600)
+          os.replace(temporary, destination)
+          metadata = destination.lstat()
+          if (
+              not stat.S_ISREG(metadata.st_mode)
+              or stat.S_IMODE(metadata.st_mode) != 0o600
+              or not 0 < metadata.st_size <= 1024
+          ):
+              raise SystemExit("Compose handoff file contract mismatch")
           PY
 
       - name: Prove anonymous exact digest image contract
@@ -448,6 +472,107 @@ jobs:
           PY
           printf 'size_mib=%s\n' "${image_mib}" >>"${GITHUB_OUTPUT}"
 
+      - name: Revalidate Compose handoff and prepare redacted request evidence
+        shell: bash
+        env:
+          IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import tempfile
+
+          def read_compose_handoff():
+              path = Path(os.environ["COMPOSE_HANDOFF_PATH"])
+              metadata = path.lstat()
+              if (
+                  not stat.S_ISREG(metadata.st_mode)
+                  or stat.S_IMODE(metadata.st_mode) != 0o600
+                  or not 0 < metadata.st_size <= 1024
+              ):
+                  raise SystemExit("Compose handoff file contract mismatch")
+              payload = json.loads(path.read_text(encoding="utf-8"))
+              expected_keys = {
+                  "schema_version",
+                  "source_sha",
+                  "compose_sha256",
+                  "compose_prod_sha256",
+              }
+              if type(payload) is not dict or set(payload) != expected_keys:
+                  raise SystemExit("Compose handoff schema mismatch")
+              if payload["schema_version"] != 1:
+                  raise SystemExit("Compose handoff version mismatch")
+              if payload["source_sha"] != os.environ["SOURCE_SHA"]:
+                  raise SystemExit("Compose handoff source mismatch")
+              for key in ("compose_sha256", "compose_prod_sha256"):
+                  value = payload[key]
+                  if (
+                      type(value) is not str
+                      or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                  ):
+                      raise SystemExit(f"Compose handoff {key} mismatch")
+              return payload
+
+          def write_private_json(path, payload):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with tempfile.NamedTemporaryFile(
+                  mode="w",
+                  encoding="utf-8",
+                  dir=path.parent,
+                  prefix=f".{path.name}.",
+                  delete=False,
+              ) as stream:
+                  temporary = Path(stream.name)
+                  json.dump(payload, stream, indent=2, sort_keys=True)
+                  stream.write("\n")
+              temporary.chmod(0o600)
+              os.replace(temporary, path)
+
+          handoff = read_compose_handoff()
+          image_size_mib = int(os.environ["IMAGE_SIZE_MIB"])
+          if not 0 < image_size_mib <= int(os.environ["MAX_RUNTIME_IMAGE_MIB"]):
+              raise SystemExit("image size evidence mismatch")
+          parameters = {
+              "ImageDigest": [os.environ["IMAGE_DIGEST"]],
+              "SourceSha": [os.environ["SOURCE_SHA"]],
+              "ComposeSha256": [handoff["compose_sha256"]],
+              "ComposeProdSha256": [handoff["compose_prod_sha256"]],
+              "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
+              "Region": [os.environ["AWS_REGION"]],
+          }
+          write_private_json(
+              Path(os.environ["SSM_PARAMETERS_PATH"]),
+              parameters,
+          )
+          evidence = {
+              "source_sha": os.environ["SOURCE_SHA"],
+              "image_digest": os.environ["IMAGE_DIGEST"],
+              "image_size_mib": image_size_mib,
+              "compose_sha256": handoff["compose_sha256"],
+              "compose_prod_sha256": handoff["compose_prod_sha256"],
+              "build_run_id": int(os.environ["BUILD_RUN_ID"]),
+              "instance_id": os.environ["EC2_INSTANCE_ID"],
+              "command_id": None,
+              "terminal_status": None,
+              "last_observed_status": "SendCommandNotAttempted",
+              "poll_attempts": 0,
+              "operator_follow_up_required": True,
+              "response_code": None,
+              "stdout_bytes": 0,
+              "stderr_bytes": 0,
+              "instance_verified": False,
+              "response_code_verified": False,
+              "pass_marker_verified": False,
+              "contract_expected_no_github_secrets": True,
+              "contract_expected_worker_inactive": True,
+          }
+          write_private_json(Path(os.environ["EVIDENCE_PATH"]), evidence)
+          PY
+
       - name: Configure exact AWS deploy role with OIDC
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -458,46 +583,57 @@ jobs:
       - name: Send allowlisted production-check document
         id: ssm
         shell: bash
-        env:
-          IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
-          COMPOSE_SHA256: ${{ steps.compose.outputs.compose_sha256 }}
-          COMPOSE_PROD_SHA256: ${{ steps.compose.outputs.compose_prod_sha256 }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          values = {
-              "ImageDigest": [os.environ["IMAGE_DIGEST"]],
-              "SourceSha": [os.environ["SOURCE_SHA"]],
-              "ComposeSha256": [os.environ["COMPOSE_SHA256"]],
-              "ComposeProdSha256": [os.environ["COMPOSE_PROD_SHA256"]],
-              "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
-              "Region": [os.environ["AWS_REGION"]],
-          }
-          Path("ssm-parameters.json").write_text(
-              json.dumps(values, sort_keys=True),
-              encoding="utf-8",
-          )
-          PY
+          set +e
           command_id="$(aws ssm send-command \
             --region "${AWS_REGION}" \
             --document-name KiwoomStock-ProductionCheck \
             --instance-ids "${EC2_INSTANCE_ID}" \
             --timeout-seconds 750 \
             --comment "kiwoom digest promotion ${SOURCE_SHA}" \
-            --parameters file://ssm-parameters.json \
+            --parameters "file://${SSM_PARAMETERS_PATH}" \
             --query 'Command.CommandId' --output text)"
+          send_status=$?
+          set -e
+          if (( send_status != 0 )); then
+            python3 - "${send_status}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          path = Path(os.environ["EVIDENCE_PATH"])
+          evidence = json.loads(path.read_text(encoding="utf-8"))
+          evidence["last_observed_status"] = "SendCommandFailedBeforeCommandId"
+          evidence["send_command_exit_code"] = int(sys.argv[1])
+          path.write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+            exit "${send_status}"
+          fi
           [[ "${command_id}" =~ ^[0-9a-f-]{36}$ ]]
+          python3 - "${command_id}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          path = Path(os.environ["EVIDENCE_PATH"])
+          evidence = json.loads(path.read_text(encoding="utf-8"))
+          evidence["command_id"] = sys.argv[1]
+          evidence["last_observed_status"] = "CommandCreatedAwaitingInvocation"
+          path.write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
           printf 'command_id=%s\n' "${command_id}" >>"${GITHUB_OUTPUT}"
 
       - name: Wait for terminal SSM result and record redacted evidence
         env:
           COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
           IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
-          COMPOSE_SHA256: ${{ steps.compose.outputs.compose_sha256 }}
-          COMPOSE_PROD_SHA256: ${{ steps.compose.outputs.compose_prod_sha256 }}
         run: |
           set -euo pipefail
           terminal_status=""
@@ -536,8 +672,38 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import re
+          import stat
           import sys
           command_id, terminal_status, last_status, poll_attempts = sys.argv[1:]
+          handoff_path = Path(os.environ["COMPOSE_HANDOFF_PATH"])
+          metadata = handoff_path.lstat()
+          if (
+              not stat.S_ISREG(metadata.st_mode)
+              or stat.S_IMODE(metadata.st_mode) != 0o600
+              or not 0 < metadata.st_size <= 1024
+          ):
+              raise SystemExit("Compose handoff file contract mismatch")
+          handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+          if (
+              type(handoff) is not dict
+              or set(handoff)
+              != {
+                  "schema_version",
+                  "source_sha",
+                  "compose_sha256",
+                  "compose_prod_sha256",
+              }
+              or handoff["schema_version"] != 1
+              or handoff["source_sha"] != os.environ["SOURCE_SHA"]
+          ):
+              raise SystemExit("Compose handoff evidence binding mismatch")
+          for key in ("compose_sha256", "compose_prod_sha256"):
+              if (
+                  type(handoff[key]) is not str
+                  or re.fullmatch(r"[0-9a-f]{64}", handoff[key]) is None
+              ):
+                  raise SystemExit(f"Compose handoff {key} mismatch")
           invocation = json.loads(
               Path("ssm-invocation.json").read_text(encoding="utf-8")
           )
@@ -556,8 +722,8 @@ jobs:
               "source_sha": os.environ["SOURCE_SHA"],
               "image_digest": os.environ["IMAGE_DIGEST"],
               "image_size_mib": int(os.environ["IMAGE_SIZE_MIB"]),
-              "compose_sha256": os.environ["COMPOSE_SHA256"],
-              "compose_prod_sha256": os.environ["COMPOSE_PROD_SHA256"],
+              "compose_sha256": handoff["compose_sha256"],
+              "compose_prod_sha256": handoff["compose_prod_sha256"],
               "build_run_id": int(os.environ["BUILD_RUN_ID"]),
               "instance_id": invocation.get("InstanceId"),
               "command_id": command_id,
@@ -574,7 +740,7 @@ jobs:
               "contract_expected_no_github_secrets": True,
               "contract_expected_worker_inactive": True,
           }
-          Path("production-check-evidence.json").write_text(
+          Path(os.environ["EVIDENCE_PATH"]).write_text(
               json.dumps(evidence, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
@@ -594,6 +760,6 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: production-check-${{ inputs.source_sha }}-${{ github.run_id }}
-          path: production-check-evidence.json
-          if-no-files-found: warn
+          path: ${{ env.EVIDENCE_PATH }}
+          if-no-files-found: error
           retention-days: 14
