@@ -27,7 +27,6 @@ env:
   AWS_MAX_ATTEMPTS: "3"
   EC2_INSTANCE_ID: i-02cb0a404794bd43a
   MAX_RUNTIME_IMAGE_MIB: "850"
-  SSM_PARAMETERS_FILENAME: promotion-ssm-parameters.json
   EVIDENCE_FILENAME: production-check-evidence.json
 
 jobs:
@@ -436,7 +435,8 @@ jobs:
           PY
           printf 'size_mib=%s\n' "${image_mib}" >>"${GITHUB_OUTPUT}"
 
-      - name: Verify Compose and prepare redacted request evidence
+      - name: Verify Compose and publish bounded public preparation outputs
+        id: preparation
         shell: bash
         env:
           RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
@@ -469,7 +469,6 @@ jobs:
           from pathlib import Path
           import re
           import sys
-          import tempfile
 
           hashes = {}
           for expected_path, response_path in zip(
@@ -512,8 +511,94 @@ jobs:
               if hashes != expected:
                   raise SystemExit("manifest and source Compose hashes differ")
 
+          image_size_mib = int(os.environ["IMAGE_SIZE_MIB"])
+          if not 0 < image_size_mib <= int(os.environ["MAX_RUNTIME_IMAGE_MIB"]):
+              raise SystemExit("image size evidence mismatch")
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"compose_sha256={hashes['compose.yaml']}\n")
+              stream.write(
+                  f"compose_prod_sha256={hashes['compose.prod.yaml']}\n"
+              )
+              stream.write(f"image_size_mib={image_size_mib}\n")
+          PY
+
+      - name: Configure exact AWS deploy role with OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: kiwoom-production-check
+
+      - name: Send allowlisted production-check document
+        id: ssm
+        shell: bash
+        env:
+          COMPOSE_SHA256: ${{ steps.preparation.outputs.compose_sha256 }}
+          COMPOSE_PROD_SHA256: ${{ steps.preparation.outputs.compose_prod_sha256 }}
+          IMAGE_SIZE_MIB: ${{ steps.preparation.outputs.image_size_mib }}
+        run: |
+          set -euo pipefail
+          parameters_path="$(mktemp \
+            "${RUNNER_TEMP}/promotion-ssm-parameters.XXXXXX.json")"
+          trap 'rm -f -- "${parameters_path}"' EXIT
+          python3 - "${parameters_path}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+          import tempfile
+
+          source = os.environ["SOURCE_SHA"]
+          digest = os.environ["IMAGE_DIGEST"]
+          run_id = os.environ["BUILD_RUN_ID"]
+          compose_hash = os.environ["COMPOSE_SHA256"]
+          compose_prod_hash = os.environ["COMPOSE_PROD_SHA256"]
+          image_size = os.environ["IMAGE_SIZE_MIB"]
+          if re.fullmatch(r"[0-9a-f]{40}", source) is None:
+              raise SystemExit("source SHA input mismatch")
+          if re.fullmatch(
+              r"ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}",
+              digest,
+          ) is None:
+              raise SystemExit("image digest input mismatch")
+          if len(run_id) > 20 or re.fullmatch(r"[0-9]+", run_id) is None:
+              raise SystemExit("build run ID input mismatch")
+          if (
+              source != os.environ["APPROVED_SOURCE_SHA"]
+              or digest != os.environ["APPROVED_IMAGE_DIGEST"]
+              or run_id != os.environ["APPROVED_BUILD_RUN_ID"]
+          ):
+              raise SystemExit("approved release tuple input mismatch")
+          for name, value in (
+              ("compose_sha256", compose_hash),
+              ("compose_prod_sha256", compose_prod_hash),
+          ):
+              if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                  raise SystemExit(f"{name} preparation output mismatch")
+          if (
+              re.fullmatch(r"[1-9][0-9]{0,2}", image_size) is None
+              or not 0 < int(image_size) <= int(
+                  os.environ["MAX_RUNTIME_IMAGE_MIB"]
+              )
+          ):
+              raise SystemExit("image size preparation output mismatch")
+          if os.environ["EC2_INSTANCE_ID"] != "i-02cb0a404794bd43a":
+              raise SystemExit("instance input mismatch")
+          if os.environ["AWS_REGION"] != "ap-northeast-2":
+              raise SystemExit("region input mismatch")
+          if os.environ["AWS_MAX_ATTEMPTS"] != "3":
+              raise SystemExit("AWS retry input mismatch")
+          if os.environ["MAX_RUNTIME_IMAGE_MIB"] != "850":
+              raise SystemExit("image size limit input mismatch")
+          if os.environ["AWS_DEPLOY_ROLE_ARN"] != (
+              "arn:aws:iam::380648615401:"
+              "role/kiwoom-stock-github-production-check"
+          ):
+              raise SystemExit("role input mismatch")
+
           def write_private_json(path, payload):
-              path.parent.mkdir(parents=True, exist_ok=True)
               with tempfile.NamedTemporaryFile(
                   mode="w",
                   encoding="utf-8",
@@ -527,29 +612,21 @@ jobs:
               temporary.chmod(0o600)
               os.replace(temporary, path)
 
-          image_size_mib = int(os.environ["IMAGE_SIZE_MIB"])
-          if not 0 < image_size_mib <= int(os.environ["MAX_RUNTIME_IMAGE_MIB"]):
-              raise SystemExit("image size evidence mismatch")
           parameters = {
-              "ImageDigest": [os.environ["IMAGE_DIGEST"]],
-              "SourceSha": [os.environ["SOURCE_SHA"]],
-              "ComposeSha256": [hashes["compose.yaml"]],
-              "ComposeProdSha256": [hashes["compose.prod.yaml"]],
+              "ImageDigest": [digest],
+              "SourceSha": [source],
+              "ComposeSha256": [compose_hash],
+              "ComposeProdSha256": [compose_prod_hash],
               "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
               "Region": [os.environ["AWS_REGION"]],
           }
-          write_private_json(
-              Path(os.environ["RUNNER_TEMP"])
-              / os.environ["SSM_PARAMETERS_FILENAME"],
-              parameters,
-          )
           evidence = {
-              "source_sha": os.environ["SOURCE_SHA"],
-              "image_digest": os.environ["IMAGE_DIGEST"],
-              "image_size_mib": image_size_mib,
-              "compose_sha256": hashes["compose.yaml"],
-              "compose_prod_sha256": hashes["compose.prod.yaml"],
-              "build_run_id": int(os.environ["BUILD_RUN_ID"]),
+              "source_sha": source,
+              "image_digest": digest,
+              "image_size_mib": int(image_size),
+              "compose_sha256": compose_hash,
+              "compose_prod_sha256": compose_prod_hash,
+              "build_run_id": int(run_id),
               "instance_id": os.environ["EC2_INSTANCE_ID"],
               "command_id": None,
               "terminal_status": None,
@@ -565,21 +642,9 @@ jobs:
               "contract_expected_no_github_secrets": True,
               "contract_expected_worker_inactive": True,
           }
+          write_private_json(Path(sys.argv[1]), parameters)
           write_private_json(Path(os.environ["EVIDENCE_FILENAME"]), evidence)
           PY
-
-      - name: Configure exact AWS deploy role with OIDC
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: kiwoom-production-check
-
-      - name: Send allowlisted production-check document
-        id: ssm
-        shell: bash
-        run: |
-          set -euo pipefail
           set +e
           command_id="$(aws ssm send-command \
             --region "${AWS_REGION}" \
@@ -588,7 +653,7 @@ jobs:
             --timeout-seconds 750 \
             --comment "kiwoom digest promotion ${SOURCE_SHA}" \
             --parameters \
-              "file://${RUNNER_TEMP}/${SSM_PARAMETERS_FILENAME}" \
+              "file://${parameters_path}" \
             --query 'Command.CommandId' --output text)"
           send_status=$?
           set -e
@@ -598,38 +663,72 @@ jobs:
           import os
           from pathlib import Path
           import sys
+          import tempfile
+
           path = Path(os.environ["EVIDENCE_FILENAME"])
           evidence = json.loads(path.read_text(encoding="utf-8"))
           evidence["last_observed_status"] = "SendCommandFailedBeforeCommandId"
           evidence["send_command_exit_code"] = int(sys.argv[1])
-          path.write_text(
-              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+          with tempfile.NamedTemporaryFile(
+              mode="w",
               encoding="utf-8",
-          )
+              dir=path.parent,
+              prefix=f".{path.name}.",
+              delete=False,
+          ) as stream:
+              temporary = Path(stream.name)
+              json.dump(evidence, stream, indent=2, sort_keys=True)
+              stream.write("\n")
+          temporary.chmod(0o600)
+          os.replace(temporary, path)
           PY
             exit "${send_status}"
           fi
-          [[ "${command_id}" =~ ^[0-9a-f-]{36}$ ]]
-          python3 - "${command_id}" <<'PY'
+          command_id_status=0
+          [[ "${command_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+            || command_id_status=$?
+          python3 - "${command_id}" "${command_id_status}" <<'PY'
           import json
           import os
           from pathlib import Path
           import sys
+          import tempfile
+
           path = Path(os.environ["EVIDENCE_FILENAME"])
           evidence = json.loads(path.read_text(encoding="utf-8"))
-          evidence["command_id"] = sys.argv[1]
-          evidence["last_observed_status"] = "CommandCreatedAwaitingInvocation"
-          path.write_text(
-              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+          if int(sys.argv[2]) == 0:
+              evidence["command_id"] = sys.argv[1]
+              evidence["last_observed_status"] = (
+                  "CommandCreatedAwaitingInvocation"
+              )
+          else:
+              evidence["last_observed_status"] = (
+                  "SendCommandReturnedInvalidCommandId"
+              )
+              evidence["send_command_exit_code"] = 0
+              evidence["command_id_validation_exit_code"] = int(sys.argv[2])
+          with tempfile.NamedTemporaryFile(
+              mode="w",
               encoding="utf-8",
-          )
+              dir=path.parent,
+              prefix=f".{path.name}.",
+              delete=False,
+          ) as stream:
+              temporary = Path(stream.name)
+              json.dump(evidence, stream, indent=2, sort_keys=True)
+              stream.write("\n")
+          temporary.chmod(0o600)
+          os.replace(temporary, path)
           PY
+          if (( command_id_status != 0 )); then
+            exit "${command_id_status}"
+          fi
           printf 'command_id=%s\n' "${command_id}" >>"${GITHUB_OUTPUT}"
 
       - name: Wait for terminal SSM result and record redacted evidence
         env:
           COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
-          IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
+          IMAGE_SIZE_MIB: ${{ steps.preparation.outputs.image_size_mib }}
         run: |
           set -euo pipefail
           terminal_status=""
