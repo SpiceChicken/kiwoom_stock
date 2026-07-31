@@ -27,7 +27,6 @@ env:
   AWS_MAX_ATTEMPTS: "3"
   EC2_INSTANCE_ID: i-02cb0a404794bd43a
   MAX_RUNTIME_IMAGE_MIB: "850"
-  COMPOSE_HANDOFF_FILENAME: promotion-compose-handoff.json
   SSM_PARAMETERS_FILENAME: promotion-ssm-parameters.json
   EVIDENCE_FILENAME: production-check-evidence.json
 
@@ -53,6 +52,70 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
+      - name: Initialize bounded redacted promotion evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import tempfile
+
+          source = os.environ["SOURCE_SHA"]
+          digest = os.environ["IMAGE_DIGEST"]
+          run_id = os.environ["BUILD_RUN_ID"]
+          evidence = {
+              "source_sha": (
+                  source if re.fullmatch(r"[0-9a-f]{40}", source) else None
+              ),
+              "image_digest": (
+                  digest
+                  if re.fullmatch(
+                      r"ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}",
+                      digest,
+                  )
+                  else None
+              ),
+              "image_size_mib": None,
+              "compose_sha256": None,
+              "compose_prod_sha256": None,
+              "build_run_id": (
+                  int(run_id)
+                  if len(run_id) <= 20 and re.fullmatch(r"[0-9]+", run_id)
+                  else None
+              ),
+              "instance_id": os.environ["EC2_INSTANCE_ID"],
+              "command_id": None,
+              "terminal_status": None,
+              "last_observed_status": "SendCommandNotAttempted",
+              "poll_attempts": 0,
+              "operator_follow_up_required": True,
+              "response_code": None,
+              "stdout_bytes": 0,
+              "stderr_bytes": 0,
+              "instance_verified": False,
+              "response_code_verified": False,
+              "pass_marker_verified": False,
+              "contract_expected_no_github_secrets": True,
+              "contract_expected_worker_inactive": True,
+          }
+          destination = Path(os.environ["EVIDENCE_FILENAME"])
+          with tempfile.NamedTemporaryFile(
+              mode="w",
+              encoding="utf-8",
+              dir=destination.parent,
+              prefix=f".{destination.name}.",
+              delete=False,
+          ) as stream:
+              temporary = Path(stream.name)
+              json.dump(evidence, stream, indent=2, sort_keys=True)
+              stream.write("\n")
+          temporary.chmod(0o600)
+          os.replace(temporary, destination)
+          PY
+
       - name: Match protected Environment release tuple
         shell: bash
         run: |
@@ -328,108 +391,6 @@ jobs:
                       raise SystemExit("legacy image user mismatch")
           PY
 
-      - name: Verify Compose bytes from exact source commit
-        shell: bash
-        env:
-          RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
-          MANIFEST_COMPOSE_SHA256: ${{ steps.manifest.outputs.compose_sha256 }}
-          MANIFEST_COMPOSE_PROD_SHA256: ${{ steps.manifest.outputs.compose_prod_sha256 }}
-        run: |
-          set -euo pipefail
-          api_headers=(
-            -H 'Accept: application/vnd.github+json'
-            -H 'X-GitHub-Api-Version: 2022-11-28'
-            -H "Authorization: Bearer ${GH_TOKEN}"
-          )
-          for compose_path in compose.yaml compose.prod.yaml; do
-            output="${RUNNER_TEMP}/${compose_path}.contents.json"
-            curl --fail --silent --show-error --location \
-              --proto '=https' --tlsv1.2 --max-filesize 1048576 \
-              "${api_headers[@]}" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/contents/${compose_path}?ref=${SOURCE_SHA}" \
-              --output "${output}"
-          done
-          python3 \
-            "${RUNNER_TEMP}/compose.yaml.contents.json" \
-            "${RUNNER_TEMP}/compose.prod.yaml.contents.json" <<'PY'
-          import base64
-          import binascii
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import stat
-          import sys
-          import tempfile
-
-          hashes = {}
-          for expected_path, response_path in zip(
-              ("compose.yaml", "compose.prod.yaml"),
-              sys.argv[1:],
-              strict=True,
-          ):
-              response = json.loads(
-                  Path(response_path).read_text(encoding="utf-8")
-              )
-              if (
-                  response.get("type") != "file"
-                  or response.get("path") != expected_path
-                  or response.get("encoding") != "base64"
-                  or type(response.get("content")) is not str
-              ):
-                  raise SystemExit("Compose Contents API contract mismatch")
-              try:
-                  encoded = response["content"].replace("\n", "")
-                  payload = base64.b64decode(
-                      encoded.encode("ascii"),
-                      validate=True,
-                  )
-              except (UnicodeEncodeError, binascii.Error) as error:
-                  raise SystemExit("invalid Compose base64 content") from error
-              if not 0 < len(payload) <= 1024 * 1024:
-                  raise SystemExit("Compose content size is invalid")
-              hashes[expected_path] = hashlib.sha256(payload).hexdigest()
-          if os.environ["RELEASE_MODE"] == "manifest":
-              expected = {
-                  "compose.yaml": os.environ["MANIFEST_COMPOSE_SHA256"],
-                  "compose.prod.yaml": os.environ[
-                      "MANIFEST_COMPOSE_PROD_SHA256"
-                  ],
-              }
-              if hashes != expected:
-                  raise SystemExit("manifest and source Compose hashes differ")
-          handoff = {
-              "schema_version": 1,
-              "source_sha": os.environ["SOURCE_SHA"],
-              "compose_sha256": hashes["compose.yaml"],
-              "compose_prod_sha256": hashes["compose.prod.yaml"],
-          }
-          destination = (
-              Path(os.environ["RUNNER_TEMP"])
-              / os.environ["COMPOSE_HANDOFF_FILENAME"]
-          )
-          destination.parent.mkdir(parents=True, exist_ok=True)
-          with tempfile.NamedTemporaryFile(
-              mode="w",
-              encoding="utf-8",
-              dir=destination.parent,
-              prefix=f".{destination.name}.",
-              delete=False,
-          ) as stream:
-              temporary = Path(stream.name)
-              json.dump(handoff, stream, sort_keys=True)
-              stream.write("\n")
-          temporary.chmod(0o600)
-          os.replace(temporary, destination)
-          metadata = destination.lstat()
-          if (
-              not stat.S_ISREG(metadata.st_mode)
-              or stat.S_IMODE(metadata.st_mode) != 0o600
-              or not 0 < metadata.st_size <= 1024
-          ):
-              raise SystemExit("Compose handoff file contract mismatch")
-          PY
-
       - name: Prove anonymous exact digest image contract
         id: image
         shell: bash
@@ -475,53 +436,81 @@ jobs:
           PY
           printf 'size_mib=%s\n' "${image_mib}" >>"${GITHUB_OUTPUT}"
 
-      - name: Revalidate Compose handoff and prepare redacted request evidence
+      - name: Verify Compose and prepare redacted request evidence
         shell: bash
         env:
+          RELEASE_MODE: ${{ steps.provenance.outputs.mode }}
+          MANIFEST_COMPOSE_SHA256: ${{ steps.manifest.outputs.compose_sha256 }}
+          MANIFEST_COMPOSE_PROD_SHA256: ${{ steps.manifest.outputs.compose_prod_sha256 }}
           IMAGE_SIZE_MIB: ${{ steps.image.outputs.size_mib }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          api_headers=(
+            -H 'Accept: application/vnd.github+json'
+            -H 'X-GitHub-Api-Version: 2022-11-28'
+            -H "Authorization: Bearer ${GH_TOKEN}"
+          )
+          for compose_path in compose.yaml compose.prod.yaml; do
+            output="${RUNNER_TEMP}/${compose_path}.contents.json"
+            curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --max-filesize 1048576 \
+              "${api_headers[@]}" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/contents/${compose_path}?ref=${SOURCE_SHA}" \
+              --output "${output}"
+          done
+          python3 \
+            "${RUNNER_TEMP}/compose.yaml.contents.json" \
+            "${RUNNER_TEMP}/compose.prod.yaml.contents.json" <<'PY'
+          import base64
+          import binascii
+          import hashlib
           import json
           import os
           from pathlib import Path
           import re
-          import stat
+          import sys
           import tempfile
 
-          def read_compose_handoff():
-              path = (
-                  Path(os.environ["RUNNER_TEMP"])
-                  / os.environ["COMPOSE_HANDOFF_FILENAME"]
+          hashes = {}
+          for expected_path, response_path in zip(
+              ("compose.yaml", "compose.prod.yaml"),
+              sys.argv[1:],
+              strict=True,
+          ):
+              response = json.loads(
+                  Path(response_path).read_text(encoding="utf-8")
               )
-              metadata = path.lstat()
               if (
-                  not stat.S_ISREG(metadata.st_mode)
-                  or stat.S_IMODE(metadata.st_mode) != 0o600
-                  or not 0 < metadata.st_size <= 1024
+                  response.get("type") != "file"
+                  or response.get("path") != expected_path
+                  or response.get("encoding") != "base64"
+                  or type(response.get("content")) is not str
               ):
-                  raise SystemExit("Compose handoff file contract mismatch")
-              payload = json.loads(path.read_text(encoding="utf-8"))
-              expected_keys = {
-                  "schema_version",
-                  "source_sha",
-                  "compose_sha256",
-                  "compose_prod_sha256",
+                  raise SystemExit("Compose Contents API contract mismatch")
+              try:
+                  encoded = response["content"].replace("\n", "")
+                  payload = base64.b64decode(
+                      encoded.encode("ascii"),
+                      validate=True,
+                  )
+              except (UnicodeEncodeError, binascii.Error) as error:
+                  raise SystemExit("invalid Compose base64 content") from error
+              if not 0 < len(payload) <= 1024 * 1024:
+                  raise SystemExit("Compose content size is invalid")
+              hashes[expected_path] = hashlib.sha256(payload).hexdigest()
+
+          for value in hashes.values():
+              if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                  raise SystemExit("calculated Compose hash mismatch")
+          if os.environ["RELEASE_MODE"] == "manifest":
+              expected = {
+                  "compose.yaml": os.environ["MANIFEST_COMPOSE_SHA256"],
+                  "compose.prod.yaml": os.environ[
+                      "MANIFEST_COMPOSE_PROD_SHA256"
+                  ],
               }
-              if type(payload) is not dict or set(payload) != expected_keys:
-                  raise SystemExit("Compose handoff schema mismatch")
-              if payload["schema_version"] != 1:
-                  raise SystemExit("Compose handoff version mismatch")
-              if payload["source_sha"] != os.environ["SOURCE_SHA"]:
-                  raise SystemExit("Compose handoff source mismatch")
-              for key in ("compose_sha256", "compose_prod_sha256"):
-                  value = payload[key]
-                  if (
-                      type(value) is not str
-                      or re.fullmatch(r"[0-9a-f]{64}", value) is None
-                  ):
-                      raise SystemExit(f"Compose handoff {key} mismatch")
-              return payload
+              if hashes != expected:
+                  raise SystemExit("manifest and source Compose hashes differ")
 
           def write_private_json(path, payload):
               path.parent.mkdir(parents=True, exist_ok=True)
@@ -538,15 +527,14 @@ jobs:
               temporary.chmod(0o600)
               os.replace(temporary, path)
 
-          handoff = read_compose_handoff()
           image_size_mib = int(os.environ["IMAGE_SIZE_MIB"])
           if not 0 < image_size_mib <= int(os.environ["MAX_RUNTIME_IMAGE_MIB"]):
               raise SystemExit("image size evidence mismatch")
           parameters = {
               "ImageDigest": [os.environ["IMAGE_DIGEST"]],
               "SourceSha": [os.environ["SOURCE_SHA"]],
-              "ComposeSha256": [handoff["compose_sha256"]],
-              "ComposeProdSha256": [handoff["compose_prod_sha256"]],
+              "ComposeSha256": [hashes["compose.yaml"]],
+              "ComposeProdSha256": [hashes["compose.prod.yaml"]],
               "ExpectedInstanceId": [os.environ["EC2_INSTANCE_ID"]],
               "Region": [os.environ["AWS_REGION"]],
           }
@@ -559,8 +547,8 @@ jobs:
               "source_sha": os.environ["SOURCE_SHA"],
               "image_digest": os.environ["IMAGE_DIGEST"],
               "image_size_mib": image_size_mib,
-              "compose_sha256": handoff["compose_sha256"],
-              "compose_prod_sha256": handoff["compose_prod_sha256"],
+              "compose_sha256": hashes["compose.yaml"],
+              "compose_prod_sha256": hashes["compose.prod.yaml"],
               "build_run_id": int(os.environ["BUILD_RUN_ID"]),
               "instance_id": os.environ["EC2_INSTANCE_ID"],
               "command_id": None,
@@ -684,37 +672,35 @@ jobs:
           import stat
           import sys
           command_id, terminal_status, last_status, poll_attempts = sys.argv[1:]
-          handoff_path = (
-              Path(os.environ["RUNNER_TEMP"])
-              / os.environ["COMPOSE_HANDOFF_FILENAME"]
-          )
-          metadata = handoff_path.lstat()
+          evidence_path = Path(os.environ["EVIDENCE_FILENAME"])
+          metadata = evidence_path.lstat()
           if (
               not stat.S_ISREG(metadata.st_mode)
               or stat.S_IMODE(metadata.st_mode) != 0o600
-              or not 0 < metadata.st_size <= 1024
+              or not 0 < metadata.st_size <= 8192
           ):
-              raise SystemExit("Compose handoff file contract mismatch")
-          handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+              raise SystemExit("prepared evidence file contract mismatch")
+          prepared = json.loads(evidence_path.read_text(encoding="utf-8"))
           if (
-              type(handoff) is not dict
-              or set(handoff)
-              != {
-                  "schema_version",
-                  "source_sha",
-                  "compose_sha256",
-                  "compose_prod_sha256",
-              }
-              or handoff["schema_version"] != 1
-              or handoff["source_sha"] != os.environ["SOURCE_SHA"]
+              type(prepared) is not dict
+              or prepared.get("source_sha") != os.environ["SOURCE_SHA"]
+              or prepared.get("image_digest") != os.environ["IMAGE_DIGEST"]
+              or prepared.get("image_size_mib")
+              != int(os.environ["IMAGE_SIZE_MIB"])
+              or prepared.get("build_run_id")
+              != int(os.environ["BUILD_RUN_ID"])
+              or prepared.get("instance_id") != os.environ["EC2_INSTANCE_ID"]
+              or prepared.get("command_id") != command_id
+              or prepared.get("contract_expected_no_github_secrets") is not True
+              or prepared.get("contract_expected_worker_inactive") is not True
           ):
-              raise SystemExit("Compose handoff evidence binding mismatch")
+              raise SystemExit("prepared evidence binding mismatch")
           for key in ("compose_sha256", "compose_prod_sha256"):
               if (
-                  type(handoff[key]) is not str
-                  or re.fullmatch(r"[0-9a-f]{64}", handoff[key]) is None
+                  type(prepared.get(key)) is not str
+                  or re.fullmatch(r"[0-9a-f]{64}", prepared[key]) is None
               ):
-                  raise SystemExit(f"Compose handoff {key} mismatch")
+                  raise SystemExit(f"prepared evidence {key} mismatch")
           invocation = json.loads(
               Path("ssm-invocation.json").read_text(encoding="utf-8")
           )
@@ -733,8 +719,8 @@ jobs:
               "source_sha": os.environ["SOURCE_SHA"],
               "image_digest": os.environ["IMAGE_DIGEST"],
               "image_size_mib": int(os.environ["IMAGE_SIZE_MIB"]),
-              "compose_sha256": handoff["compose_sha256"],
-              "compose_prod_sha256": handoff["compose_prod_sha256"],
+              "compose_sha256": prepared["compose_sha256"],
+              "compose_prod_sha256": prepared["compose_prod_sha256"],
               "build_run_id": int(os.environ["BUILD_RUN_ID"]),
               "instance_id": invocation.get("InstanceId"),
               "command_id": command_id,
@@ -751,7 +737,7 @@ jobs:
               "contract_expected_no_github_secrets": True,
               "contract_expected_worker_inactive": True,
           }
-          Path(os.environ["EVIDENCE_FILENAME"]).write_text(
+          evidence_path.write_text(
               json.dumps(evidence, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
