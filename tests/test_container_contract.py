@@ -80,7 +80,9 @@ def test_docker_test_stage_has_complete_minimal_full_suite_manifest():
         "COPY compose.yaml compose.dev.yaml compose.mock.yaml compose.prod.yaml ./",
         (
             "COPY .github/workflows/ci.yml "
-            ".github/workflows/cd-production-check.yml ./.github/workflows/"
+            ".github/workflows/cd-production-check.yml "
+            ".github/workflows/cd-production-promotion.yml "
+            "./.github/workflows/"
         ),
     ]
     assert test_block.count("ENV CONTAINER_TEST_STAGE=1") == 1
@@ -125,11 +127,13 @@ def test_dockerignore_only_reincludes_tested_workflows_from_github():
         "!.github/workflows/",
         "!.github/workflows/ci.yml",
         "!.github/workflows/cd-production-check.yml",
+        "!.github/workflows/cd-production-promotion.yml",
     ]
     assert negation_lines == [
         "!.github/workflows/",
         "!.github/workflows/ci.yml",
         "!.github/workflows/cd-production-check.yml",
+        "!.github/workflows/cd-production-promotion.yml",
         "!.env.example",
         "!.env.*.example",
     ]
@@ -206,6 +210,7 @@ def test_test_image_manifest_covers_repository_assets_and_host_only_compose():
         COMPOSE_PROD,
         Path(".github/workflows/ci.yml"),
         Path(".github/workflows/cd-production-check.yml"),
+        Path(".github/workflows/cd-production-promotion.yml"),
     ]
     assert all(path.exists() for path in required_paths)
 
