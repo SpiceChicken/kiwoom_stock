@@ -38,9 +38,12 @@ strict release manifest. It cannot contact AWS. The promotion accepts exactly
 `source_sha`, `image_digest`, and `build_run_id`; it has no tag, legacy-bypass, or
 arbitrary-command input. Its protected `production` Environment must contain the
 same approved tuple byte-for-byte. Only after provenance, artifact/ZIP, manifest,
-Compose-content, and anonymous image checks pass can it obtain OIDC. AWS permits
-only the account-owned `KiwoomStock-ProductionCheck` document, not generic
-`AWS-RunShellScript`, and the role cannot read Kiwoom SecureString parameters.
+Compose-content, and anonymous image checks pass can it send SSM. OIDC occurs
+after the fixed tuple/audit preflight and supplies outputs to the authoritative
+executor; those derived-state checks therefore run after OIDC but before SSM.
+AWS permits only the account-owned `KiwoomStock-ProductionCheck` document, not
+generic `AWS-RunShellScript`, and the role cannot read Kiwoom SecureString
+parameters.
 
 ## Promotion trust boundary
 
@@ -54,11 +57,19 @@ in that process's memory. The only durable file is bounded redacted evidence,
 written with mode `0600` by atomic replacement; the executor replaces rather than
 reads the pre-OIDC audit envelope.
 
-The pinned `aws-actions/configure-aws-credentials` v4.0.2 commit supports explicit
-credential outputs but does not support disabling its environment export. The
-workflow therefore maps the official outputs only into the immediately following
-executor step, then an `if: always()` shell step writes empty values for all AWS
-credential and region names to `GITHUB_ENV` before the evidence upload action.
+The operational order is fixed: trusted executor checkout → fixed tuple/audit
+preflight → Node 24 OIDC outputs → authoritative run/job/artifact/Compose/image
+validation → one exact SSM command → credential clear → evidence upload. After
+terminal success/failure/cancel, operators delete all three temporary
+approval tuple variables and read back the Environment as role-only, secrets `0`,
+and pending deployments `0`. A later release registers a fresh tuple; it does not
+retain or replace a prior terminal run's tuple in place.
+
+The pinned `aws-actions/configure-aws-credentials` v6.2.3 Node 24 commit disables
+environment credential export and emits explicit credential outputs. The workflow
+maps those outputs only into the immediately following executor step, then an
+`if: always()` shell step writes empty values for all AWS credential and region
+names to `GITHUB_ENV` before the evidence upload action.
 No other action may appear between OIDC, execute, credential clearing, and upload.
 This credential teardown is not a derived-state transport. A hard runner
 cancellation between OIDC and the teardown step can prevent the clear step from
@@ -68,11 +79,12 @@ residual risk must be considered when changing the pinned action.
 The executor gives the GitHub token only to bounded GitHub HTTP reads, gives no
 GitHub or AWS credential to Docker, and gives only the three OIDC credentials and
 fixed AWS region/retry settings to the AWS CLI. It validates the exact repository,
-40-character source SHA, digest, run/job/artifact binding, modern manifest or the
-single fixed legacy candidate, both immutable Compose byte hashes, runtime image
+40-character source SHA, digest, successful run/job/unique release-manifest
+binding, both immutable Compose byte hashes, runtime image
 revision/entrypoint/user/850 MiB ceiling, fixed role/region/instance/document, and
-the exact seven-key SSM parameter contract. GitHub reads use the pinned system
-`curl` with a fixed `kiwoom-stock-promotion/1` User-Agent. The validated bearer
+the exact seven-key SSM parameter contract. GitHub reads use runner-provided
+`curl` with a fixed invocation/policy and `kiwoom-stock-promotion/1` User-Agent;
+the binary path and version are not pinned. The validated bearer
 token is supplied only through stdin config, while argv and the minimal PATH-only
 child environment contain no credential. Curl's ambient default config is disabled.
 HTTPS-only initial/redirect protocol
@@ -108,17 +120,15 @@ mismatch fails before runtime checks. Failures never create the marker. GitHub r
 IDs are unique per dispatch, so a new dispatch revalidates and executes as a new
 attempt rather than reusing an earlier success.
 
-The repository document and host script changes are not applied by a merge. Before
-the corrected workflow can be dispatched, the account-owned SSM document and
-`/usr/local/sbin/kiwoom-production-check` must be rolled out together and read back
-under a separate explicit operations confirmation. Until then the workflow and
-installed host contract are version-skewed and production promotion is blocked.
+The account-owned SSM document and `/usr/local/sbin/kiwoom-production-check` were
+rolled out and read back together during Stage I. Stage II does not change that
+manifest-agnostic execution plane; any future repository change to either file
+again requires coordinated rollout and read-back before promotion.
 
-Stage I contains one exact, tuple-bound compatibility path for candidate run
-`30544114256`, build job `90875823290`, and its already published digest. It is
-not controlled by an input or flag. After that production check succeeds, the
-three approval variables must be removed or replaced and the compatibility path
-must be deleted in Stage II.
+Stage I's exact tuple-bound compatibility path completed its one production check
+and was removed in Stage II. Every new promotion now requires a completed,
+successful candidate run and one strict `release-manifest.json`; the retired
+cancelled run, `candidate-<source>` artifact, and two-member ZIP are fail-closed.
 
 ## Production-check completion gate
 

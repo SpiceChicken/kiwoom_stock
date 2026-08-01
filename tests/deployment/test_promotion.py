@@ -23,6 +23,13 @@ JOB_ID = 456
 COMMAND_ID = "12345678-1234-1234-1234-123456789abc"
 COMPOSE = b"services:\n  app: {}\n"
 COMPOSE_PROD = b"services:\n  app:\n    read_only: true\n"
+RETIRED_SOURCE = "90b0f00f32e8db0b327d90aa3d053f520d2d3f1b"
+RETIRED_DIGEST = promotion.IMAGE_PREFIX + (
+    "faa437771719203165c2de57bfd8f122"
+    "99ddfcc1c5d014772f1af86b3c71093d"
+)
+RETIRED_RUN_ID = 30544114256
+RETIRED_JOB_ID = 90875823290
 
 
 def _zip(entries):
@@ -546,7 +553,6 @@ def test_modern_manifest_is_strict(mutation):
         len(archive),
         "sha256:" + hashlib.sha256(archive).hexdigest(),
         JOB_ID,
-        False,
     )
     with pytest.raises(promotion.PromotionError):
         promotion.validate_artifact(
@@ -554,41 +560,54 @@ def test_modern_manifest_is_strict(mutation):
         )
 
 
-def test_legacy_contract_is_limited_to_the_exact_candidate():
-    inspected = _image_inspect(
-        source=promotion.LEGACY_SOURCE_SHA,
-        size=400 * 1024 * 1024,
+def test_modern_manifest_positive_is_complete_and_required():
+    archive = _manifest_archive()
+    contract = promotion.ArtifactContract(
+        1,
+        len(archive),
+        "sha256:" + hashlib.sha256(archive).hexdigest(),
+        JOB_ID,
     )
+
+    release = promotion.validate_artifact(
+        promotion.Candidate(SOURCE, DIGEST, RUN_ID), contract, archive
+    )
+
+    assert release == promotion.ReleaseContract(
+        400,
+        hashlib.sha256(COMPOSE).hexdigest(),
+        hashlib.sha256(COMPOSE_PROD).hexdigest(),
+    )
+
+
+def test_retired_two_member_candidate_archive_is_rejected():
     archive = _zip(
         {
             "reports/pytest-production-check.xml": "<testsuite/>",
-            "runtime-image-inspect.json": json.dumps(inspected),
+            "runtime-image-inspect.json": json.dumps(
+                _image_inspect(source=RETIRED_SOURCE)
+            ),
         }
     )
     contract = promotion.ArtifactContract(
         1,
         len(archive),
         "sha256:" + hashlib.sha256(archive).hexdigest(),
-        promotion.LEGACY_BUILD_JOB_ID,
-        True,
+        RETIRED_JOB_ID,
     )
-    release = promotion.validate_artifact(
-        promotion.Candidate(
-            promotion.LEGACY_SOURCE_SHA,
-            promotion.LEGACY_IMAGE_DIGEST,
-            promotion.LEGACY_BUILD_RUN_ID,
-        ),
-        contract,
-        archive,
-    )
-    assert release == promotion.ReleaseContract(None, None, None)
+    with pytest.raises(promotion.PromotionError, match="artifact_member_set_invalid"):
+        promotion.validate_artifact(
+            promotion.Candidate(RETIRED_SOURCE, RETIRED_DIGEST, RETIRED_RUN_ID),
+            contract,
+            archive,
+        )
 
 
-def _legacy_provenance(candidate=None):
-    candidate = candidate or promotion.Candidate(
-        promotion.LEGACY_SOURCE_SHA,
-        promotion.LEGACY_IMAGE_DIGEST,
-        promotion.LEGACY_BUILD_RUN_ID,
+def _retired_provenance():
+    candidate = promotion.Candidate(
+        RETIRED_SOURCE,
+        RETIRED_DIGEST,
+        RETIRED_RUN_ID,
     )
     run = {
         "id": candidate.build_run_id,
@@ -603,7 +622,7 @@ def _legacy_provenance(candidate=None):
         "total_count": 1,
         "jobs": [
             {
-                "id": promotion.LEGACY_BUILD_JOB_ID,
+                "id": RETIRED_JOB_ID,
                 "name": "validate and publish immutable candidate",
                 "status": "completed",
                 "conclusion": "success",
@@ -626,42 +645,18 @@ def _legacy_provenance(candidate=None):
     return candidate, run, jobs, artifacts
 
 
-def test_legacy_provenance_positive_is_exact():
-    candidate, run, jobs, artifacts = _legacy_provenance()
-    contract = promotion.validate_provenance(candidate, run, jobs, artifacts)
-    assert contract.legacy is True
-    assert contract.build_job_id == promotion.LEGACY_BUILD_JOB_ID
+def test_retired_cancelled_candidate_run_is_rejected():
+    candidate, run, jobs, artifacts = _retired_provenance()
+    with pytest.raises(promotion.PromotionError, match="candidate_run_mismatch"):
+        promotion.validate_provenance(candidate, run, jobs, artifacts)
 
 
-@pytest.mark.parametrize(
-    "mutation", ["source", "digest", "run", "job", "conclusion", "artifact"]
-)
-def test_legacy_provenance_near_misses_are_rejected(mutation):
-    candidate, run, jobs, artifacts = _legacy_provenance()
-    if mutation == "source":
-        candidate = promotion.Candidate(
-            "d" * 40, candidate.image_digest, candidate.build_run_id
-        )
-        run["head_sha"] = candidate.source_sha
-    elif mutation == "digest":
-        candidate = promotion.Candidate(
-            candidate.source_sha,
-            promotion.IMAGE_PREFIX + "d" * 64,
-            candidate.build_run_id,
-        )
-    elif mutation == "run":
-        candidate = promotion.Candidate(
-            candidate.source_sha, candidate.image_digest, candidate.build_run_id + 1
-        )
-        run["id"] = candidate.build_run_id
-        artifacts["artifacts"][0]["workflow_run"]["id"] = candidate.build_run_id
-    elif mutation == "job":
-        jobs["jobs"][0]["id"] += 1
-    elif mutation == "conclusion":
-        run["conclusion"] = "success"
-    elif mutation == "artifact":
-        artifacts["artifacts"][0]["name"] = "candidate-near-miss"
-    with pytest.raises(promotion.PromotionError):
+def test_retired_candidate_artifact_name_is_rejected_even_for_successful_run():
+    candidate, run, jobs, artifacts = _retired_provenance()
+    run["conclusion"] = "success"
+    with pytest.raises(
+        promotion.PromotionError, match="candidate_artifact_not_unique"
+    ):
         promotion.validate_provenance(candidate, run, jobs, artifacts)
 
 
@@ -709,6 +704,8 @@ def _modern_provenance_payloads():
         "artifacts_shape",
         "jobs_pagination",
         "artifacts_pagination",
+        "artifact_oversize",
+        "artifact_digest",
     ],
 )
 def test_modern_provenance_collection_negatives_are_fail_closed(mutation):
@@ -729,6 +726,10 @@ def test_modern_provenance_collection_negatives_are_fail_closed(mutation):
         jobs["total_count"] = 101
     elif mutation == "artifacts_pagination":
         artifacts["total_count"] = 101
+    elif mutation == "artifact_oversize":
+        artifacts["artifacts"][0]["size_in_bytes"] = 64 * 1024 + 1
+    elif mutation == "artifact_digest":
+        artifacts["artifacts"][0]["digest"] = "sha256:" + "C" * 64
     with pytest.raises(promotion.PromotionError):
         promotion.validate_provenance(candidate, run, jobs, artifacts)
 
@@ -770,7 +771,6 @@ def test_artifact_zip_member_and_compression_bounds(mutation):
         len(archive),
         "sha256:" + hashlib.sha256(archive).hexdigest(),
         JOB_ID,
-        False,
     )
     with pytest.raises(promotion.PromotionError):
         promotion.validate_artifact(
@@ -795,6 +795,9 @@ def test_execute_refetches_everything_sends_once_polls_and_writes_redacted_evide
     assert "secret output" not in evidence.read_text(encoding="utf-8")
     assert evidence.stat().st_mode & 0o777 == 0o600
     assert len(http.calls) == 6
+    archive_calls = [call for call in http.calls if call[0] == "bytes"]
+    assert len(archive_calls) == 1
+    assert archive_calls[0][3] == 64 * 1024
     sends = [call for call in runner.calls if call[0][1:3] == ["ssm", "send-command"]]
     polls = [
         call for call in runner.calls
@@ -838,6 +841,28 @@ def test_tuple_failure_performs_no_http_docker_or_aws(tmp_path):
     payload = json.loads((tmp_path / "evidence.json").read_text(encoding="utf-8"))
     assert payload["command_id"] is None
     assert payload["poll_attempts"] == 0
+
+
+@pytest.mark.parametrize(
+    ("manifest_update", "category"),
+    [
+        (
+            {"compose_sha256": "0" * 64},
+            "manifest_compose_hash_mismatch",
+        ),
+        ({"image_size_mib": 399}, "manifest_image_size_mismatch"),
+    ],
+)
+def test_manifest_compose_and_image_mismatches_fail_before_send(
+    tmp_path, manifest_update, category
+):
+    http = FakeHttp(_manifest_archive(**manifest_update))
+    runner = FakeRunner()
+    with pytest.raises(promotion.PromotionError, match=category):
+        _execute(tmp_path, http=http, runner=runner)
+    assert not any(
+        call[0][1:3] == ["ssm", "send-command"] for call in runner.calls
+    )
 
 
 def test_malformed_command_id_fails_without_polling(tmp_path):
