@@ -25,6 +25,7 @@ COMMON_A = "3" * 64
 PROD_A = "4" * 64
 COMMON_B = "5" * 64
 PROD_B = "6" * 64
+ATTEMPT_ID = "987654321"
 
 
 def _source(
@@ -204,6 +205,88 @@ def test_release_state_transition_is_one_atomic_full_tuple(tmp_path):
     }
     assert not list(state_dir.glob("*.tmp.*"))
     assert (state_dir / "release-state.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_promotion_attempt_success_marker_is_private_atomic_and_reconcilable(
+    tmp_path,
+):
+    state_dir = tmp_path / "state"
+    attempt_dir = state_dir / "promotion-attempts"
+    attempt_dir.mkdir(parents=True)
+    env = {"KIWOOM_DEPLOY_STATE_DIR": str(state_dir)}
+    recorded = _source(
+        f"record_promotion_attempt_success {ATTEMPT_ID} {DIGEST_A!r} "
+        f"{SOURCE_A} {COMMON_A} {PROD_A}",
+        env=env,
+    )
+    reconciled = _source(
+        f"reconcile_promotion_attempt {ATTEMPT_ID} {DIGEST_A!r} "
+        f"{SOURCE_A} {COMMON_A} {PROD_A}",
+        env=env,
+    )
+    marker = attempt_dir / f"{ATTEMPT_ID}.json"
+
+    assert recorded.returncode == 0, recorded.stderr
+    assert reconciled.returncode == 0, reconciled.stderr
+    assert reconciled.stdout == (
+        "production check passed: "
+        f"source_sha={SOURCE_A} image={DIGEST_A} rollback=false\n"
+    )
+    assert marker.stat().st_mode & 0o777 == 0o600
+    assert not list(attempt_dir.glob(".*.tmp.*"))
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["promotion_attempt_id"] == ATTEMPT_ID
+    assert payload["source_sha"] == SOURCE_A
+    assert payload["image_digest"] == DIGEST_A
+
+
+def test_existing_attempt_tuple_mismatch_fails_before_any_runtime_call(tmp_path):
+    state_dir = tmp_path / "state"
+    attempt_dir = state_dir / "promotion-attempts"
+    attempt_dir.mkdir(parents=True)
+    docker_log = tmp_path / "docker.log"
+    env = {
+        "KIWOOM_DEPLOY_STATE_DIR": str(state_dir),
+        "FAKE_DOCKER_LOG": str(docker_log),
+    }
+    first = _source(
+        f"record_promotion_attempt_success {ATTEMPT_ID} {DIGEST_A!r} "
+        f"{SOURCE_A} {COMMON_A} {PROD_A}",
+        env=env,
+    )
+    mismatch = _source(
+        f"reconcile_promotion_attempt {ATTEMPT_ID} {DIGEST_B!r} "
+        f"{SOURCE_B} {COMMON_B} {PROD_B}",
+        env=env,
+    )
+
+    assert first.returncode == 0
+    assert mismatch.returncode != 0
+    assert "marker tuple mismatch" in mismatch.stderr
+    assert not docker_log.exists()
+    main_block = SCRIPT.read_text(encoding="utf-8").split(
+        "main() {", maxsplit=1
+    )[1]
+    reconciliation = main_block.index(
+        'if [[ -e "${ATTEMPT_DIR}/${promotion_attempt_id}.json" ]]'
+    )
+    assert '|| fail "promotion attempt reconciliation failed"' in main_block
+    assert reconciliation < main_block.index("command -v docker")
+    assert reconciliation < main_block.index("validate_instance_identity")
+
+
+def test_failed_attempt_has_no_marker_to_convert_retry_to_success(tmp_path):
+    state_dir = tmp_path / "state"
+    attempt_dir = state_dir / "promotion-attempts"
+    attempt_dir.mkdir(parents=True)
+    absent = _source(
+        f"reconcile_promotion_attempt {ATTEMPT_ID} {DIGEST_A!r} "
+        f"{SOURCE_A} {COMMON_A} {PROD_A}",
+        env={"KIWOOM_DEPLOY_STATE_DIR": str(state_dir)},
+    )
+
+    assert absent.returncode == 1
+    assert not (attempt_dir / f"{ATTEMPT_ID}.json").exists()
 
 
 def test_invalid_existing_state_fails_without_partial_replacement(tmp_path):

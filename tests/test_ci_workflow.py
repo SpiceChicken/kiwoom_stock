@@ -1,16 +1,13 @@
 """Static checks for the GitHub Actions CI workflow."""
 
-import base64
-import hashlib
-import json
 from pathlib import Path
 import os
 import subprocess
-import sys
-import zipfile
 
 import pytest
 import yaml
+
+from kiwoom_stock.deployment import promotion
 
 
 WORKFLOW_PATH = Path(".github/workflows/ci.yml")
@@ -425,16 +422,21 @@ def test_cd_seals_strict_bounded_unique_release_manifest():
         assert f'"{key}"' in runs
 
 
+
+
 def test_promotion_has_exact_inputs_permissions_and_protected_tuple():
     workflow = _promotion_workflow()
     triggers = workflow.get("on", workflow.get(True))
     promote = workflow["jobs"]["promote"]
-    inputs = triggers["workflow_dispatch"]["inputs"]
 
     assert set(triggers) == {"workflow_dispatch"}
-    assert set(inputs) == {"source_sha", "image_digest", "build_run_id"}
-    assert all(value["required"] is True for value in inputs.values())
-    assert all("default" not in value for value in inputs.values())
+    assert set(triggers["workflow_dispatch"]["inputs"]) == {
+        "source_sha", "image_digest", "build_run_id"
+    }
+    assert all(
+        value["required"] is True and "default" not in value
+        for value in triggers["workflow_dispatch"]["inputs"].values()
+    )
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {
         "group": "kiwoom-stock-production-check-i-02cb0a404794bd43a",
@@ -447,910 +449,161 @@ def test_promotion_has_exact_inputs_permissions_and_protected_tuple():
     }
     assert promote["environment"] == "production"
     assert promote["if"] == "github.ref == 'refs/heads/main'"
-    assert promote["env"]["APPROVED_SOURCE_SHA"] == (
-        "${{ vars.KIWOOM_APPROVED_SOURCE_SHA }}"
-    )
-    assert promote["env"]["APPROVED_IMAGE_DIGEST"] == (
-        "${{ vars.KIWOOM_APPROVED_IMAGE_DIGEST }}"
-    )
-    assert promote["env"]["APPROVED_BUILD_RUN_ID"] == (
-        "${{ vars.KIWOOM_APPROVED_BUILD_RUN_ID }}"
-    )
+    assert "GH_TOKEN" not in promote["env"]
+    assert all(not key.startswith("AWS_ACCESS_KEY") for key in promote["env"])
 
 
-@pytest.mark.parametrize(
-    ("source", "approved_source", "expected_status"),
-    [
-        ("a" * 40, "a" * 40, 0),
-        ("a" * 40, "b" * 40, 1),
-    ],
-)
-def test_promotion_environment_tuple_must_match_before_provenance(
-    source,
-    approved_source,
-    expected_status,
-):
-    steps = _promotion_workflow()["jobs"]["promote"]["steps"]
-    step = next(
-        step
-        for step in steps
-        if step["name"] == "Match protected Environment release tuple"
-    )
-    digest = (
-        "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "c" * 64
-    )
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "SOURCE_SHA": source,
-            "IMAGE_DIGEST": digest,
-            "BUILD_RUN_ID": "123",
-            "APPROVED_SOURCE_SHA": approved_source,
-            "APPROVED_IMAGE_DIGEST": digest,
-            "APPROVED_BUILD_RUN_ID": "123",
-            "AWS_DEPLOY_ROLE_ARN": (
-                "arn:aws:iam::380648615401:"
-                "role/kiwoom-stock-github-production-check"
-            ),
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "AWS_REGION": "ap-northeast-2",
-        }
-    )
-
-    completed = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == expected_status
-
-
-def test_promotion_provenance_and_legacy_exception_are_exact_and_fail_closed():
-    workflow = _promotion_workflow()
-    steps = workflow["jobs"]["promote"]["steps"]
-    text = PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8")
-    provenance = next(
-        step for step in steps
-        if step["name"] == "Verify candidate run job and unique artifact provenance"
-    )["run"]
-
-    assert "allow_legacy" not in text.lower()
-    assert "30544114256" in provenance
-    assert "90875823290" in provenance
-    assert "90b0f00f32e8db0b327d90aa3d053f520d2d3f1b" in provenance
-    assert (
-        "faa437771719203165c2de57bfd8f122"
-        "99ddfcc1c5d014772f1af86b3c71093d"
-    ) in provenance
-    assert '".github/workflows/cd-production-check.yml"' in provenance
-    assert '"workflow_dispatch"' in provenance
-    assert '"head_branch": "main"' in provenance
-    assert '"status": "completed"' in provenance
-    assert '"cancelled" if legacy else "success"' in provenance
-    assert "exactly one candidate build job is required" in provenance
-    assert "exactly one expected release artifact is required" in provenance
-    assert 'artifact.get("expired") is not False' in provenance
-    assert 'artifact_run.get("id") != run_id' in provenance
-    assert 'artifact.get("digest")' in provenance
-    assert 're.fullmatch(r"sha256:[0-9a-f]{64}"' in provenance
-
-
-def test_promotion_artifact_manifest_zip_and_contents_checks_are_strict():
-    workflow = _promotion_workflow()
-    steps = workflow["jobs"]["promote"]["steps"]
-    artifact = next(
-        step for step in steps
-        if step["name"] == "Validate bounded release artifact and strict manifest"
-    )["run"]
-    compose = next(
-        step for step in steps
-        if step["name"]
-        == "Verify Compose and publish bounded public preparation outputs"
-    )["run"]
-
-    assert "--max-filesize" in artifact
-    assert '"${ARTIFACT_SIZE}"' in artifact
-    assert '"${ARTIFACT_DIGEST}"' in artifact
-    assert "sha256sum" in artifact
-    assert "PurePosixPath" in artifact
-    assert "path.is_absolute()" in artifact
-    assert '".." in path.parts' in artifact
-    assert "stat.S_ISLNK" in artifact
-    assert "set(manifest) != expected_manifest_keys" in artifact
-    assert "type(manifest[key]) is not str" in artifact
-    assert "type(manifest[key]) is not int" in artifact
-    assert "release manifest tuple mismatch" in artifact
-    assert "release manifest exceeds 16 KiB" in artifact
-    assert "/contents/${compose_path}?ref=${SOURCE_SHA}" in compose
-    assert 'response.get("encoding") != "base64"' in compose
-    assert "hashlib.sha256(payload).hexdigest()" in compose
-    assert "manifest and source Compose hashes differ" in compose
-
-
-def _run_manifest_validator(tmp_path, manifest, *, mode="manifest", unsafe=False):
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"] == "Validate bounded release artifact and strict manifest"
-    )
-    archive = tmp_path / "release.zip"
-    with zipfile.ZipFile(archive, "w") as bundle:
-        if mode == "manifest":
-            info = zipfile.ZipInfo("release-manifest.json")
-            if unsafe:
-                info.external_attr = 0o120777 << 16
-            bundle.writestr(info, json.dumps(manifest))
-        else:
-            bundle.writestr(
-                "reports/pytest-production-check.xml",
-                "<testsuite/>",
-            )
-            bundle.writestr(
-                "runtime-image-inspect.json",
-                json.dumps(
-                    [
-                        {
-                            "Config": {
-                                "Entrypoint": [
-                                    "python",
-                                    (
-                                        "/usr/local/bin/"
-                                        "kiwoom-runtime-entrypoint.py"
-                                    ),
-                                ],
-                                "User": "10001:10001",
-                                "Labels": {
-                                    "org.opencontainers.image.revision": (
-                                        "a" * 40
-                                    )
-                                },
-                            }
-                        }
-                    ]
-                ),
-            )
-    output = tmp_path / "github-output"
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "RELEASE_MODE": mode,
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "BUILD_RUN_ID": "123",
-            "BUILD_JOB_ID": "456",
-            "MAX_RUNTIME_IMAGE_MIB": "850",
-            "GITHUB_OUTPUT": str(output),
-        }
-    )
-    return subprocess.run(
-        [sys.executable, "-", str(archive)],
-        input=_single_python_heredoc(step),
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _valid_release_manifest():
-    return {
-        "schema_version": 1,
-        "source_sha": "a" * 40,
-        "image_digest": (
-            "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-        ),
-        "image_size_mib": 400,
-        "compose_sha256": "c" * 64,
-        "compose_prod_sha256": "d" * 64,
-        "build_run_id": 123,
-        "build_job_id": 456,
-    }
-
-
-def test_promotion_manifest_validator_accepts_exact_modern_and_legacy_contract(
-    tmp_path,
-):
-    modern = _run_manifest_validator(tmp_path, _valid_release_manifest())
-    legacy_dir = tmp_path / "legacy"
-    legacy_dir.mkdir()
-    legacy = _run_manifest_validator(
-        legacy_dir,
-        {},
-        mode="legacy",
-    )
-
-    assert modern.returncode == 0, modern.stderr
-    assert legacy.returncode == 0, legacy.stderr
-
-
-@pytest.mark.parametrize("mutation", ["extra", "tuple", "bool", "size", "symlink"])
-def test_promotion_manifest_validator_rejects_malformed_contract(
-    tmp_path,
-    mutation,
-):
-    manifest = _valid_release_manifest()
-    unsafe = False
-    if mutation == "extra":
-        manifest["unexpected"] = "value"
-    elif mutation == "tuple":
-        manifest["source_sha"] = "e" * 40
-    elif mutation == "bool":
-        manifest["build_job_id"] = True
-    elif mutation == "size":
-        manifest["image_size_mib"] = 851
-    elif mutation == "symlink":
-        unsafe = True
-
-    completed = _run_manifest_validator(
-        tmp_path,
-        manifest,
-        unsafe=unsafe,
-    )
-
-    assert completed.returncode != 0
-
-
-def _run_initial_promotion_evidence(tmp_path):
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"] == "Initialize bounded redacted promotion evidence"
-    )
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "BUILD_RUN_ID": "123",
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "EVIDENCE_FILENAME": "production-check-evidence.json",
-        }
-    )
-    return subprocess.run(
-        [sys.executable, "-"],
-        input=_single_python_heredoc(step),
-        env=environment,
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _run_compose_preparation(tmp_path, mutation=None):
-    initialized = _run_initial_promotion_evidence(tmp_path)
-    assert initialized.returncode == 0, initialized.stderr
-
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"]
-        == "Verify Compose and publish bounded public preparation outputs"
-    )
-    payloads = {
-        "compose.yaml": b"services:\n  app: {}\n",
-        "compose.prod.yaml": b"services:\n  app:\n    read_only: true\n",
-    }
-    paths = []
-    for name, payload in payloads.items():
-        response = tmp_path / f"{name}.json"
-        encoded = base64.b64encode(payload).decode("ascii")
-        if mutation == "empty" and name == "compose.prod.yaml":
-            encoded = ""
-        elif mutation == "malformed" and name == "compose.prod.yaml":
-            encoded = "!!!!"
-        response.write_text(
-            json.dumps(
-                {
-                    "type": "file",
-                    "path": name,
-                    "encoding": "base64",
-                    "content": f"{encoded[:8]}\n{encoded[8:]}",
-                }
-            ),
-            encoding="utf-8",
-        )
-        paths.append(str(response))
-    compose_hash = hashlib.sha256(payloads["compose.yaml"]).hexdigest()
-    compose_prod_hash = hashlib.sha256(
-        payloads["compose.prod.yaml"]
-    ).hexdigest()
-    expected_prod_hash = (
-        "0" * 64 if mutation == "mismatch" else compose_prod_hash
-    )
-    output_path = tmp_path / "github-preparation-output"
-    evidence_path = tmp_path / "production-check-evidence.json"
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "RELEASE_MODE": "manifest",
-            "MANIFEST_COMPOSE_SHA256": compose_hash,
-            "MANIFEST_COMPOSE_PROD_SHA256": expected_prod_hash,
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "BUILD_RUN_ID": "123",
-            "IMAGE_SIZE_MIB": "400",
-            "MAX_RUNTIME_IMAGE_MIB": "850",
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "AWS_REGION": "ap-northeast-2",
-            "RUNNER_TEMP": str(tmp_path),
-            "GITHUB_OUTPUT": str(output_path),
-            "EVIDENCE_FILENAME": evidence_path.name,
-        }
-    )
-    completed = subprocess.run(
-        [sys.executable, "-", *paths],
-        input=_single_python_heredoc(step),
-        env=environment,
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return (
-        completed,
-        output_path,
-        evidence_path,
-        compose_hash,
-        compose_prod_hash,
-    )
-
-
-def test_promotion_tuple_failure_keeps_bounded_redacted_initial_evidence(
-    tmp_path,
-):
-    initialized = _run_initial_promotion_evidence(tmp_path)
-    assert initialized.returncode == 0, initialized.stderr
-
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"] == "Match protected Environment release tuple"
-    )
-    digest = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": digest,
-            "BUILD_RUN_ID": "123",
-            "APPROVED_SOURCE_SHA": "c" * 40,
-            "APPROVED_IMAGE_DIGEST": digest,
-            "APPROVED_BUILD_RUN_ID": "123",
-            "AWS_DEPLOY_ROLE_ARN": (
-                "arn:aws:iam::380648615401:"
-                "role/kiwoom-stock-github-production-check"
-            ),
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "AWS_REGION": "ap-northeast-2",
-        }
-    )
-    failed = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env=environment,
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert failed.returncode != 0
-    evidence_path = tmp_path / "production-check-evidence.json"
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert evidence["command_id"] is None
-    assert evidence["compose_sha256"] is None
-    assert evidence["compose_prod_sha256"] is None
-    assert evidence["last_observed_status"] == "SendCommandNotAttempted"
-    assert evidence_path.stat().st_mode & 0o777 == 0o600
-    assert evidence_path.stat().st_size <= 8192
-
-
-def test_promotion_pre_job_env_uses_static_filenames_without_runner_context():
-    workflow = _promotion_workflow()
-    environments = (
-        workflow["env"],
-        workflow["jobs"]["promote"]["env"],
-    )
-
-    for environment in environments:
-        assert all(
-            "${{ runner." not in value
-            for value in environment.values()
-            if isinstance(value, str)
-        )
-    assert "COMPOSE_HANDOFF_FILENAME" not in workflow["env"]
-    assert workflow["env"]["EVIDENCE_FILENAME"] == (
-        "production-check-evidence.json"
-    )
-    assert all(
-        "/" not in workflow["env"][name]
-        for name in ("EVIDENCE_FILENAME",)
-    )
-
-
-def test_promotion_compose_validator_accepts_exact_bytes_and_rejects_mismatch(
-    tmp_path,
-):
-    accepted, _, _, _, _ = _run_compose_preparation(tmp_path)
-    rejected_dir = tmp_path / "rejected"
-    rejected_dir.mkdir()
-    rejected, _, _, _, _ = _run_compose_preparation(
-        rejected_dir,
-        mutation="mismatch",
-    )
-
-    assert accepted.returncode == 0, accepted.stderr
-    assert rejected.returncode != 0
-
-
-def test_promotion_compose_preparation_publishes_only_strict_public_outputs(
-    tmp_path,
-):
-    completed, output_path, evidence_path, compose_hash, prod_hash = (
-        _run_compose_preparation(tmp_path)
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    outputs = dict(
-        line.split("=", 1)
-        for line in output_path.read_text(encoding="utf-8").splitlines()
-    )
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert outputs == {
-        "compose_sha256": compose_hash,
-        "compose_prod_sha256": prod_hash,
-        "image_size_mib": "400",
-    }
-    assert evidence["compose_sha256"] is None
-    assert evidence["compose_prod_sha256"] is None
-    assert evidence["image_size_mib"] is None
-    assert evidence["command_id"] is None
-    assert evidence["last_observed_status"] == "SendCommandNotAttempted"
-    assert evidence_path.stat().st_mode & 0o777 == 0o600
-
-
-@pytest.mark.parametrize("mutation", ["empty", "malformed", "mismatch"])
-def test_promotion_compose_failure_preserves_initial_redacted_evidence(
-    tmp_path,
-    mutation,
-):
-    completed, output_path, evidence_path, _, _ = (
-        _run_compose_preparation(tmp_path, mutation=mutation)
-    )
-
-    assert completed.returncode != 0
-    assert not output_path.exists()
-    assert evidence_path.is_file()
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert evidence["compose_sha256"] is None
-    assert evidence["compose_prod_sha256"] is None
-    assert evidence["command_id"] is None
-    assert evidence["last_observed_status"] == "SendCommandNotAttempted"
-    assert evidence["contract_expected_no_github_secrets"] is True
-    assert evidence["contract_expected_worker_inactive"] is True
-    assert evidence_path.stat().st_mode & 0o777 == 0o600
-    assert evidence_path.stat().st_size <= 8192
-
-
-def test_promotion_send_failure_preserves_redacted_evidence_without_command_id(
-    tmp_path,
-):
-    completed, output_path, evidence_path, compose_hash, prod_hash = (
-        _run_compose_preparation(tmp_path)
-    )
-    assert completed.returncode == 0, completed.stderr
-    preparation_outputs = dict(
-        line.split("=", 1)
-        for line in output_path.read_text(encoding="utf-8").splitlines()
-    )
-    evidence_path.unlink()
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_aws = fake_bin / "aws"
-    fake_aws.write_text(
-        (
-            "#!/usr/bin/env python3\n"
-            "import json, os, pathlib, sys\n"
-            "args = sys.argv[1:]\n"
-            "value = args[args.index('--parameters') + 1]\n"
-            "payload = json.loads(pathlib.Path(value.removeprefix('file://'))"
-            ".read_text())\n"
-            "pathlib.Path(os.environ['CAPTURE_PARAMETERS']).write_text("
-            "json.dumps(payload))\n"
-            "raise SystemExit(42)\n"
-        ),
-        encoding="utf-8",
-    )
-    fake_aws.chmod(0o700)
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"] == "Send allowlisted production-check document"
-    )
-    output = tmp_path / "github-output"
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "PATH": f"{fake_bin}:{environment['PATH']}",
-            "AWS_REGION": "ap-northeast-2",
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "BUILD_RUN_ID": "123",
-            "APPROVED_SOURCE_SHA": "a" * 40,
-            "APPROVED_IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "APPROVED_BUILD_RUN_ID": "123",
-            "COMPOSE_SHA256": preparation_outputs["compose_sha256"],
-            "COMPOSE_PROD_SHA256": preparation_outputs[
-                "compose_prod_sha256"
-            ],
-            "IMAGE_SIZE_MIB": preparation_outputs["image_size_mib"],
-            "MAX_RUNTIME_IMAGE_MIB": "850",
-            "AWS_MAX_ATTEMPTS": "3",
-            "AWS_DEPLOY_ROLE_ARN": (
-                "arn:aws:iam::380648615401:"
-                "role/kiwoom-stock-github-production-check"
-            ),
-            "RUNNER_TEMP": str(tmp_path),
-            "EVIDENCE_FILENAME": evidence_path.name,
-            "GITHUB_OUTPUT": str(output),
-            "CAPTURE_PARAMETERS": str(tmp_path / "captured-parameters.json"),
-        }
-    )
-    sent = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env=environment,
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert sent.returncode == 42
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert evidence["command_id"] is None
-    assert (
-        evidence["last_observed_status"]
-        == "SendCommandFailedBeforeCommandId"
-    )
-    assert evidence["send_command_exit_code"] == 42
-    assert evidence["compose_sha256"] == compose_hash
-    assert evidence["compose_prod_sha256"] == prod_hash
-    assert evidence["image_size_mib"] == 400
-    assert evidence_path.stat().st_mode & 0o777 == 0o600
-    assert evidence_path.stat().st_size <= 8192
-    parameters = json.loads(
-        (tmp_path / "captured-parameters.json").read_text(encoding="utf-8")
-    )
-    assert parameters["ComposeSha256"] == [compose_hash]
-    assert parameters["ComposeProdSha256"] == [prod_hash]
-    assert not list(tmp_path.glob("promotion-ssm-parameters.*.json"))
-    assert not output.exists()
-
-
-def test_promotion_send_success_records_command_id_before_polling(tmp_path):
-    completed, output_path, evidence_path, compose_hash, prod_hash = (
-        _run_compose_preparation(tmp_path)
-    )
-    assert completed.returncode == 0, completed.stderr
-    preparation_outputs = dict(
-        line.split("=", 1)
-        for line in output_path.read_text(encoding="utf-8").splitlines()
-    )
-    evidence_path.unlink()
-
-    command_id = "12345678-1234-1234-1234-123456789abc"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_aws = fake_bin / "aws"
-    fake_aws.write_text(
-        f"#!/bin/sh\nprintf '%s\\n' '{command_id}'\n",
-        encoding="utf-8",
-    )
-    fake_aws.chmod(0o700)
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"] == "Send allowlisted production-check document"
-    )
-    output = tmp_path / "github-output"
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "PATH": f"{fake_bin}:{environment['PATH']}",
-            "AWS_REGION": "ap-northeast-2",
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "BUILD_RUN_ID": "123",
-            "APPROVED_SOURCE_SHA": "a" * 40,
-            "APPROVED_IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "APPROVED_BUILD_RUN_ID": "123",
-            "COMPOSE_SHA256": preparation_outputs["compose_sha256"],
-            "COMPOSE_PROD_SHA256": preparation_outputs[
-                "compose_prod_sha256"
-            ],
-            "IMAGE_SIZE_MIB": preparation_outputs["image_size_mib"],
-            "MAX_RUNTIME_IMAGE_MIB": "850",
-            "AWS_MAX_ATTEMPTS": "3",
-            "AWS_DEPLOY_ROLE_ARN": (
-                "arn:aws:iam::380648615401:"
-                "role/kiwoom-stock-github-production-check"
-            ),
-            "RUNNER_TEMP": str(tmp_path),
-            "EVIDENCE_FILENAME": evidence_path.name,
-            "GITHUB_OUTPUT": str(output),
-        }
-    )
-    sent = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env=environment,
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert sent.returncode == 0, sent.stderr
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert evidence["command_id"] == command_id
-    assert (
-        evidence["last_observed_status"]
-        == "CommandCreatedAwaitingInvocation"
-    )
-    assert evidence["compose_sha256"] == compose_hash
-    assert evidence["compose_prod_sha256"] == prod_hash
-    assert evidence["image_size_mib"] == 400
-    assert output.read_text(encoding="utf-8") == f"command_id={command_id}\n"
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("COMPOSE_SHA256", ""),
-        ("COMPOSE_PROD_SHA256", "A" * 64),
-        ("IMAGE_SIZE_MIB", "0400"),
-        ("IMAGE_SIZE_MIB", "851"),
-    ],
-)
-def test_promotion_malformed_or_missing_preparation_output_fails_before_aws(
-    tmp_path,
-    name,
-    value,
-):
-    initialized = _run_initial_promotion_evidence(tmp_path)
-    assert initialized.returncode == 0, initialized.stderr
-    evidence_path = tmp_path / "production-check-evidence.json"
-    initial = evidence_path.read_bytes()
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_aws = fake_bin / "aws"
-    fake_aws.write_text(
-        "#!/bin/sh\ntouch \"${AWS_CALLED_MARKER}\"\nexit 0\n",
-        encoding="utf-8",
-    )
-    fake_aws.chmod(0o700)
-    step = next(
-        step
-        for step in _promotion_workflow()["jobs"]["promote"]["steps"]
-        if step["name"] == "Send allowlisted production-check document"
-    )
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "PATH": f"{fake_bin}:{environment['PATH']}",
-            "AWS_REGION": "ap-northeast-2",
-            "EC2_INSTANCE_ID": "i-02cb0a404794bd43a",
-            "SOURCE_SHA": "a" * 40,
-            "IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "BUILD_RUN_ID": "123",
-            "APPROVED_SOURCE_SHA": "a" * 40,
-            "APPROVED_IMAGE_DIGEST": (
-                "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
-            ),
-            "APPROVED_BUILD_RUN_ID": "123",
-            "COMPOSE_SHA256": "c" * 64,
-            "COMPOSE_PROD_SHA256": "d" * 64,
-            "IMAGE_SIZE_MIB": "400",
-            "MAX_RUNTIME_IMAGE_MIB": "850",
-            "AWS_MAX_ATTEMPTS": "3",
-            "AWS_DEPLOY_ROLE_ARN": (
-                "arn:aws:iam::380648615401:"
-                "role/kiwoom-stock-github-production-check"
-            ),
-            "RUNNER_TEMP": str(tmp_path),
-            "EVIDENCE_FILENAME": evidence_path.name,
-            "GITHUB_OUTPUT": str(tmp_path / "github-output"),
-            "AWS_CALLED_MARKER": str(tmp_path / "aws-called"),
-            name: value,
-        }
-    )
-
-    sent = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env=environment,
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert sent.returncode != 0
-    assert not (tmp_path / "aws-called").exists()
-    assert evidence_path.read_bytes() == initial
-
-
-def test_promotion_has_no_candidate_build_and_gates_oidc_after_all_validation():
+def test_promotion_is_thin_pinned_and_orders_the_trust_boundary():
     workflow = _promotion_workflow()
     steps = workflow["jobs"]["promote"]["steps"]
     names = [step["name"] for step in steps]
-    uses = {step.get("uses") for step in steps if step.get("uses")}
-    runs_before_oidc = "\n".join(
-        step.get("run", "")
-        for step in steps[: names.index("Configure exact AWS deploy role with OIDC")]
-    )
-    all_runs = "\n".join(step.get("run", "") for step in steps)
+    action_refs = {step["uses"] for step in steps if "uses" in step}
 
-    assert uses == {AWS_CREDENTIALS_ACTION, UPLOAD_ARTIFACT_ACTION}
-    assert CHECKOUT_ACTION not in uses
-    assert SETUP_PYTHON_ACTION not in uses
-    assert "docker build" not in all_runs
-    assert "docker push" not in all_runs
-    assert "git " not in all_runs
-    assert "pip " not in all_runs
-    assert names.index("Initialize bounded redacted promotion evidence") == 0
-    assert names.index("Match protected Environment release tuple") == 1
-    assert names.index("Verify candidate run job and unique artifact provenance") < (
-        names.index("Validate bounded release artifact and strict manifest")
-    )
-    assert names.index("Validate bounded release artifact and strict manifest") < (
-        names.index("Prove anonymous exact digest image contract")
-    )
-    assert names.index("Prove anonymous exact digest image contract") < (
-        names.index(
-            "Verify Compose and publish bounded public preparation outputs"
-        )
-    )
-    assert names.index(
-        "Verify Compose and publish bounded public preparation outputs"
-    ) < (
-        names.index("Configure exact AWS deploy role with OIDC")
-    )
-    initializer = steps[0]["run"]
-    assert "curl " not in initializer
-    assert "docker " not in initializer
-    assert "aws " not in initializer
-    preparation = next(
-        step["run"]
-        for step in steps
-        if step["name"]
-        == "Verify Compose and publish bounded public preparation outputs"
-    )
-    assert "/contents/${compose_path}?ref=${SOURCE_SHA}" in preparation
-    assert "compose_sha256={hashes['compose.yaml']}" in preparation
-    assert "compose_prod_sha256={hashes['compose.prod.yaml']}" in preparation
-    assert "image_size_mib={image_size_mib}" in preparation
-    assert "GITHUB_OUTPUT" in preparation
-    assert "write_private_json(" not in preparation
-    assert "EVIDENCE_FILENAME" not in preparation
-    assert "SSM_PARAMETERS_FILENAME" not in preparation
-    assert all(
-        "/contents/${compose_path}?ref=${SOURCE_SHA}" not in step.get("run", "")
-        for step in steps
-        if step["name"]
-        != "Verify Compose and publish bounded public preparation outputs"
-    )
-    assert "aws ssm" not in runs_before_oidc
-
-
-def test_promotion_oidc_boundary_carries_only_strict_public_step_outputs():
-    steps = _promotion_workflow()["jobs"]["promote"]["steps"]
-    names = [step["name"] for step in steps]
-    preparation = next(
-        step
-        for step in steps
-        if step["name"]
-        == "Verify Compose and publish bounded public preparation outputs"
-    )
-    send = next(
-        step
-        for step in steps
-        if step["name"] == "Send allowlisted production-check document"
-    )
+    assert action_refs == {
+        CHECKOUT_ACTION,
+        AWS_CREDENTIALS_ACTION,
+        UPLOAD_ARTIFACT_ACTION,
+    }
+    assert all(len(ref.rsplit("@", 1)[1]) == 40 for ref in action_refs)
+    checkout = steps[0]
+    assert checkout["name"] == "Checkout trusted promotion executor"
+    assert checkout["with"] == {
+        "ref": "${{ github.sha }}",
+        "fetch-depth": 1,
+        "persist-credentials": False,
+    }
+    assert names == [
+        "Checkout trusted promotion executor",
+        "Initialize bounded redacted promotion evidence",
+        "Validate immutable protected boundary preflight",
+        "Configure exact AWS deploy role with OIDC",
+        "Execute authoritative production-check boundary",
+        "Clear OIDC credentials before artifact handling",
+        "Upload protected promotion evidence",
+    ]
     oidc_index = names.index("Configure exact AWS deploy role with OIDC")
-    send_index = names.index("Send allowlisted production-check document")
-
-    assert send_index == oidc_index + 1
-    assert preparation["id"] == "preparation"
-    assert set(send["env"]) == {
-        "COMPOSE_SHA256",
-        "COMPOSE_PROD_SHA256",
-        "IMAGE_SIZE_MIB",
-    }
-    assert send["env"] == {
-        "COMPOSE_SHA256": (
-            "${{ steps.preparation.outputs.compose_sha256 }}"
-        ),
-        "COMPOSE_PROD_SHA256": (
-            "${{ steps.preparation.outputs.compose_prod_sha256 }}"
-        ),
-        "IMAGE_SIZE_MIB": (
-            "${{ steps.preparation.outputs.image_size_mib }}"
-        ),
-    }
-    assert "EVIDENCE_FILENAME" not in preparation["run"]
-    assert "promotion-ssm-parameters" not in preparation["run"]
-    assert "compose.yaml.contents.json" not in send["run"]
-    assert "compose.prod.yaml.contents.json" not in send["run"]
-    assert 'python3 - "${parameters_path}"' in send["run"]
-    assert '"file://${parameters_path}"' in send["run"]
-    assert send["run"].index('python3 - "${parameters_path}"') < (
-        send["run"].index("aws ssm send-command")
+    assert names[oidc_index + 1] == (
+        "Execute authoritative production-check boundary"
     )
-    assert "steps.image.outputs.size_mib" not in "\n".join(
-        str(step)
-        for step in steps[oidc_index:]
+    assert names[oidc_index + 2] == (
+        "Clear OIDC credentials before artifact handling"
     )
 
 
-def test_promotion_ssm_command_is_allowlisted_digest_only_and_check_only():
+def test_promotion_cli_commands_have_no_pre_oidc_derived_state_transport():
     workflow = _promotion_workflow()
+    steps = workflow["jobs"]["promote"]["steps"]
     text = PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8")
-    runs = "\n".join(
-        step.get("run", "")
-        for step in workflow["jobs"]["promote"]["steps"]
+    preflight = next(
+        step for step in steps
+        if step["name"] == "Validate immutable protected boundary preflight"
     )
+    execute = next(
+        step for step in steps
+        if step["name"] == "Execute authoritative production-check boundary"
+    )
+
+    assert "id" not in preflight
+    assert "GITHUB_OUTPUT" not in preflight["run"]
+    assert "GITHUB_ENV" not in preflight["run"]
+    assert "steps." not in preflight["run"]
+    assert "outputs:" not in text
+    assert "needs." not in text
+    assert "promotion-ssm-parameters" not in text
+    assert "COMPOSE_SHA256" not in text
+    assert "COMPOSE_PROD_SHA256" not in text
+    assert "IMAGE_SIZE_MIB" not in text
+    assert "PYTHONPATH" in execute["env"]
+    assert "python -m kiwoom_stock.deployment.promotion execute" in execute["run"]
+    assert "aws ssm" not in text
+    assert "docker pull" not in text
+    assert "curl " not in text
+    assert "<<" not in text
+
+
+def test_promotion_scopes_github_and_oidc_credentials_and_clears_before_upload():
+    steps = _promotion_workflow()["jobs"]["promote"]["steps"]
+    oidc = next(step for step in steps if step.get("id") == "oidc")
+    execute = next(
+        step for step in steps
+        if step["name"] == "Execute authoritative production-check boundary"
+    )
+    clear = next(
+        step for step in steps
+        if step["name"] == "Clear OIDC credentials before artifact handling"
+    )
+    upload = next(step for step in steps if step.get("uses") == UPLOAD_ARTIFACT_ACTION)
+
+    assert oidc["uses"] == AWS_CREDENTIALS_ACTION
+    assert oidc["with"] == {
+        "role-to-assume": "${{ env.AWS_DEPLOY_ROLE_ARN }}",
+        "aws-region": "${{ env.AWS_REGION }}",
+        "role-session-name": "kiwoom-production-check",
+        "output-credentials": True,
+        "unset-current-credentials": True,
+    }
+    assert execute["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert execute["env"]["AWS_ACCESS_KEY_ID"] == (
+        "${{ steps.oidc.outputs.aws-access-key-id }}"
+    )
+    assert execute["env"]["AWS_SECRET_ACCESS_KEY"] == (
+        "${{ steps.oidc.outputs.aws-secret-access-key }}"
+    )
+    assert execute["env"]["AWS_SESSION_TOKEN"] == (
+        "${{ steps.oidc.outputs.aws-session-token }}"
+    )
+    assert clear["if"] == "always()"
+    for name in (
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+        "AWS_REGION", "AWS_DEFAULT_REGION",
+    ):
+        assert f"echo '{name}='" in clear["run"]
+    assert "env" not in upload
+    assert upload["if"] == "always()"
+    assert steps.index(clear) + 1 == steps.index(upload)
+
+
+def test_promotion_preserves_fixed_allowlists_and_no_business_credentials():
+    text = PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "secrets." not in text
+    assert "KIWOOM_APP_KEY" not in text
+    assert "KIWOOM_SECRET_KEY" not in text
+    assert "arn:aws:iam::380648615401" not in text
+    assert "i-02cb0a404794bd43a" in text
+    assert "ap-northeast-2" in text
     assert "AWS-RunShellScript" not in text
-    assert "--document-name KiwoomStock-ProductionCheck" in text
-    assert "--instance-ids \"${EC2_INSTANCE_ID}\"" in text
-    assert "--timeout-seconds 750" in text
-    assert '"ImageDigest": [digest]' in text
-    assert '"SourceSha": [source]' in text
-    assert '"ComposeSha256": [compose_hash]' in text
-    assert '"ComposeProdSha256": [compose_prod_hash]' in text
-    assert "COMPOSE_HANDOFF" not in text
-    assert "steps.compose.outputs" not in text
-    assert 're.fullmatch(r"[0-9a-f]{64}", value)' in text
-    assert "SendCommandFailedBeforeCommandId" in text
-    assert '"commands"' not in runs
-    assert "raw.githubusercontent.com" not in runs
     assert ":latest" not in text
+    assert "docker compose up" not in text
     assert "production-check-evidence.json" in text
     assert "if-no-files-found: error" in text
-    assert '"contract_expected_no_github_secrets": True' in text
-    assert '"contract_expected_worker_inactive": True' in text
-    assert '"instance_verified": instance_verified' in text
-    assert '"response_code_verified": response_code_verified' in text
-    assert '"pass_marker_verified": pass_marker_verified' in text
-    assert (
-        '"operator_follow_up_required": terminal_status != "Success"'
-        in text
+
+
+def test_promotion_attempt_id_and_execution_budget_leave_cleanup_margin():
+    promote = _promotion_workflow()["jobs"]["promote"]
+    steps = promote["steps"]
+    run_blocks = "\n".join(
+        step.get("run", "") for step in promote["steps"]
     )
-    assert "Success|Cancelled|TimedOut|Failed|Cancelling" not in text
-    assert "Success|Cancelled|TimedOut|Failed)" in text
-    assert "seq 1 90" in text
-    assert "docker compose up" not in text
-    assert " up -d" not in text
-    assert "--rollback-check" not in text
+
+    assert promote["timeout-minutes"] == 25
+    assert promote["env"]["PROMOTION_ATTEMPT_ID"] == "${{ github.run_id }}"
+    assert run_blocks.count(
+        '--promotion-attempt-id "${PROMOTION_ATTEMPT_ID}"'
+    ) == 3
+    assert promotion.EXECUTION_BUDGET_SECONDS < 25 * 60
+    assert all("timeout-minutes" in step for step in steps)
+    declared = [step["timeout-minutes"] for step in steps]
+    assert declared == [1, 1, 1, 1, 18, 1, 1]
+    assert sum(declared) <= promote["timeout-minutes"] - 1
+    execute_step = next(
+        step for step in steps
+        if step["name"] == "Execute authoritative production-check boundary"
+    )
+    assert execute_step["timeout-minutes"] * 60 - (
+        promotion.EXECUTION_BUDGET_SECONDS
+    ) >= 120
+    cleanup_minutes = sum(
+        step["timeout-minutes"] for step in steps[-2:]
+    )
+    assert cleanup_minutes == 2

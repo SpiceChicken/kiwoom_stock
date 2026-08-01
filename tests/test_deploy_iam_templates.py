@@ -136,6 +136,7 @@ def test_custom_ssm_document_only_invokes_preinstalled_allowlisted_command():
     assert set(parameters) == {
         "ImageDigest",
         "SourceSha",
+        "PromotionAttemptId",
         "ComposeSha256",
         "ComposeProdSha256",
         "ExpectedInstanceId",
@@ -152,6 +153,9 @@ def test_custom_ssm_document_only_invokes_preinstalled_allowlisted_command():
         r"^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$"
     )
     assert parameters["SourceSha"]["allowedPattern"] == r"^[0-9a-f]{40}$"
+    assert parameters["PromotionAttemptId"]["allowedPattern"] == (
+        r"^[1-9][0-9]{0,19}$"
+    )
     assert parameters["ExpectedInstanceId"]["allowedPattern"] == (
         r"^i-02cb0a404794bd43a$"
     )
@@ -214,6 +218,7 @@ def test_custom_ssm_document_shell_quotes_render_exact_host_argv(tmp_path):
             "ARGV_OUTPUT": str(output),
             "SSM_ImageDigest": image,
             "SSM_SourceSha": source_sha,
+            "SSM_PromotionAttemptId": "987654321",
             "SSM_ComposeSha256": compose_sha,
             "SSM_ComposeProdSha256": compose_prod_sha,
             "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
@@ -243,6 +248,8 @@ def test_custom_ssm_document_shell_quotes_render_exact_host_argv(tmp_path):
         image,
         "--source-sha",
         source_sha,
+        "--promotion-attempt-id",
+        "987654321",
         "--compose-sha256",
         compose_sha,
         "--compose-prod-sha256",
