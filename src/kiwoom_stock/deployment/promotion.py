@@ -48,7 +48,6 @@ COMMAND_OUTPUT_LIMIT = 2 * 1024 * 1024
 HTTP_REDIRECT_LIMIT = 5
 HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
 HTTP_USER_AGENT = "kiwoom-stock-promotion/1"
-GITHUB_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,255}")
 LEGACY_SOURCE_SHA = "90b0f00f32e8db0b327d90aa3d053f520d2d3f1b"
 LEGACY_IMAGE_DIGEST = IMAGE_PREFIX + (
     "faa437771719203165c2de57bfd8f122"
@@ -190,6 +189,19 @@ class CurlHttpClient:
         self._runner = runner
         self._env = {"PATH": path_env}
 
+    @staticmethod
+    def _token_bytes(token: str) -> bytes:
+        try:
+            encoded = token.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise PromotionError("github_token_invalid") from error
+        if not encoded or any(
+            byte < 0x21 or byte > 0x7E or byte in {0x22, 0x5C}
+            for byte in encoded
+        ):
+            raise PromotionError("github_token_invalid")
+        return encoded
+
     def _get(
         self,
         url: str,
@@ -201,8 +213,7 @@ class CurlHttpClient:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise PromotionError("http_url_unsafe")
-        if GITHUB_TOKEN_RE.fullmatch(token) is None:
-            raise PromotionError("github_token_invalid")
+        token_bytes = self._token_bytes(token)
         remaining = deadline - clock.monotonic()
         if remaining < 0.001:
             raise PromotionError("execution_deadline_exhausted")
@@ -225,7 +236,7 @@ class CurlHttpClient:
             "--header", "X-GitHub-Api-Version: 2022-11-28",
             "--url", url,
         ]
-        config = f'header = "Authorization: Bearer {token}"\n'.encode("ascii")
+        config = b'header = "Authorization: Bearer ' + token_bytes + b'"\n'
         try:
             result = self._runner.run_binary(
                 argv,

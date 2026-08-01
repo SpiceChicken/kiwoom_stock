@@ -370,7 +370,24 @@ def test_curl_http_boundary_keeps_token_only_on_stdin_and_is_https_bounded():
     assert stdin == b'header = "Authorization: Bearer ghs_secret_123"\n'
 
 
-@pytest.mark.parametrize("token", ["", "bad token", "bad\nnext", 'bad"quote'])
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        " leading",
+        "trailing ",
+        "bad token",
+        "bad\ttab",
+        "bad\rcarriage-return",
+        "bad\nnext",
+        "bad\x00null",
+        "bad\x1fcontrol",
+        "bad\x7fdelete",
+        'bad"quote',
+        "bad\\backslash",
+        "non-ascii-한글",
+    ],
+)
 def test_curl_http_token_config_is_injection_safe(token):
     runner = FakeBinaryRunner()
     with pytest.raises(promotion.PromotionError, match="github_token_invalid"):
@@ -382,6 +399,35 @@ def test_curl_http_token_config_is_injection_safe(token):
             10.0,
         )
     assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ghs_APPID_eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJBUEBJRCJ9.signature",
+        "ghs_APPID_" + "a" * 300 + ".payload.signature",
+    ],
+)
+def test_curl_http_accepts_opaque_stateless_tokens_stdin_only(token):
+    runner = FakeBinaryRunner(
+        result=promotion.BinaryCommandResult(0, b"response", b"")
+    )
+    client = promotion.CurlHttpClient(runner, "/trusted/bin")
+
+    assert client.get_bytes(
+        "https://api.github.test/artifact",
+        token,
+        1024,
+        FakeClock(),
+        10.0,
+    ) == b"response"
+
+    argv, env, _, _, stdin = runner.calls[0]
+    assert len(token) > 255 or "." in token
+    assert token.encode("ascii") in stdin
+    assert token not in " ".join(argv)
+    assert token not in repr(env)
+    assert env == {"PATH": "/trusted/bin"}
 
 
 @pytest.mark.parametrize(
