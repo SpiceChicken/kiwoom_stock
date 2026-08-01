@@ -48,13 +48,6 @@ COMMAND_OUTPUT_LIMIT = 2 * 1024 * 1024
 HTTP_REDIRECT_LIMIT = 5
 HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
 HTTP_USER_AGENT = "kiwoom-stock-promotion/1"
-LEGACY_SOURCE_SHA = "90b0f00f32e8db0b327d90aa3d053f520d2d3f1b"
-LEGACY_IMAGE_DIGEST = IMAGE_PREFIX + (
-    "faa437771719203165c2de57bfd8f122"
-    "99ddfcc1c5d014772f1af86b3c71093d"
-)
-LEGACY_BUILD_RUN_ID = 30544114256
-LEGACY_BUILD_JOB_ID = 90875823290
 COMMAND_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12}"
@@ -111,14 +104,13 @@ class ArtifactContract:
     size_bytes: int
     digest: str
     build_job_id: int
-    legacy: bool
 
 
 @dataclass(frozen=True)
 class ReleaseContract:
-    image_size_mib: int | None
-    compose_sha256: str | None
-    compose_prod_sha256: str | None
+    image_size_mib: int
+    compose_sha256: str
+    compose_prod_sha256: str
 
 
 @dataclass(frozen=True)
@@ -521,12 +513,6 @@ def _as_dict(value: object, category: str) -> dict[str, object]:
     return value
 
 
-def _is_legacy(candidate: Candidate) -> bool:
-    return candidate == Candidate(
-        LEGACY_SOURCE_SHA, LEGACY_IMAGE_DIGEST, LEGACY_BUILD_RUN_ID
-    )
-
-
 def validate_provenance(
     candidate: Candidate,
     run_payload: object,
@@ -534,7 +520,6 @@ def validate_provenance(
     artifacts_payload: object,
 ) -> ArtifactContract:
     run = _as_dict(run_payload, "candidate_run_shape_invalid")
-    legacy = _is_legacy(candidate)
     required = {
         "id": candidate.build_run_id,
         "event": "workflow_dispatch",
@@ -542,7 +527,7 @@ def validate_provenance(
         "head_sha": candidate.source_sha,
         "path": ".github/workflows/cd-production-check.yml",
         "status": "completed",
-        "conclusion": "cancelled" if legacy else "success",
+        "conclusion": "success",
     }
     if any(run.get(key) != expected for key, expected in required.items()):
         raise PromotionError("candidate_run_mismatch")
@@ -567,7 +552,6 @@ def validate_provenance(
         or job.get("conclusion") != "success"
         or type(job_id) is not int
         or job_id <= 0
-        or (legacy and job_id != LEGACY_BUILD_JOB_ID)
     ):
         raise PromotionError("candidate_job_invalid")
     artifacts = _as_dict(artifacts_payload, "candidate_artifacts_shape_invalid")
@@ -580,9 +564,7 @@ def validate_provenance(
     ):
         raise PromotionError("candidate_artifacts_count_invalid")
     expected_name = (
-        f"candidate-{candidate.source_sha}"
-        if legacy
-        else f"release-manifest-{candidate.source_sha}-{candidate.build_run_id}"
+        f"release-manifest-{candidate.source_sha}-{candidate.build_run_id}"
     )
     artifact_matches = [
         item for item in artifact_values
@@ -595,12 +577,11 @@ def validate_provenance(
     size_bytes = artifact.get("size_in_bytes")
     digest = artifact.get("digest")
     workflow_run = artifact.get("workflow_run")
-    size_limit = 4 * 1024 * 1024 if legacy else 64 * 1024
     if (
         type(artifact_id) is not int
         or artifact_id <= 0
         or type(size_bytes) is not int
-        or not 0 < size_bytes <= size_limit
+        or not 0 < size_bytes <= 64 * 1024
         or type(digest) is not str
         or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
         or artifact.get("expired") is not False
@@ -608,7 +589,7 @@ def validate_provenance(
         or workflow_run.get("id") != candidate.build_run_id
     ):
         raise PromotionError("candidate_artifact_invalid")
-    return ArtifactContract(artifact_id, size_bytes, digest, job_id, legacy)
+    return ArtifactContract(artifact_id, size_bytes, digest, job_id)
 
 
 def validate_artifact(
@@ -619,11 +600,7 @@ def validate_artifact(
     actual_digest = "sha256:" + hashlib.sha256(archive).hexdigest()
     if actual_digest != contract.digest:
         raise PromotionError("artifact_digest_mismatch")
-    expected_names = (
-        {"reports/pytest-production-check.xml", "runtime-image-inspect.json"}
-        if contract.legacy
-        else {"release-manifest.json"}
-    )
+    expected_names = {"release-manifest.json"}
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             infos = bundle.infolist()
@@ -642,19 +619,6 @@ def validate_artifact(
                     or info.compress_size > 4 * 1024 * 1024
                 ):
                     raise PromotionError("artifact_member_unsafe")
-            if contract.legacy:
-                inspect_info = next(
-                    info
-                    for info in infos
-                    if info.filename == "runtime-image-inspect.json"
-                )
-                if inspect_info.file_size > 1024 * 1024:
-                    raise PromotionError("legacy_image_inspect_size_invalid")
-                inspected = json.loads(
-                    bundle.read("runtime-image-inspect.json").decode("utf-8")
-                )
-                _validate_image_config(candidate, inspected)
-                return ReleaseContract(None, None, None)
             payload = bundle.read("release-manifest.json")
     except (zipfile.BadZipFile, KeyError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PromotionError("artifact_archive_invalid") from error
@@ -887,7 +851,7 @@ def execute(
         archive = http.get_bytes(
             urls["artifact"].format(artifact_id=artifact.artifact_id),
             github_token,
-            4 * 1024 * 1024 if artifact.legacy else 64 * 1024,
+            64 * 1024,
             clock,
             deadline,
         )
@@ -905,7 +869,7 @@ def execute(
                     deadline,
                 ),
             )
-        if not artifact.legacy and (
+        if (
             compose_hashes["compose.yaml"] != release.compose_sha256
             or compose_hashes["compose.prod.yaml"] != release.compose_prod_sha256
         ):
@@ -956,7 +920,7 @@ def execute(
             image_size_mib = validate_runtime_image(candidate, inspect.stdout)
         finally:
             shutil.rmtree(docker_config, ignore_errors=True)
-        if release.image_size_mib is not None and image_size_mib != release.image_size_mib:
+        if image_size_mib != release.image_size_mib:
             raise PromotionError("manifest_image_size_mismatch")
         evidence.update(
             image_size_mib=image_size_mib,

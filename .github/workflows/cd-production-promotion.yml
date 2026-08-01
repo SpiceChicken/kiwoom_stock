@@ -89,12 +89,13 @@ jobs:
       - name: Configure exact AWS deploy role with OIDC
         timeout-minutes: 1
         id: oidc
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: kiwoom-production-check
           output-credentials: true
+          output-env-credentials: false
           unset-current-credentials: true
 
       - name: Execute authoritative production-check boundary
@@ -120,8 +121,8 @@ jobs:
           --evidence "${EVIDENCE_FILENAME}"
           --github-api-url "${GITHUB_API_URL}"
 
-      # This exact action pin exports credentials to the job environment.  Empty
-      # every exported name before any following action receives an environment.
+      # Credentials are step outputs only. Keep an explicit defense-in-depth
+      # clear before any following action receives an environment.
       - name: Clear OIDC credentials before artifact handling
         timeout-minutes: 1
         if: always()

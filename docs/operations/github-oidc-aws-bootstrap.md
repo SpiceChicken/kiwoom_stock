@@ -168,7 +168,9 @@ reviewer/verifier가 검토하며, 차이를 자동 반영하지 않는다.
    workflow input과도 exact match해야 하며 Kiwoom key는 등록하지 않는다.
 7. GHCR package visibility를 public으로 확인하고 로그아웃한 clean Docker config에서
    exact digest pull을 확인한다. candidate build와 protected promotion을 분리하고,
-   promotion은 원본 run/job/artifact/Compose/image 검증 전 OIDC를 얻지 않는다.
+   promotion은 trusted executor checkout과 fixed tuple/audit preflight 뒤 Node 24 OIDC
+   outputs를 얻고, 원본 run/job/artifact/Compose/image를 authoritative하게 재검증한
+   뒤에만 exact SSM command를 한 번 보낸다.
 8. EC2 runtime exact policy와 parameter read가 없는 custom SSM core policy를
    함께 준비하고 JSON, Access Analyzer, custom policy 단독 simulation을 통과시킨다.
 9. custom core와 runtime inline policy를 **먼저** role에 연결한다. 이 시점의 SSM
@@ -184,12 +186,17 @@ reviewer/verifier가 검토하며, 차이를 자동 반영하지 않는다.
 14. Kiwoom SecureString은 운영자가 숨김 입력으로 생성하며 GitHub workflow가 값을
     읽지 못하는지 확인한다.
 
-Stage I의 manifest 이전 release를 한 번 검증한 직후
+Stage I의 manifest 이전 release는 1회 검증을 완료했고 당시 승인 tuple은 제거 후
+API로 read-back했다. Stage II는 exact compatibility code를 삭제했지만
 `KIWOOM_APPROVED_SOURCE_SHA`, `KIWOOM_APPROVED_IMAGE_DIGEST`,
-`KIWOOM_APPROVED_BUILD_RUN_ID`를 제거하거나 다음 manifest-backed release로
-교체하고 API로 read-back한다. 이후 Stage II에서 exact legacy tuple 코드를
-삭제한다. direct `aws ssm send-command`, generic document, tag 기반 배포는 이
-회수 절차의 대안이 아니다.
+`KIWOOM_APPROVED_BUILD_RUN_ID` 이름은 modern manifest-backed release의 임시 protected
+approval contract로 계속 사용한다. 전체 순서는 trusted executor checkout → fixed
+tuple/audit preflight → Node 24 OIDC outputs → authoritative
+run/job/artifact/Compose/image validation → single exact SSM → credential clear → evidence
+upload다. terminal success/failure/cancel 어느 결론이든 즉시 tuple 세 값을 모두 삭제하고
+Environment의 role-only, secrets `0`, pending deployments `0`을 read-back한다. 다음
+release는 이전 tuple을 유지하거나 교체하지 않고 새 approval tuple을 등록한다. direct
+`aws ssm send-command`, generic document, tag 기반 배포는 이 절차의 대안이 아니다.
 
 `github-deploy-policy.json.example`은 SSM-only다. GHCR push는 AWS role이 아니라
 GitHub의 job-scoped `GITHUB_TOKEN`과 workflow의 `packages: write` 권한을 사용한다.

@@ -127,8 +127,7 @@ jobs:
           python -m flake8 src tests --count --select=E9,F63,F7,F82 \
             --show-source --statistics
           python -m mypy src/kiwoom_stock
-          mkdir -p reports
-          python -m pytest tests --junitxml=reports/pytest-production-check.xml
+          python -m pytest tests
 
       - name: Build package and smoke installed wheel
         run: |
@@ -180,7 +179,6 @@ jobs:
           revision="$(docker image inspect "${local_image}" \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
           test "${revision}" = "${SOURCE_SHA}"
-          docker image inspect "${local_image}" >runtime-image-inspect.json
           {
             printf 'local=%s\n' "${local_image}"
             printf 'remote_tag=%s\n' "${remote_tag}"
@@ -293,17 +291,6 @@ jobs:
               raise SystemExit("runtime user contract mismatch")
           PY
           printf 'size_mib=%s\n' "${image_mib}" >>"${GITHUB_OUTPUT}"
-
-      - name: Upload unprivileged build evidence
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: candidate-${{ steps.release.outputs.source_sha }}
-          path: |
-            reports/pytest-production-check.xml
-            runtime-image-inspect.json
-          if-no-files-found: warn
-          retention-days: 14
 
   seal_release_manifest:
     name: seal immutable release manifest

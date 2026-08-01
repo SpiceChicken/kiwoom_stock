@@ -15,6 +15,11 @@ CD_WORKFLOW_PATH = Path(".github/workflows/cd-production-check.yml")
 PROMOTION_WORKFLOW_PATH = Path(
     ".github/workflows/cd-production-promotion.yml"
 )
+DEPLOYMENT_BOUNDARY_DOC = Path("docs/operations/deployment-boundary.md")
+CONTAINER_DEPLOYMENT_DOC = Path(
+    "docs/operations/github-ec2-container-deployment.md"
+)
+OIDC_BOOTSTRAP_DOC = Path("docs/operations/github-oidc-aws-bootstrap.md")
 CHECKOUT_ACTION = (
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 )
@@ -26,7 +31,7 @@ UPLOAD_ARTIFACT_ACTION = (
 )
 AWS_CREDENTIALS_ACTION = (
     "aws-actions/configure-aws-credentials@"
-    "e3dd6a429d7300a6a4c196c26e071d42e0343502"
+    "e6de054238d6b7531b4efff3b6587d9aade6a06c"
 )
 GITLEAKS_BINARY_SHA256 = (
     "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509"
@@ -403,6 +408,16 @@ def test_cd_seals_strict_bounded_unique_release_manifest():
 
     assert "release-manifest-${{ needs.build_publish.outputs.source_sha }}-${{ github.run_id }}" in text
     assert "release-manifest.json" in text
+    assert "candidate-${{ steps.release.outputs.source_sha }}" not in text
+    assert "pytest-production-check.xml" not in text
+    assert "runtime-image-inspect.json" not in text
+    uploads = [
+        step for job in workflow["jobs"].values() for step in job["steps"]
+        if step.get("uses") == UPLOAD_ARTIFACT_ACTION
+    ]
+    assert len(uploads) == 1
+    assert uploads[0] in seal["steps"]
+    assert uploads[0]["with"]["if-no-files-found"] == "error"
     assert "16 * 1024" in runs
     assert "total_count" in runs
     assert "> 100" in runs
@@ -488,6 +503,51 @@ def test_promotion_is_thin_pinned_and_orders_the_trust_boundary():
     assert names[oidc_index + 2] == (
         "Clear OIDC credentials before artifact handling"
     )
+    preflight = steps[names.index("Validate immutable protected boundary preflight")]
+    execute = steps[names.index("Execute authoritative production-check boundary")]
+    assert "promotion preflight" in preflight["run"]
+    assert "promotion execute" in execute["run"]
+    assert names.index("Checkout trusted promotion executor") < names.index(
+        "Validate immutable protected boundary preflight"
+    ) < oidc_index < names.index(
+        "Execute authoritative production-check boundary"
+    ) < names.index(
+        "Clear OIDC credentials before artifact handling"
+    ) < names.index("Upload protected promotion evidence")
+
+
+def test_promotion_operations_docs_match_trust_order_and_terminal_cleanup():
+    documents = [
+        " ".join(path.read_text(encoding="utf-8").split())
+        for path in (
+            DEPLOYMENT_BOUNDARY_DOC,
+            CONTAINER_DEPLOYMENT_DOC,
+            OIDC_BOOTSTRAP_DOC,
+        )
+    ]
+    required = (
+        "checkout",
+        "Node 24 OIDC outputs",
+        "authoritative",
+        "credential clear",
+        "evidence upload",
+        "terminal success/failure/cancel",
+        "role-only",
+        "secrets `0`",
+        "pending deployments `0`",
+    )
+    for document in documents:
+        assert all(phrase in document for phrase in required)
+
+    combined = "\n".join(documents)
+    for stale in (
+        "checkout 없는 promotion job",
+        "pinned system `curl`",
+        "제거하거나 다음 승인 tuple로 교체",
+        "이 모든 검증 뒤에만 OIDC role",
+        "검증 전 OIDC를 얻지 않는다",
+    ):
+        assert stale not in combined
 
 
 def test_promotion_cli_commands_have_no_pre_oidc_derived_state_transport():
@@ -540,6 +600,7 @@ def test_promotion_scopes_github_and_oidc_credentials_and_clears_before_upload()
         "aws-region": "${{ env.AWS_REGION }}",
         "role-session-name": "kiwoom-production-check",
         "output-credentials": True,
+        "output-env-credentials": False,
         "unset-current-credentials": True,
     }
     assert execute["env"]["GH_TOKEN"] == "${{ github.token }}"
@@ -566,6 +627,10 @@ def test_promotion_scopes_github_and_oidc_credentials_and_clears_before_upload()
 def test_promotion_preserves_fixed_allowlists_and_no_business_credentials():
     text = PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8")
 
+    assert "e3dd6a429d7300a6a4c196c26e071d42e0343502" not in text
+    assert "aws-actions/configure-aws-credentials@v6" not in text
+    assert "ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION" not in text
+    assert "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24" not in text
     assert "secrets." not in text
     assert "KIWOOM_APP_KEY" not in text
     assert "KIWOOM_SECRET_KEY" not in text

@@ -14,11 +14,14 @@ manual candidate workflow
   → OCI digest/계약 익명 검사 + release-manifest JSON sealing
 manual protected promotion workflow
   → approved source SHA + exact digest + build run ID 입력
-  → Environment tuple/run/job/artifact/Compose/image 검증
-  → checkout 없는 promotion job이 GitHub OIDC로 SSM-only AWS role 사용
+  → trusted executor checkout + fixed tuple/audit preflight
+  → Node 24 OIDC outputs로 authoritative run/job/artifact/Compose/image 검증
+  → single exact SSM command + credential clear + evidence upload
   → i-02cb0a404794bd43a에서 잠금/자원/secret metadata 검사
   → network/운영 volume/실제 key 없는 digest image로 일회성 --check-config
   → current/previous full release tuple을 하나의 JSON으로 기록
+  → terminal success/failure/cancel 뒤 approval tuple 3개 삭제 및
+    role-only/secrets 0/pending 0 read-back
 ```
 
 GitHub에는 Kiwoom App Key와 Secret Key를 넣지 않는다. 두 값은 EC2의 Parameter
@@ -89,6 +92,9 @@ workflow는 다음 순서를 바꾸지 않는다.
 6. clean anonymous exact-digest pull과 revision/entrypoint/user/850 MiB 상한 검사
 7. 최대 16 KiB strict release manifest sealing
 
+The release manifest is the candidate workflow's only durable candidate artifact.
+JUnit XML and a standalone runtime-image-inspect artifact are not retained.
+
 `latest` tag는 만들지 않는다. EC2에는
 `ghcr.io/spicechicken/kiwoom_stock@sha256:<64 hex>` 형식만 전달한다.
 full-SHA tag가 이미 존재하면 remote image를 pull하며 새 local rebuild와 비교하거나
@@ -102,34 +108,38 @@ manifest를 만들기 전에 실패한다.
 2. Actions → `Production digest promotion` → Run workflow를 연다.
 3. `source_sha`, exact `image_digest`, numeric `build_run_id`를 입력한다.
 4. Environment 승인 화면에서 같은 tuple인지 확인하고 승인한다.
-5. workflow가 원본 candidate run의 repository/path/event/head/ref/status,
+5. workflow가 immutable workflow SHA의 trusted executor를 credential 없이 checkout하고,
+   fixed tuple/audit preflight만 OIDC 전에 수행한다.
+6. pinned Node 24 action의 OIDC credential outputs를 바로 다음 executor step에만
+   전달한다.
+7. executor가 원본 candidate run의 repository/path/event/head/ref/status,
    exact successful build job, unique non-expired artifact, strict ZIP/JSON,
    exact commit의 두 Compose byte hash, anonymous image revision/entrypoint/user/
    size를 검증한다.
-6. 이 모든 검증 뒤에만 OIDC role을 얻어 exact custom SSM document를 실행한다.
-7. terminal result와 `production-check-<source>-<promotion run>` evidence를
-   확인한다.
+8. 검증이 모두 끝난 뒤 exact custom SSM document를 한 번만 실행한다.
+9. credential clear 뒤 `production-check-<source>-<promotion run>` evidence upload와
+   terminal result를 확인한다.
+10. success/failure/cancel 어느 terminal 결론이든 approval tuple 세 변수를 삭제하고,
+    Environment가 role-only, secrets `0`, pending deployments `0`인지 read-back한다.
 
-promotion job에는 checkout, setup-python, pip, candidate build/push가 없다.
-Environment, provenance, artifact, Compose 또는 image 검증이 하나라도 실패하면 OIDC와
-SSM에 도달하지 않는다. tag나 arbitrary command는 입력 또는 SSM parameter로
-전달하지 않는다.
+promotion job에는 trusted executor checkout이 있지만 setup-python, pip, candidate
+build/push는 없다. Environment tuple/audit preflight 실패는 OIDC 전에 중단하고,
+post-OIDC provenance, artifact, Compose 또는 image 검증 실패는 SSM 전에 중단한다.
+tag나 arbitrary command는 입력 또는 SSM parameter로 전달하지 않는다.
 
-### 2.3 Stage I legacy bootstrap 1회
+### 2.3 Stage I legacy bootstrap 완료 이력
 
-manifest 도입 전에 게시된 아래 tuple만 코드에 고정된 compatibility path를 통과할
-수 있다.
+manifest 도입 전에 게시된 아래 tuple의 1회 production check는 Stage I에서 완료됐다.
 
 - source SHA: `90b0f00f32e8db0b327d90aa3d053f520d2d3f1b`
 - exact digest:
   `ghcr.io/spicechicken/kiwoom_stock@sha256:faa437771719203165c2de57bfd8f12299ddfcc1c5d014772f1af86b3c71093d`
 - candidate run/job: `30544114256` / `90875823290`
 
-별도 boolean이나 우회 입력은 없다. Environment tuple까지 위 값과 exact match하고
-legacy candidate artifact가 unique/non-expired일 때만 진행한다. 성공 직후 세
-승인 변수를 제거하거나 다음 manifest-backed tuple로 교체해 read-back하고, Stage II
-변경에서 이 compatibility code를 삭제한다. artifact가 만료되면 재생성하거나 direct
-SSM으로 우회하지 않는다.
+승인 tuple은 성공 직후 제거됐고 Stage II에서 compatibility code와 무소비
+`candidate-<source>` producer를 삭제했다. 위 cancelled run/artifact/old ZIP은 더는
+승인 가능한 release가 아니며 재생성, rerun 또는 direct SSM으로 우회하지 않는다.
+새 promotion은 successful run의 strict release manifest를 반드시 사용한다.
 
 ## 3. EC2에서 실제로 검사하는 것
 
