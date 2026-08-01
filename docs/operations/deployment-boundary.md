@@ -19,10 +19,13 @@ or invoke Slack, S3, or Gemini.
    sealed in a bounded release manifest. This workflow has no AWS, OIDC, SSM, or
    production Environment access.
 2. **Production digest promotion** accepts only an approved source SHA, exact OCI
-   digest, and candidate run ID. A protected checkout-free workflow validates
-   that tuple against the original run, build job, unique artifact, exact source
-   Compose bytes, and public image contract before it obtains AWS OIDC and sends
-   one bounded SSM command that runs only `--check-config`.
+   digest, and candidate run ID. A protected workflow checks out its executor at
+   the immutable workflow SHA with credentials disabled. An audit-only
+   preflight rejects malformed or unapproved inputs, but produces no execution
+   state. Immediately after OIDC, one Python process independently validates the
+   original run, build job, unique artifact, exact source Compose bytes, and
+   anonymous public image contract before it sends one bounded SSM command and
+   polls it to completion. That command runs only `--check-config`.
 3. **Shadow worker activation** remains RED until the process, shutdown, calendar,
    database, and side-effect boundaries below have real-path evidence.
 4. **Live trading activation** is a separate, explicit approval. No workflow in
@@ -38,6 +41,78 @@ same approved tuple byte-for-byte. Only after provenance, artifact/ZIP, manifest
 Compose-content, and anonymous image checks pass can it obtain OIDC. AWS permits
 only the account-owned `KiwoomStock-ProductionCheck` document, not generic
 `AWS-RunShellScript`, and the role cannot read Kiwoom SecureString parameters.
+
+## Promotion trust boundary
+
+Nothing calculated before OIDC is authoritative for execution. The promotion
+workflow must not carry required hashes, sizes, artifact identifiers, parameters,
+evidence, or command identifiers across OIDC through a file, step output, job
+output, or `GITHUB_ENV`. The post-OIDC executor receives only the protected
+immutable tuple and independently re-fetches and revalidates all derived state.
+Artifact ZIP bytes, Compose bytes, SSM parameters, and the command identifier stay
+in that process's memory. The only durable file is bounded redacted evidence,
+written with mode `0600` by atomic replacement; the executor replaces rather than
+reads the pre-OIDC audit envelope.
+
+The pinned `aws-actions/configure-aws-credentials` v4.0.2 commit supports explicit
+credential outputs but does not support disabling its environment export. The
+workflow therefore maps the official outputs only into the immediately following
+executor step, then an `if: always()` shell step writes empty values for all AWS
+credential and region names to `GITHUB_ENV` before the evidence upload action.
+No other action may appear between OIDC, execute, credential clearing, and upload.
+This credential teardown is not a derived-state transport. A hard runner
+cancellation between OIDC and the teardown step can prevent the clear step from
+running; the credentials remain short-lived session credentials, but this
+residual risk must be considered when changing the pinned action.
+
+The executor gives the GitHub token only to bounded GitHub HTTP reads, gives no
+GitHub or AWS credential to Docker, and gives only the three OIDC credentials and
+fixed AWS region/retry settings to the AWS CLI. It validates the exact repository,
+40-character source SHA, digest, run/job/artifact binding, modern manifest or the
+single fixed legacy candidate, both immutable Compose byte hashes, runtime image
+revision/entrypoint/user/850 MiB ceiling, fixed role/region/instance/document, and
+the exact seven-key SSM parameter contract. GitHub reads use the pinned system
+`curl` with a fixed `kiwoom-stock-promotion/1` User-Agent. The validated bearer
+token is supplied only through stdin config, while argv and the minimal PATH-only
+child environment contain no credential. Curl's ambient default config is disabled.
+HTTPS-only initial/redirect protocol
+restrictions, bounded redirects, and curl's default cross-host Authorization
+stripping apply; `--location-trusted` is forbidden. Before the anonymous pull, a
+cached exact digest must either be absent
+with the exact daemon not-found result or be removed successfully. `send-command`
+uses `AWS_MAX_ATTEMPTS=1` and occurs once; a malformed command ID is never polled.
+Only exact `InvocationDoesNotExist` is retryable. Polling is limited to 90 attempts
+at 10-second
+intervals and succeeds only for the exact instance, response code zero, and one
+exact redacted success marker.
+
+The workflow gives every step an explicit timeout. Checkout, evidence init,
+preflight, and OIDC each have one minute; execute has 18 minutes; credential clear
+and evidence upload each have one minute. Their declared maximum is 24 minutes
+inside the 25-minute job. The executor itself has a 960-second absolute monotonic
+budget, leaving two minutes inside its step before the separately reserved two
+post-execute minutes and one additional job minute. Untrusted inputs cannot extend
+this local safety deadline. Every GitHub transaction, including DNS, TLS, response
+headers, redirects, and slow body chunks, runs in a process group with curl
+`--max-time` and a parent timeout derived from the same remaining deadline. Timeout
+kills the entire process group. Docker/AWS children use the same deadline boundary.
+Transport waits and command-specific timeouts never exceed the remaining budget;
+binary/text stdout and stderr are bounded and raw curl errors are not evidence.
+
+`PromotionAttemptId` is the positive decimal GitHub `run_id`. It is passed to the
+allowlisted document and preinstalled root command. Under the existing nonblocking
+deployment flock, the host stores a private atomic success marker bound to the
+attempt ID and exact source/image/two-Compose-hash tuple. A retry of the same run
+after response loss returns the same success marker without Docker work; a tuple
+mismatch fails before runtime checks. Failures never create the marker. GitHub run
+IDs are unique per dispatch, so a new dispatch revalidates and executes as a new
+attempt rather than reusing an earlier success.
+
+The repository document and host script changes are not applied by a merge. Before
+the corrected workflow can be dispatched, the account-owned SSM document and
+`/usr/local/sbin/kiwoom-production-check` must be rolled out together and read back
+under a separate explicit operations confirmation. Until then the workflow and
+installed host contract are version-skewed and production promotion is blocked.
 
 Stage I contains one exact, tuple-bound compatibility path for candidate run
 `30544114256`, build job `90875823290`, and its already published digest. It is

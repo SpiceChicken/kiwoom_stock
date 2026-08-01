@@ -10,6 +10,7 @@ readonly IMAGE_PREFIX="ghcr.io/spicechicken/kiwoom_stock@sha256:"
 readonly LOCK_FILE="${KIWOOM_DEPLOY_LOCK_FILE:-/run/lock/kiwoom-stock-deploy.lock}"
 readonly STATE_DIR="${KIWOOM_DEPLOY_STATE_DIR:-/opt/kiwoom-stock/deployments}"
 readonly SOURCE_DIR="${STATE_DIR}/sources"
+readonly ATTEMPT_DIR="${STATE_DIR}/promotion-attempts"
 readonly SECRET_DIR="${KIWOOM_DEPLOY_SECRET_DIR:-/run/kiwoom-stock/credentials}"
 readonly APP_KEY_FILE="${SECRET_DIR}/app-key"
 readonly SECRET_KEY_FILE="${SECRET_DIR}/secret-key"
@@ -56,6 +57,11 @@ validate_region() {
     [[ "$1" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || fail "invalid AWS region"
 }
 
+validate_promotion_attempt_id() {
+    [[ "$1" =~ ^[1-9][0-9]{0,19}$ ]] \
+        || fail "promotion attempt ID must be a positive bounded decimal"
+}
+
 reject_symlink_components() {
     local path="$1"
     local current="/"
@@ -87,7 +93,7 @@ validate_secret_metadata() {
 }
 
 validate_secret_directory() {
-    local metadata
+    local metadata expected_owner
     reject_symlink_components "${SECRET_DIR}"
     [[ -d "${SECRET_DIR}" && ! -L "${SECRET_DIR}" ]] \
         || fail "credential directory metadata is invalid"
@@ -144,6 +150,112 @@ validate_instance_identity() {
 acquire_deployment_lock() {
     exec 9>"${LOCK_FILE}"
     flock -n 9 || fail "another production check holds the deployment lock"
+}
+
+validate_private_state_directories() {
+    local directory metadata expected_owner
+    expected_owner="$(id -u):$(id -g)"
+    for directory in "${STATE_DIR}" "${ATTEMPT_DIR}"; do
+        [[ -d "${directory}" && ! -L "${directory}" ]] \
+            || fail "promotion state directory is invalid"
+        metadata="$(stat -c '%u:%g:%a:%F' -- "${directory}")" \
+            || fail "promotion state directory metadata is unavailable"
+        [[ "${metadata}" == "${expected_owner}:700:directory" ]] \
+            || fail "promotion state directory must be private and root-owned"
+    done
+}
+
+reconcile_promotion_attempt() {
+    local attempt_id="$1"
+    local image="$2"
+    local source_sha="$3"
+    local common_hash="$4"
+    local prod_hash="$5"
+    local marker="${ATTEMPT_DIR}/${attempt_id}.json"
+    [[ -e "${marker}" ]] || return 1
+    [[ -f "${marker}" && ! -L "${marker}" ]] \
+        || fail "promotion attempt marker is not a regular file"
+    local metadata
+    metadata="$(stat -c '%u:%g:%a:%F' -- "${marker}")" \
+        || fail "promotion attempt marker metadata is unavailable"
+    expected_owner="$(id -u):$(id -g)"
+    [[ "${metadata}" == "${expected_owner}:600:regular file" ]] \
+        || fail "promotion attempt marker must be private and root-owned"
+    if ! python3 - "${marker}" "${attempt_id}" "${image}" "${source_sha}" \
+        "${common_hash}" "${prod_hash}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path, attempt_id, image, source_sha, common_hash, prod_hash = sys.argv[1:]
+marker = json.loads(Path(path).read_text(encoding="utf-8"))
+expected_marker = (
+    "production check passed: "
+    f"source_sha={source_sha} image={image} rollback=false"
+)
+expected = {
+    "schema": 1,
+    "promotion_attempt_id": attempt_id,
+    "source_sha": source_sha,
+    "image_digest": image,
+    "compose_sha256": common_hash,
+    "compose_prod_sha256": prod_hash,
+    "success_marker": expected_marker,
+}
+if marker != expected:
+    raise SystemExit("marker mismatch")
+print(expected_marker)
+PY
+    then
+        fail "promotion attempt marker tuple mismatch"
+    fi
+}
+
+record_promotion_attempt_success() {
+    local attempt_id="$1"
+    local image="$2"
+    local source_sha="$3"
+    local common_hash="$4"
+    local prod_hash="$5"
+    local marker="${ATTEMPT_DIR}/${attempt_id}.json"
+    local temporary="${ATTEMPT_DIR}/.${attempt_id}.tmp.$$"
+    [[ ! -e "${marker}" ]] || fail "promotion attempt marker already exists"
+    python3 - "${marker}" "${temporary}" "${attempt_id}" "${image}" \
+        "${source_sha}" "${common_hash}" "${prod_hash}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+path_value, temporary, attempt_id, image, source_sha, common_hash, prod_hash = (
+    sys.argv[1:]
+)
+success_marker = (
+    "production check passed: "
+    f"source_sha={source_sha} image={image} rollback=false"
+)
+payload = {
+    "schema": 1,
+    "promotion_attempt_id": attempt_id,
+    "source_sha": source_sha,
+    "image_digest": image,
+    "compose_sha256": common_hash,
+    "compose_prod_sha256": prod_hash,
+    "success_marker": success_marker,
+}
+encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
+fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "wb") as stream:
+    stream.write(encoded)
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, path_value)
+directory_fd = os.open(str(Path(path_value).parent), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
 }
 
 download_compose_contract() {
@@ -507,6 +619,7 @@ usage() {
     cat >&2 <<'EOF'
 usage:
   kiwoom-production-check --image DIGEST --source-sha SHA \
+    --promotion-attempt-id POSITIVE_DECIMAL \
     --compose-sha256 HASH --compose-prod-sha256 HASH \
     --expected-instance-id INSTANCE --region REGION
   kiwoom-production-check --rollback-check \
@@ -517,6 +630,7 @@ EOF
 main() {
     local image=""
     local source_sha=""
+    local promotion_attempt_id=""
     local common_hash=""
     local prod_hash=""
     local expected_instance=""
@@ -526,6 +640,7 @@ main() {
         case "$1" in
             --image) image="${2:-}"; shift 2 ;;
             --source-sha) source_sha="${2:-}"; shift 2 ;;
+            --promotion-attempt-id) promotion_attempt_id="${2:-}"; shift 2 ;;
             --compose-sha256) common_hash="${2:-}"; shift 2 ;;
             --compose-prod-sha256) prod_hash="${2:-}"; shift 2 ;;
             --expected-instance-id) expected_instance="${2:-}"; shift 2 ;;
@@ -539,17 +654,30 @@ main() {
     validate_instance_id "${expected_instance}"
     validate_region "${region}"
     if [[ "${rollback}" == true ]]; then
-        [[ -z "${image}${source_sha}${common_hash}${prod_hash}" ]] \
+        [[ -z "${image}${source_sha}${promotion_attempt_id}${common_hash}${prod_hash}" ]] \
             || fail "rollback-check does not accept release arguments"
     else
         validate_release_values "${image}" "${source_sha}" "${common_hash}" "${prod_hash}"
+        validate_promotion_attempt_id "${promotion_attempt_id}"
     fi
     command -v flock >/dev/null || fail "flock is unavailable"
+
+    install -d -m 0700 -- "${STATE_DIR}" "${SOURCE_DIR}" "${ATTEMPT_DIR}"
+    validate_private_state_directories
+    acquire_deployment_lock
+    if [[ "${rollback}" == false ]]; then
+        local reconciled_marker=""
+        if [[ -e "${ATTEMPT_DIR}/${promotion_attempt_id}.json" ]]; then
+            reconciled_marker="$(
+                reconcile_promotion_attempt "${promotion_attempt_id}" "${image}" \
+                    "${source_sha}" "${common_hash}" "${prod_hash}"
+            )" || fail "promotion attempt reconciliation failed"
+            printf '%s\n' "${reconciled_marker}"
+            return 0
+        fi
+    fi
     command -v docker >/dev/null || fail "Docker is unavailable"
     command -v curl >/dev/null || fail "curl is unavailable"
-
-    install -d -m 0700 -- "${STATE_DIR}" "${SOURCE_DIR}"
-    acquire_deployment_lock
     validate_instance_identity "${expected_instance}" "${region}"
     validate_secret_directory
     validate_resources
@@ -575,6 +703,9 @@ main() {
     cleanup_project_artifacts "${image}"
     if [[ "${rollback}" == false ]]; then
         record_success "${image}" "${source_sha}" "${common_hash}" "${prod_hash}"
+        record_promotion_attempt_success \
+            "${promotion_attempt_id}" "${image}" "${source_sha}" \
+            "${common_hash}" "${prod_hash}"
     fi
     printf 'production check passed: source_sha=%s image=%s rollback=%s\n' \
         "${source_sha}" "${image}" "${rollback}"

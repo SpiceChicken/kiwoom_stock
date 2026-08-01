@@ -11,6 +11,11 @@ parameters:
     description: Exact source commit
     allowedPattern: '^[0-9a-f]{40}$'
     interpolationType: ENV_VAR
+  PromotionAttemptId:
+    type: String
+    description: Unique positive GitHub workflow run ID for idempotency
+    allowedPattern: '^[1-9][0-9]{0,19}$'
+    interpolationType: ENV_VAR
   ComposeSha256:
     type: String
     description: compose.yaml SHA256
@@ -45,6 +50,7 @@ mainSteps:
           exec /usr/local/sbin/kiwoom-production-check
           --image "$SSM_ImageDigest"
           --source-sha "$SSM_SourceSha"
+          --promotion-attempt-id "$SSM_PromotionAttemptId"
           --compose-sha256 "$SSM_ComposeSha256"
           --compose-prod-sha256 "$SSM_ComposeProdSha256"
           --expected-instance-id "$SSM_ExpectedInstanceId"
