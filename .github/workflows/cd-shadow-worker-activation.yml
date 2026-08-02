@@ -163,9 +163,76 @@ jobs:
             esac
             sleep 10
           done
-          printf '{"source_sha":"%s","image_digest":"%s","build_run_id":"%s","activation_id":"%s","command_id":"%s","status":"%s","response_code":"%s","side_effects":{"orders":false,"account":false,"revoke":false,"database":true,"notifications":false,"reports":false}}\n' \
-            "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${BUILD_RUN_ID}" "${ACTIVATION_ID}" \
-            "${command_id}" "${status}" "${response_code}" >"${EVIDENCE_FILENAME}"
+          invocation_json="$(aws ssm get-command-invocation \
+            --command-id "${command_id}" \
+            --instance-id "${EC2_INSTANCE_ID}" \
+            --output json)"
+          runtime_evidence="$(python3 - "${invocation_json}" <<'PY'
+          import json
+          import sys
+
+          invocation = json.loads(sys.argv[1])
+          stdout = invocation.get("StandardOutputContent", "")
+          records = []
+          for raw_line in stdout.splitlines():
+              line = raw_line.split("|", 1)[-1].strip()
+              if not line.startswith("{"):
+                  continue
+              try:
+                  candidate = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if candidate.get("mode") == "shadow-once" and "side_effects" in candidate:
+                  records.append(candidate)
+          if not records:
+              raise SystemExit("shadow runtime safe result was not found")
+          result = records[-1]
+          side_effects = result.get("side_effects")
+          required = ("broker_orders", "account", "oauth_revoke", "slack", "gemini", "s3", "reports")
+          if not isinstance(side_effects, dict) or any(
+              not isinstance(side_effects.get(name), bool) for name in required
+          ):
+              raise SystemExit("shadow runtime side-effect evidence is incomplete")
+          evidence = {
+              "runtime_status": result.get("status"),
+              "cycles": result.get("cycles"),
+              "http_attempts": result.get("http_attempts"),
+              "database": bool(result.get("db_identity")),
+              "side_effects": {
+                  "orders": side_effects["broker_orders"],
+                  "account": side_effects["account"],
+                  "revoke": side_effects["oauth_revoke"],
+                  "database": bool(result.get("db_identity")),
+                  "notifications": side_effects["slack"] or side_effects["gemini"],
+                  "reports": side_effects["reports"],
+                  "s3": side_effects["s3"],
+              },
+          }
+          if evidence["runtime_status"] not in ("PASS", "CLOSED"):
+              raise SystemExit("shadow runtime did not produce a bounded result")
+          print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
+          PY
+          )"
+          python3 - "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${BUILD_RUN_ID}" "${ACTIVATION_ID}" \
+            "${command_id}" "${status}" "${response_code}" "${runtime_evidence}" \
+            >"${EVIDENCE_FILENAME}" <<'PY'
+          import json
+          import sys
+
+          source_sha, image_digest, build_run_id, activation_id, command_id, status, response_code, runtime = sys.argv[1:]
+          evidence = json.loads(runtime)
+          payload = {
+              "source_sha": source_sha,
+              "image_digest": image_digest,
+              "build_run_id": build_run_id,
+              "activation_id": activation_id,
+              "command_id": command_id,
+              "status": status,
+              "response_code": response_code,
+              **evidence,
+          }
+          print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+          PY
           [[ "${status}" == Success && "${response_code}" == 0 ]]
 
       - name: Clear OIDC credentials before evidence upload

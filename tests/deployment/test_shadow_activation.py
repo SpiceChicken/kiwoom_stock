@@ -95,7 +95,9 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert "ssm get-parameter" not in text.lower()
     assert "ssm get-parameters" not in text.lower()
     assert "DesiredState=oneshot" in text
-    assert '"orders":false' in text
+    assert "runtime safe result was not found" in text
+    assert '"orders": side_effects["broker_orders"]' in text
+    assert '"database": bool(result.get("db_identity"))' in text
 
 
 def test_shadow_iam_policy_is_document_and_instance_scoped():
