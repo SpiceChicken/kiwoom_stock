@@ -15,30 +15,37 @@ import json
 import logging
 import math
 from pathlib import Path
-import re
-import time
-from typing import Any, Iterator, Mapping, Protocol, Sequence
-from urllib.parse import urlsplit
-
-import requests
-
-from kiwoom_stock.api.auth import Authenticator, Sleeper, UtcClock, _utc_now
-from kiwoom_stock.api.base import BaseClient
+from typing import Any, Iterator, Mapping, Sequence
 from kiwoom_stock.api.exceptions import KiwoomAPIError
-from kiwoom_stock.api.services.market import MarketService
-from kiwoom_stock.application.credentials import KiwoomClientCredentials
+from kiwoom_stock.application.credentials import CredentialProviderError
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.domain.models import MarketRegime
 from kiwoom_stock.infrastructure.kiwoom_credentials import (
+    APP_KEY_FILE,
+    MATERIALIZED_APP_KEY_FILE,
+    MATERIALIZED_SECRET_KEY_FILE,
+    SECRET_KEY_FILE,
     StrictFileCredentialProvider,
     credential_repository_boundary,
 )
+from kiwoom_stock.infrastructure.kiwoom_market_only import (
+    MAX_HTTP_ATTEMPTS,
+    AllowlistedReadOnlySession,
+    CachedMarketGateway,
+    MarketSnapshot,
+    MarketOnlyClient,
+    ReadOnlyBoundaryError as _ReadOnlyBoundaryError,
+    ValidationError,
+    fetch_market_snapshot,
+    validate_market_snapshot,
+)
 from kiwoom_stock.monitoring.analyzer import MarketAnalyzer
 from kiwoom_stock.monitoring.strategy import TradingStrategy
-from kiwoom_stock.settings import KiwoomEndpoint
 
 
-MAX_HTTP_ATTEMPTS = 23
+ReadOnlyBoundaryError = _ReadOnlyBoundaryError
+
+
 REGIME_PROXY_CODE = "069500"
 EXPECTED_FORCE_KEYS = frozenset(
     {
@@ -64,190 +71,6 @@ _DEPENDENCY_LOGGERS = (
     "kiwoom_stock.monitoring.analyzer",
     "kiwoom_stock.monitoring.collector",
 )
-_STRICT_NUMERIC = re.compile(
-    r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$"
-)
-
-
-class ValidationError(RuntimeError):
-    """A safe operational validation failure."""
-
-
-class ReadOnlyBoundaryError(ValidationError):
-    """The shared HTTP session rejected an unapproved attempt."""
-
-
-class ResponseSender(Protocol):
-    def __call__(
-        self,
-        method: str,
-        url: str,
-        **kwargs: Any,
-    ) -> requests.Response: ...
-
-
-class AllowlistedReadOnlySession(requests.Session):
-    """Shared Auth/Base session with an exact URL/API/payload allowlist."""
-
-    def __init__(
-        self,
-        *,
-        stock_code: str,
-        proxy_code: str,
-        max_attempts: int = MAX_HTTP_ATTEMPTS,
-        sender: ResponseSender | None = None,
-    ) -> None:
-        super().__init__()
-        self.trust_env = False
-        self.proxies = {}
-        self._stock_code = stock_code
-        self._proxy_code = proxy_code
-        self._max_attempts = max_attempts
-        self._sender = sender
-        self._attempts = 0
-        self._counts = {
-            "token": 0,
-            "stock_basic": 0,
-            "stock_chart_5m": 0,
-            "proxy_chart_60m": 0,
-            "stock_strength": 0,
-            "stock_orderbook": 0,
-        }
-
-    @property
-    def attempt_count(self) -> int:
-        return self._attempts
-
-    def safe_counts(self) -> dict[str, int]:
-        return dict(self._counts)
-
-    def request(  # type: ignore[override]
-        self,
-        method: str,
-        url: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> requests.Response:
-        self._attempts += 1
-        if self._attempts > self._max_attempts:
-            raise ReadOnlyBoundaryError("HTTP attempt budget exceeded")
-        label = self._classify(method, url, kwargs)
-        self._counts[label] += 1
-        if self._sender is not None:
-            return self._sender(method, url, **kwargs)
-        return super().request(method, url, *args, **kwargs)
-
-    def _classify(
-        self,
-        method: str,
-        url: str,
-        kwargs: Mapping[str, Any],
-    ) -> str:
-        if method.upper() != "POST":
-            raise ReadOnlyBoundaryError("non-POST HTTP attempt rejected")
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != "api.kiwoom.com"
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ReadOnlyBoundaryError("HTTP origin/path rejected")
-        headers = kwargs.get("headers")
-        payload = kwargs.get("json")
-        if (
-            not isinstance(headers, Mapping)
-            or not isinstance(payload, Mapping)
-        ):
-            raise ReadOnlyBoundaryError("HTTP request shape rejected")
-        api_id = headers.get("api-id")
-        pair = (parsed.path, api_id)
-
-        if pair == ("/oauth2/token", "au10001"):
-            if (
-                set(payload) != {"grant_type", "appkey", "secretkey"}
-                or payload.get("grant_type") != "client_credentials"
-            ):
-                raise ReadOnlyBoundaryError("token request shape rejected")
-            return "token"
-        if pair == ("/api/dostk/stkinfo", "ka10001"):
-            self._require_stock_payload(payload)
-            return "stock_basic"
-        if pair == ("/api/dostk/chart", "ka10080"):
-            return self._classify_chart(payload)
-        if pair == ("/api/dostk/mrkcond", "ka10046"):
-            self._require_stock_payload(payload)
-            return "stock_strength"
-        if pair == ("/api/dostk/mrkcond", "ka10004"):
-            self._require_stock_payload(payload)
-            return "stock_orderbook"
-        raise ReadOnlyBoundaryError("API path/id pair rejected")
-
-    def _require_stock_payload(self, payload: Mapping[str, Any]) -> None:
-        if dict(payload) != {"stk_cd": self._stock_code}:
-            raise ReadOnlyBoundaryError("stock payload rejected")
-
-    def _classify_chart(self, payload: Mapping[str, Any]) -> str:
-        expected_tail = {"upd_stkpc_tp": "1"}
-        if (
-            payload.get("stk_cd") == self._stock_code
-            and payload.get("tic_scope") == "5"
-            and payload.get("upd_stkpc_tp") == expected_tail["upd_stkpc_tp"]
-            and set(payload) == {"stk_cd", "tic_scope", "upd_stkpc_tp"}
-        ):
-            return "stock_chart_5m"
-        if (
-            payload.get("stk_cd") == self._proxy_code
-            and payload.get("tic_scope") == "60"
-            and payload.get("upd_stkpc_tp") == expected_tail["upd_stkpc_tp"]
-            and set(payload) == {"stk_cd", "tic_scope", "upd_stkpc_tp"}
-        ):
-            return "proxy_chart_60m"
-        raise ReadOnlyBoundaryError(
-            "only stock 5m and proxy 60m charts are allowed"
-        )
-
-
-class MarketOnlyClient:
-    """Composition root intentionally lacking AccountService/KiwoomClient."""
-
-    def __init__(
-        self,
-        credentials: KiwoomClientCredentials,
-        *,
-        session: AllowlistedReadOnlySession,
-        clock: UtcClock = _utc_now,
-        sleeper: Sleeper = time.sleep,
-    ) -> None:
-        self._session = session
-        self.auth = Authenticator(
-            credentials,
-            KiwoomEndpoint.PROD,
-            session=session,
-            clock=clock,
-            sleeper=sleeper,
-        )
-        self.base = BaseClient(
-            self.auth,
-            KiwoomEndpoint.PROD,
-            session=session,
-            sleeper=sleeper,
-        )
-        self.market = MarketService(self.base)
-        self._closed = False
-
-    def ensure_auth_ready(self) -> None:
-        self.auth.ensure_ready()
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self.auth.close()
-        finally:
-            self.base.close()
-            self._session.close()
 
 
 @dataclass
@@ -271,63 +94,6 @@ class MemoryStateRepository:
 
     def close(self) -> None:
         self.latest.clear()
-
-
-@dataclass
-class CachedMarketGateway:
-    stock_code: str
-    proxy_code: str
-    basic: Mapping[str, Any]
-    stock_chart: Sequence[Mapping[str, Any]]
-    proxy_chart: Sequence[Mapping[str, Any]]
-    strength: Sequence[Mapping[str, Any]]
-    order_book: Mapping[str, Any]
-    calls: list[tuple[str, str, str | None]] = field(default_factory=list)
-
-    def get_top_trading_value(
-        self,
-        market_tp: str = "001",
-    ) -> Sequence[Mapping[str, Any]]:
-        raise ValidationError("top-trading-value access is outside scope")
-
-    def get_stock_basic_info(self, stock_code: str) -> Mapping[str, Any]:
-        self.calls.append(("basic", stock_code, None))
-        return self.basic
-
-    def get_minute_chart(
-        self,
-        stock_code: str,
-        tic: str,
-    ) -> list[Mapping[str, Any]]:
-        self.calls.append(("chart", stock_code, tic))
-        if (stock_code, tic) == (self.stock_code, "5"):
-            return list(self.stock_chart)
-        if (stock_code, tic) == (self.proxy_code, "60"):
-            return list(self.proxy_chart)
-        raise ValidationError("cached chart request rejected")
-
-    def get_tick_strength(
-        self,
-        stock_code: str,
-    ) -> list[Mapping[str, Any]]:
-        self.calls.append(("strength", stock_code, None))
-        return list(self.strength)
-
-    def get_program_trade(self) -> Sequence[Mapping[str, Any]]:
-        raise ValidationError("program-trade access is outside scope")
-
-    def get_foreign_window_total(self) -> Sequence[Mapping[str, Any]]:
-        raise ValidationError("foreign-window access is outside scope")
-
-    def get_order_book(self, stock_code: str) -> Mapping[str, Any]:
-        self.calls.append(("orderbook", stock_code, None))
-        return self.order_book
-
-    def get_recent_ticks(
-        self,
-        stock_code: str,
-    ) -> Sequence[Mapping[str, Any]]:
-        raise ValidationError("recent-tick access is outside scope")
 
 
 class _RedactDependencyErrors(logging.Filter):
@@ -374,24 +140,16 @@ def _fetch_snapshot(
     Mapping[str, Any],
     tuple[str, ...],
 ]:
-    logical_calls: list[str] = []
-    basic = dict(client.market.get_stock_basic_info(stock_code))
-    logical_calls.append("stock_basic")
-    stock_chart = list(client.market.get_minute_chart(stock_code, "5"))
-    logical_calls.append("stock_chart_5m")
-    proxy_chart = list(client.market.get_minute_chart(proxy_code, "60"))
-    logical_calls.append("proxy_chart_60m")
-    strength = list(client.market.get_tick_strength(stock_code))
-    logical_calls.append("stock_strength")
-    order_book = dict(client.market.get_order_book(stock_code))
-    logical_calls.append("stock_orderbook")
+    snapshot = fetch_market_snapshot(
+        client, stock_code=stock_code, proxy_code=proxy_code
+    )
     return (
-        basic,
-        stock_chart,
-        proxy_chart,
-        strength,
-        order_book,
-        tuple(logical_calls),
+        snapshot.basic,
+        snapshot.stock_chart,
+        snapshot.proxy_chart,
+        snapshot.strength,
+        snapshot.order_book,
+        EXPECTED_LOGICAL_SEQUENCE,
     )
 
 
@@ -404,91 +162,6 @@ def _positive_finite(value: Any, name: str) -> float:
     return normalized
 
 
-def _required_finite(
-    record: Mapping[str, Any],
-    field_name: str,
-    location: str,
-) -> float:
-    value = record.get(field_name)
-    if isinstance(value, bool) or not isinstance(
-        value,
-        (int, float, str),
-    ):
-        raise ValidationError(f"snapshot contract failed: {location}")
-    if isinstance(value, str):
-        if _STRICT_NUMERIC.fullmatch(value) is None:
-            raise ValidationError(
-                f"snapshot contract failed: {location}"
-            )
-        value = value.replace(",", "")
-    try:
-        normalized = float(value)
-    except (TypeError, ValueError, OverflowError):
-        raise ValidationError(
-            f"snapshot contract failed: {location}"
-        ) from None
-    if not math.isfinite(normalized):
-        raise ValidationError(f"snapshot contract failed: {location}")
-    return normalized
-
-
-def _require_positive(
-    record: Mapping[str, Any],
-    field_name: str,
-    location: str,
-    *,
-    magnitude: bool = False,
-) -> float:
-    value = _required_finite(record, field_name, location)
-    comparable = abs(value) if magnitude else value
-    if comparable <= 0.0:
-        raise ValidationError(f"snapshot contract failed: {location}")
-    return value
-
-
-def _require_nonnegative(
-    record: Mapping[str, Any],
-    field_name: str,
-    location: str,
-    *,
-    magnitude: bool = False,
-) -> float:
-    value = _required_finite(record, field_name, location)
-    comparable = abs(value) if magnitude else value
-    if comparable < 0.0:
-        raise ValidationError(f"snapshot contract failed: {location}")
-    return value
-
-
-def _validate_chart_contract(
-    chart: Sequence[Mapping[str, Any]],
-    location: str,
-) -> None:
-    if len(chart) < 14:
-        raise ValidationError(f"snapshot contract failed: {location}")
-    for row in chart:
-        if not isinstance(row, Mapping):
-            raise ValidationError(f"snapshot contract failed: {location}")
-        for field_name in (
-            "cur_prc",
-            "open_pric",
-            "high_pric",
-            "low_pric",
-        ):
-            _require_positive(
-                row,
-                field_name,
-                f"{location}.{field_name}",
-                magnitude=True,
-            )
-        _require_nonnegative(
-            row,
-            "trde_qty",
-            f"{location}.trde_qty",
-            magnitude=True,
-        )
-
-
 def _validate_snapshot_contract(
     *,
     basic: Mapping[str, Any],
@@ -497,50 +170,9 @@ def _validate_snapshot_contract(
     strength: Sequence[Mapping[str, Any]],
     order_book: Mapping[str, Any],
 ) -> None:
-    """Reject incomplete raw inputs before legacy analyzer fallbacks run.
-
-    Basic directional fields must have finite positive magnitude, market cap
-    and strength must be finite and strictly positive. Kiwoom chart prices may
-    carry a direction sign, so their absolute values must be positive; chart
-    volume must have finite nonnegative magnitude. Order-book totals must be
-    finite and nonnegative, with at least one positive side.
-    """
-
-    for field_name in ("cur_prc", "trde_pre", "trde_qty"):
-        _require_positive(
-            basic,
-            field_name,
-            f"basic.{field_name}",
-            magnitude=True,
-        )
-    _require_positive(basic, "mac", "basic.mac")
-    _validate_chart_contract(stock_chart, "stock_chart")
-    _validate_chart_contract(proxy_chart, "proxy_chart")
-
-    if len(strength) < 5:
-        raise ValidationError("snapshot contract failed: strength")
-    for index in (0, 4):
-        row = strength[index]
-        if not isinstance(row, Mapping):
-            raise ValidationError("snapshot contract failed: strength")
-        _require_positive(
-            row,
-            "cntr_str",
-            f"strength.row{index}.cntr_str",
-        )
-
-    sell_total = _require_nonnegative(
-        order_book,
-        "tot_sel_req",
-        "orderbook.tot_sel_req",
+    validate_market_snapshot(
+        MarketSnapshot(basic, stock_chart, proxy_chart, strength, order_book)
     )
-    buy_total = _require_nonnegative(
-        order_book,
-        "tot_buy_req",
-        "orderbook.tot_buy_req",
-    )
-    if sell_total <= 0.0 and buy_total <= 0.0:
-        raise ValidationError("snapshot contract failed: orderbook.totals")
 
 
 def _finite_forces(value: Mapping[str, Any]) -> dict[str, float]:
@@ -615,13 +247,9 @@ def run_with_client(
             order_book=order_book,
         )
         gateway = CachedMarketGateway(
-            stock_code=stock_code,
-            proxy_code=proxy_code,
-            basic=basic,
-            stock_chart=stock_chart,
-            proxy_chart=proxy_chart,
-            strength=strength,
-            order_book=order_book,
+            stock_code,
+            proxy_code,
+            MarketSnapshot(basic, stock_chart, proxy_chart, strength, order_book),
         )
         tracker = PhysicalStateTracker(
             repository,
@@ -752,9 +380,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValidationError(
             "explicit prod-read-only confirmation is required"
         )
+    file_names = _credential_file_names(args.credentials_dir)
     provider = StrictFileCredentialProvider(
         args.credentials_dir,
         repository_root=credential_repository_boundary(),
+        file_names=file_names,
     )
     credentials = provider.load()
     session = AllowlistedReadOnlySession(
@@ -766,6 +396,34 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         client,
         stock_code=args.stock_code,
         proxy_code=REGIME_PROXY_CODE,
+    )
+
+
+def _credential_file_names(credentials_dir: Path) -> tuple[str, str]:
+    """Accept one complete approved layout, never a mixed pair."""
+
+    canonical = (
+        credentials_dir / APP_KEY_FILE,
+        credentials_dir / SECRET_KEY_FILE,
+    )
+    materialized = (
+        credentials_dir / MATERIALIZED_APP_KEY_FILE,
+        credentials_dir / MATERIALIZED_SECRET_KEY_FILE,
+    )
+    canonical_present = tuple(path.is_file() for path in canonical)
+    materialized_present = tuple(path.is_file() for path in materialized)
+    if canonical_present == (True, True) and materialized_present == (
+        False,
+        False,
+    ):
+        return (APP_KEY_FILE, SECRET_KEY_FILE)
+    if materialized_present == (True, True) and canonical_present == (
+        False,
+        False,
+    ):
+        return (MATERIALIZED_APP_KEY_FILE, MATERIALIZED_SECRET_KEY_FILE)
+    raise CredentialProviderError(
+        "credential directory has no single approved file pair"
     )
 
 

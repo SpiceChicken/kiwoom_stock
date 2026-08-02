@@ -13,6 +13,8 @@ from kiwoom_stock.application.credentials import (
 )
 from kiwoom_stock.infrastructure.kiwoom_credentials import (
     APP_KEY_FILE,
+    MATERIALIZED_APP_KEY_FILE,
+    MATERIALIZED_SECRET_KEY_FILE,
     MAX_CREDENTIAL_BYTES,
     SECRET_KEY_FILE,
     StrictFileCredentialProvider,
@@ -60,6 +62,41 @@ def test_strict_provider_reads_single_line_files_once_from_external_directory(
     assert credentials.app_key.reveal_for_auth() == "synthetic-app-key"
     assert credentials.secret_key.reveal_for_auth() == "synthetic-secret-key"
     assert "synthetic" not in repr(credentials)
+
+
+def test_strict_provider_reads_approved_materialized_file_names(tmp_path):
+    credentials_dir = tmp_path / "credentials"
+    credentials_dir.mkdir(mode=0o700)
+    for name, value in (
+        (MATERIALIZED_APP_KEY_FILE, "synthetic-app-key"),
+        (MATERIALIZED_SECRET_KEY_FILE, "synthetic-secret-key"),
+    ):
+        path = credentials_dir / name
+        path.write_text(value + "\n", encoding="utf-8")
+        path.chmod(0o400)
+
+    credentials = StrictFileCredentialProvider(
+        credentials_dir,
+        repository_root=Path(__file__).resolve().parents[1],
+        file_names=(
+            MATERIALIZED_APP_KEY_FILE,
+            MATERIALIZED_SECRET_KEY_FILE,
+        ),
+    ).load()
+
+    assert credentials.app_key.reveal_for_auth() == "synthetic-app-key"
+    assert credentials.secret_key.reveal_for_auth() == "synthetic-secret-key"
+
+
+def test_strict_provider_rejects_unapproved_or_mixed_file_name_pairs(tmp_path):
+    credentials_dir = _credential_dir(tmp_path)
+
+    with pytest.raises(CredentialProviderError, match="file names"):
+        StrictFileCredentialProvider(
+            credentials_dir,
+            repository_root=Path(__file__).resolve().parents[1],
+            file_names=(APP_KEY_FILE, MATERIALIZED_SECRET_KEY_FILE),
+        )
 
 
 @pytest.mark.parametrize(

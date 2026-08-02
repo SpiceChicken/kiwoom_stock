@@ -77,11 +77,12 @@ def test_docker_test_stage_has_complete_minimal_full_suite_manifest():
         "COPY Dockerfile .dockerignore .gitleaks.toml ./",
         "COPY docs/configuration.md ./docs/configuration.md",
         "COPY docs/operations ./docs/operations",
-        "COPY compose.yaml compose.dev.yaml compose.mock.yaml compose.prod.yaml ./",
+        "COPY compose.yaml compose.dev.yaml compose.mock.yaml compose.prod.yaml compose.shadow.yaml ./",
         (
             "COPY .github/workflows/ci.yml "
             ".github/workflows/cd-production-check.yml "
             ".github/workflows/cd-production-promotion.yml "
+            ".github/workflows/cd-shadow-worker-activation.yml "
             "./.github/workflows/"
         ),
     ]
@@ -128,12 +129,14 @@ def test_dockerignore_only_reincludes_tested_workflows_from_github():
         "!.github/workflows/ci.yml",
         "!.github/workflows/cd-production-check.yml",
         "!.github/workflows/cd-production-promotion.yml",
+        "!.github/workflows/cd-shadow-worker-activation.yml",
     ]
     assert negation_lines == [
         "!.github/workflows/",
         "!.github/workflows/ci.yml",
         "!.github/workflows/cd-production-check.yml",
         "!.github/workflows/cd-production-promotion.yml",
+        "!.github/workflows/cd-shadow-worker-activation.yml",
         "!.env.example",
         "!.env.*.example",
     ]
@@ -208,9 +211,11 @@ def test_test_image_manifest_covers_repository_assets_and_host_only_compose():
         COMPOSE_DEV,
         COMPOSE_MOCK,
         COMPOSE_PROD,
+        Path("compose.shadow.yaml"),
         Path(".github/workflows/ci.yml"),
         Path(".github/workflows/cd-production-check.yml"),
         Path(".github/workflows/cd-production-promotion.yml"),
+        Path(".github/workflows/cd-shadow-worker-activation.yml"),
     ]
     assert all(path.exists() for path in required_paths)
 

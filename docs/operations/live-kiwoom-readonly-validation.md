@@ -10,17 +10,21 @@ It is not an activation or order-capability test.
 
 - Keep every worker and order capability `DISARMED`.
 - Use a repository-external credential directory accepted by
-  `StrictFileCredentialProvider`. Never pass key material as command-line
-  arguments or environment variables.
+  `StrictFileCredentialProvider`. The validator accepts exactly one complete
+  pair of files: `KIWOOM_APP_KEY`/`KIWOOM_SECRET_KEY` or the EC2 materializer
+  layout `app-key`/`secret-key`. Mixed, duplicate, or incomplete pairs fail
+  closed. Never pass key material as command-line arguments or environment
+  variables.
 - Obtain the operational approval required for production OAuth and market
   reads. The confirmation flag records operator intent; it does not grant
   approval.
 - Confirm the target stock code. The fixed regime proxy is KODEX 200
   (`069500`).
 
-No production, AWS, secret-provider, or Kiwoom call was made while building or
-testing this command. Its first approved live execution remains an operational
-validation step.
+The approved read-only execution record for the current EC2 host is tracked in
+[`E2E-20260802-shadow-live-run.md`](../codex/validator/E2E-20260802-shadow-live-run.md).
+It performed market reads only; no order, account, revoke, database,
+notification, report, or deployment side effect was started.
 
 ## Run
 

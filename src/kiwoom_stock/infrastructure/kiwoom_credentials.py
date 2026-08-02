@@ -16,6 +16,8 @@ from kiwoom_stock.application.credentials import (
 
 APP_KEY_FILE: Final = "KIWOOM_APP_KEY"
 SECRET_KEY_FILE: Final = "KIWOOM_SECRET_KEY"
+MATERIALIZED_APP_KEY_FILE: Final = "app-key"
+MATERIALIZED_SECRET_KEY_FILE: Final = "secret-key"
 MAX_CREDENTIAL_BYTES: Final = 8 * 1024
 
 
@@ -42,11 +44,20 @@ class StrictFileCredentialProvider:
         credentials_dir: Path,
         *,
         repository_root: Path | None = None,
+        file_names: tuple[str, str] = (APP_KEY_FILE, SECRET_KEY_FILE),
     ) -> None:
         if os.name != "posix":
             raise CredentialProviderError(
                 "strict file credentials require a POSIX runtime"
             )
+        if file_names not in (
+            (APP_KEY_FILE, SECRET_KEY_FILE),
+            (MATERIALIZED_APP_KEY_FILE, MATERIALIZED_SECRET_KEY_FILE),
+        ):
+            raise CredentialProviderError(
+                "credential file names are not approved"
+            )
+        self._file_names = file_names
         if not credentials_dir.is_absolute():
             raise CredentialProviderError("credential directory must be absolute")
         required_flags = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
@@ -119,35 +130,36 @@ class StrictFileCredentialProvider:
                 raise CredentialProviderError(
                     "credential directory identity changed before load"
                 )
-            app_fd = self._open_file(directory_fd, APP_KEY_FILE)
+            app_name, secret_name = self._file_names
+            app_fd = self._open_file(directory_fd, app_name)
             try:
-                secret_fd = self._open_file(directory_fd, SECRET_KEY_FILE)
+                secret_fd = self._open_file(directory_fd, secret_name)
                 try:
                     app_generation = self._initial_file_generation(
                         app_fd,
-                        APP_KEY_FILE,
+                        app_name,
                     )
                     secret_generation = self._initial_file_generation(
                         secret_fd,
-                        SECRET_KEY_FILE,
+                        secret_name,
                     )
                     app_key = self._read_open_file(
                         directory_fd,
                         app_fd,
-                        APP_KEY_FILE,
+                        app_name,
                         app_generation,
                     )
                     secret_key = self._read_open_file(
                         directory_fd,
                         secret_fd,
-                        SECRET_KEY_FILE,
+                        secret_name,
                         secret_generation,
                     )
                     self._validate_file_pair_generation(
                         directory_fd,
                         (
-                            (app_fd, APP_KEY_FILE, app_generation),
-                            (secret_fd, SECRET_KEY_FILE, secret_generation),
+                            (app_fd, app_name, app_generation),
+                            (secret_fd, secret_name, secret_generation),
                         ),
                     )
                     try:

@@ -1,0 +1,61 @@
+name: kiwoom-stock-shadow
+
+services:
+  app:
+    image: ${KIWOOM_IMAGE:?set the exact immutable runtime image digest}
+    container_name: kiwoom-shadow-once
+    init: true
+    # Root is bootstrap-only: runtime_entrypoint stages secrets, then drops to 10001.
+    user: "0:0"
+    restart: "no"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp
+      - /run/secrets:mode=0700
+      - /run/kiwoom-secrets:mode=0700
+    environment:
+      KIWOOM_API_MODE: prod
+      KIWOOM_APP_ENV: prod
+      KIWOOM_EXECUTION_MODE: shadow-once
+      KIWOOM_PROCESS_NAME: kiwoom-shadow-once
+      KIWOOM_IMAGE_REF: ${KIWOOM_IMAGE:?set the exact immutable runtime image digest}
+      KIWOOM_IMAGE_DIGEST: ${KIWOOM_IMAGE_DIGEST:?set the exact image digest}
+      KIWOOM_CREDENTIALS_DIR: /run/secrets
+      KIWOOM_DB_PATH: /var/lib/kiwoom/shadow-trades.db
+      KIWOOM_REQUIRE_SHADOW_VOLUME: "1"
+    secrets:
+      - source: kiwoom_shadow_app_key
+        target: KIWOOM_APP_KEY
+      - source: kiwoom_shadow_secret_key
+        target: KIWOOM_SECRET_KEY
+    volumes:
+      - kiwoom-shadow-data:/var/lib/kiwoom
+    command:
+      - python
+      - -m
+      - kiwoom_stock
+      - shadow-once
+      - --source-sha
+      - ${KIWOOM_SOURCE_SHA:?set the exact source SHA}
+      - --image-digest
+      - ${KIWOOM_IMAGE_DIGEST:?set the exact image digest}
+      - --activation-id
+      - ${KIWOOM_ACTIVATION_ID:?set a unique activation ID}
+
+volumes:
+  kiwoom-shadow-data:
+
+secrets:
+  kiwoom_shadow_app_key:
+    file: ${KIWOOM_SHADOW_APP_KEY_FILE:?set an absolute external app-key file}
+  kiwoom_shadow_secret_key:
+    file: ${KIWOOM_SHADOW_SECRET_KEY_FILE:?set an absolute external secret-key file}
