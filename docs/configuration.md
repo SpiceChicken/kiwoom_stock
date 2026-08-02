@@ -45,6 +45,9 @@ The following table is checked against the machine-readable `SETTING_SPECS` regi
 | Name | Type | Required | Default | Consumer | Sensitive | Environments | Validation |
 |---|---|---|---|---|---:|---|---|
 | `KIWOOM_EXECUTION_MODE` | enum | no | `check-only` | execution policy | no | all | `check-only` or `shadow-once`; live unavailable |
+| `KIWOOM_IMAGE_REF` | OCI image digest | shadow-once | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
+| `KIWOOM_IMAGE_DIGEST` | OCI image digest | shadow-once | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
+| `KIWOOM_REQUIRE_SHADOW_VOLUME` | strict boolean | shadow-once | none | shadow volume attestation | no | prod/prod-like | exactly `1` when required |
 | `KIWOOM_API_MODE` | enum | no | `disabled` | runtime composition | no | all | `disabled`, `mock`, or `prod` |
 | `KIWOOM_PROCESS_NAME` | string | yes | none | runtime lifecycle | no | all | non-empty |
 | `KIWOOM_APP_ENV` | enum | no | `local` | retention policy | no | all | allowed environment |
