@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional
 from datetime import datetime
 
 from kiwoom_stock.application.ports import MarketDataGateway
@@ -13,11 +13,23 @@ class StockManager:
     [Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리
     
     """
-    def __init__(self, market_gateway: MarketDataGateway, db, filter_config: Dict):
+    def __init__(
+        self,
+        market_gateway: MarketDataGateway,
+        db,
+        filter_config: Dict,
+        *,
+        clock: Optional[Callable[[], datetime]] = None,
+        paper_transition_guard: Callable[[], None] = lambda: None,
+        strict_paper_errors: bool = False,
+    ):
         self.market_gateway = market_gateway
         self.db = db
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
         self.max_stocks = filter_config.get("max_stocks", 50)
+        self._clock = clock
+        self._paper_transition_guard = paper_transition_guard
+        self._strict_paper_errors = strict_paper_errors
         
         self.stocks: List[str] = []
         self.stock_names: Dict[str, str] = {}
@@ -97,18 +109,16 @@ class StockManager:
         unrealized_pnl = sum(pos.calc_profit_rate for pos in self.active_positions.values())
         return realized_pnl + unrealized_pnl
 
-    def process_buy_order(self, verdict: Dict) -> tuple[bool, Optional[Dict]]:
+    def apply_paper_buy(self, verdict: Dict) -> tuple[bool, Optional[Dict]]:
         """
-        [Manager] 실제 매수 주문 집행 및 데이터 처리 전담
+        [Manager] 브로커 주문 없이 paper 매수 상태만 기록합니다.
 
         """
         stock_code = verdict['stock_code']
         forces = verdict.get('forces', {})
         
         try:
-            # 1. 실제 키움증권/API 주문 전송 (TBD)
-
-            # 2. 최종 buy_data 구성
+            # 1. 최종 paper buy_data 구성
             buy_data = {
                 "stock_code": stock_code,
                 "stock_name": self.stock_names[stock_code],
@@ -123,11 +133,12 @@ class StockManager:
                 "impulse": forces.get('impulse', 0.0),
                 "net_force": forces.get('net_force', 0.0),
 
-                "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "buy_time": (self._clock or datetime.now)().strftime('%Y-%m-%d %H:%M:%S'),
                 "buy_regime": verdict.get('regime')
             }
             
-            # 3. DB 기록 및 내부 포지션 업데이트
+            # 2. 격리된 paper DB 기록 및 내부 포지션 업데이트
+            self._paper_transition_guard()
             buy_data['id'] = self.db.record_buy(buy_data)
             self.active_positions[stock_code] = Position(**buy_data)
             
@@ -135,23 +146,24 @@ class StockManager:
 
         except Exception as e:
             logger.error(f"Manager order processing error: {e}")
+            if self._strict_paper_errors:
+                raise
             return False, None
 
-    def process_sell_order(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Position]]:
+    def apply_paper_sell(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Position]]:
         """
-        [Manager] 실제 매도 주문 집행 및 데이터 처리 전담
+        [Manager] 브로커 주문 없이 paper 매도 상태만 기록합니다.
         """
         stock_code = verdict['stock_code']
         
         try:
-            # 1. 실제 키움증권/API 주문 전송 (TBD)
-
-            # 2. DB 기록용 데이터 생성
+            # 1. paper DB 기록용 데이터 생성
             pos = self.active_positions[stock_code]
             pos.sell_price = verdict['price']
             pos.sell_reason = reason
 
-            # 3. DB 기록 및 내부 포지션 업데이트
+            # 2. 격리된 paper DB 기록 및 내부 포지션 업데이트
+            self._paper_transition_guard()
             self.db.record_sell(pos)
             del self.active_positions[pos.stock_code]
             
@@ -159,4 +171,16 @@ class StockManager:
 
         except Exception as e:
             logger.error(f"Manager order processing error: {e}")
+            if self._strict_paper_errors:
+                raise
             return False, None
+
+    def process_buy_order(self, verdict: Dict) -> tuple[bool, Optional[Dict]]:
+        """Legacy paper-only compatibility wrapper; never submit a broker order here."""
+
+        return self.apply_paper_buy(verdict)
+
+    def process_sell_order(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Position]]:
+        """Legacy paper-only compatibility wrapper; never submit a broker order here."""
+
+        return self.apply_paper_sell(verdict, reason)

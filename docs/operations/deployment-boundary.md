@@ -26,8 +26,9 @@ or invoke Slack, S3, or Gemini.
    original run, build job, unique artifact, exact source Compose bytes, and
    anonymous public image contract before it sends one bounded SSM command and
    polls it to completion. That command runs only `--check-config`.
-3. **Shadow worker activation** remains RED until the process, shutdown, calendar,
-   database, and side-effect boundaries below have real-path evidence.
+3. **Shadow worker activation** is a separate protected, one-shot command plane.
+   The first real run is still pending immutable-image publication and host
+   rollout; it does not grant order or account capability.
 4. **Live trading activation** is a separate, explicit approval. No workflow in
    this repository grants it.
 
@@ -149,6 +150,29 @@ Completion requires evidence tied to one source SHA and one image digest:
 Missing package visibility, GitHub Environment approval, OIDC configuration, IAM
 application, SSM execution, or host evidence is `BLOCKED`, not a presumed success.
 See [GitHub-to-EC2 container deployment](github-ec2-container-deployment.md).
+
+## Shadow one-shot activation boundary
+
+The shadow activation artifacts are deliberately separate from the check-only
+promotion path:
+
+- `.github/workflows/cd-shadow-worker-activation.yml` accepts only an exact
+  source SHA, public GHCR digest, successful candidate run ID, shadow Compose
+  hash, and a bounded activation ID;
+- `KiwoomStock-ShadowWorker` accepts only `oneshot` or `stop` and invokes the
+  root-owned `/usr/local/sbin/kiwoom-shadow-worker` on the fixed EC2 instance;
+- `deploy/ec2/shadow_worker_control.sh` verifies instance identity, root-owned
+  `0400` credential files, image revision/user/entrypoint, and the exact
+  `compose.shadow.yaml` hash before running one container;
+- the shadow named volume is never removed by the executor, and the command
+  reports only redacted tuple/status evidence.
+
+The protected `production-shadow` Environment must provide the distinct
+`KIWOOM_AWS_SHADOW_ROLE_ARN` variable. The role policy is limited to the custom
+SSM document, the fixed instance, and `ssm:GetCommandInvocation`; it does not
+read Kiwoom SecureString parameters. Registering that document, role, host
+script, and Environment is an external change and must be read back before the
+first activation.
 
 ## Startup and shadow-worker first-activation gate
 

@@ -4,11 +4,11 @@
 - 원칙: '관심도'에 따라 종목별 검사 주기(Interval)를 다르게 배정하여 API 제한을 완벽 방어한다.
 """
 
-import sys
 import logging
 import threading
 import time as time_mod
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -21,13 +21,16 @@ from kiwoom_stock.application.session import (
 from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
 from .manager import StockManager
-from .notifier import Notifier
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.infrastructure.physical_state_repository import AsyncPhysicalStateRepository
 from kiwoom_stock.monitoring.manager import Position
 
 logger = logging.getLogger(__name__)
+
+# Legacy tests and callers may replace this constructor seam. Keeping the name
+# does not import the optional Slack/Gemini/reporting graph for shadow startup.
+Notifier: Optional[Any] = None
 
 
 class TradingEngineLifecycleError(RuntimeError):
@@ -44,6 +47,11 @@ class TradingEngine:
         *,
         ledger: Optional[PaperTradeLedger] = None,
         physical_state_repository: Optional[PhysicalStateRepository] = None,
+        notifier: Optional[Any] = None,
+        paper_transition_guard: Optional[Callable[[], None]] = None,
+        wall_clock: Callable[[], datetime] = datetime.now,
+        stop_event: Optional[threading.Event] = None,
+        deadline_remaining: Optional[Callable[[], float]] = None,
     ):
         self.config = config
         self._lifecycle_lock = threading.Lock()
@@ -68,6 +76,11 @@ class TradingEngine:
         self._last_check_time: Dict[str, float] = {}
         self._last_global_update = 0.0  # 시황/조건검색 업데이트용 타이머
         self._terminal_result: Optional[TradingSessionResult] = None
+        self._paper_only = paper_transition_guard is not None
+        self._stop_event = stop_event
+        self._deadline_remaining = deadline_remaining
+        self._shadow_cycle_lock = threading.Lock()
+        self._shadow_cycle_state = "not-started"
 
         if (ledger is None) != (physical_state_repository is None):
             raise ValueError(
@@ -98,19 +111,36 @@ class TradingEngine:
 
         try:
             # [Modules] 기능별 모듈 초기화
-            self.state_tracker = PhysicalStateTracker(self.physical_state_repository)
+            self.state_tracker = (
+                PhysicalStateTracker(self.physical_state_repository, clock=wall_clock)
+                if self._paper_only
+                else PhysicalStateTracker(self.physical_state_repository)
+            )
             self.analyzer = MarketAnalyzer(
                 client.market,
                 config.get("market", {}),
                 self.state_tracker,
             )
-            self.strategy = TradingStrategy(config.get("strategy", {}))
-            self.stock_mgr = StockManager(
-                client.market,
-                self.db,
-                config.get("filters", {}),
+            self.strategy = (
+                TradingStrategy(config.get("strategy", {}), clock=wall_clock)
+                if self._paper_only
+                else TradingStrategy(config.get("strategy", {}))
             )
-            self.notifier = Notifier(self.stock_mgr.stock_names, config)
+            manager_kwargs: Dict[str, Any] = {}
+            if paper_transition_guard is not None:
+                manager_kwargs["paper_transition_guard"] = paper_transition_guard
+                manager_kwargs["clock"] = wall_clock
+                manager_kwargs["strict_paper_errors"] = True
+            self.stock_mgr = StockManager(
+                client.market, self.db, config.get("filters", {}), **manager_kwargs
+            )
+            if notifier is not None:
+                self.notifier = notifier
+            else:
+                notifier_factory: Any = Notifier
+                if notifier_factory is None:
+                    from .notifier import Notifier as notifier_factory
+                self.notifier = notifier_factory(self.stock_mgr.stock_names, config)
             self.executor = ThreadPoolExecutor(max_workers=config.get("max_workers", 8))
         except BaseException:
             if fallback_owned:
@@ -121,8 +151,76 @@ class TradingEngine:
             raise
         logger.info("Trading Engine Initialized with Dynamic Polling.")
 
+    def run_shadow_cycle(self, stock_code: str) -> Dict[str, Any]:
+        """Atomically consume the sole shadow calculation capability."""
+
+        if not self._paper_only:
+            raise RuntimeError("shadow cycle requires the paper-only engine")
+        with self._shadow_cycle_lock:
+            if self._shadow_cycle_state != "not-started":
+                raise RuntimeError("shadow engine cycle capability is already consumed")
+            self._shadow_cycle_state = "running"
+        try:
+            self._checkpoint_shadow_lifecycle()
+            self._assert_open_for_work()
+            if stock_code != "005930":
+                raise ValueError("shadow cycle target must be 005930")
+            self.analyzer.update_regime()
+            self._checkpoint_shadow_lifecycle()
+            if self.analyzer.market_regime.name == "UNKNOWN":
+                raise RuntimeError("shadow market regime remained UNKNOWN")
+            self.strategy.update_context(self.analyzer.market_regime)
+            self._checkpoint_shadow_lifecycle()
+            self.stock_mgr.stocks = [stock_code]
+            self.stock_mgr.stock_names.setdefault(stock_code, stock_code)
+            self._prepare_cycle([stock_code])
+            self._checkpoint_shadow_lifecycle()
+            metrics = self.analyzer.supply_cache.get(stock_code)
+            if metrics is None:
+                raise RuntimeError("shadow market snapshot did not produce supply metrics")
+            required_forces = {
+                "thrust", "gravity", "drag", "magnetic", "jerk", "impulse",
+                "net_force", "current_velocity", "volume_drop_ratio",
+            }
+            if metrics.cur_prc <= 0.0 or set(getattr(metrics, "forces", {})) != required_forces:
+                raise RuntimeError("shadow market calculation contract failed")
+            verdicts = self._evaluate_stocks([stock_code])
+            self._checkpoint_shadow_lifecycle()
+            if len(verdicts) != 1:
+                raise RuntimeError("shadow strategy evaluation did not produce one verdict")
+            self._process_decisions(verdicts)
+            self._checkpoint_shadow_lifecycle()
+            self.notifier.flush_status(self.analyzer.market_regime.value)
+            self._checkpoint_shadow_lifecycle()
+            return {
+                "cycles": 1,
+                "target_count": 1,
+                "verdict_count": len(verdicts),
+                "market_regime": self.analyzer.market_regime.value,
+            }
+        finally:
+            with self._shadow_cycle_lock:
+                self._shadow_cycle_state = "terminal"
+
+    def _checkpoint_shadow_lifecycle(self) -> None:
+        """Abort cooperative shadow work before another side-effect boundary."""
+
+        stop_event = getattr(self, "_stop_event", None)
+        deadline_remaining = getattr(self, "_deadline_remaining", None)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("shadow stop requested")
+        if deadline_remaining is not None:
+            try:
+                deadline_remaining()
+            except Exception as error:
+                raise RuntimeError("shadow shutdown deadline exceeded") from error
+
     def run(self) -> TradingSessionResult:
         """[Main Loop] 무한 루프: 분석 -> 판단 -> 행동"""
+        if getattr(self, "_paper_only", False):
+            raise RuntimeError(
+                "paper-only engine exposes run_shadow_cycle only"
+            )
         terminal_result = cast(
             Optional[TradingSessionResult], getattr(self, "_terminal_result", None)
         )
@@ -259,9 +357,21 @@ class TradingEngine:
             try:
                 if not getattr(self, "_executor_close_complete", False):
                     try:
+                        stop_event = getattr(self, "_stop_event", None)
+                        deadline_remaining = getattr(
+                            self, "_deadline_remaining", None
+                        )
+                        bounded_stop = bool(
+                            stop_event is not None and stop_event.is_set()
+                        )
+                        if not bounded_stop and deadline_remaining is not None:
+                            try:
+                                deadline_remaining()
+                            except Exception:
+                                bounded_stop = True
                         self.executor.shutdown(
-                            wait=True,
-                            cancel_futures=False,
+                            wait=not bounded_stop,
+                            cancel_futures=bounded_stop,
                         )
                     except BaseException as error:
                         record_failure("evaluation executor", error)
@@ -391,40 +501,56 @@ class TradingEngine:
 
     def _prepare_cycle(self, targets: List[str]):
         """[Pre-process] 선택된 타겟(Fast or Slow)의 최신 API 데이터만 선별 수집"""
+        self._checkpoint_shadow_lifecycle()
         self._assert_open_for_work()
         for stock_code in targets:
+            self._checkpoint_shadow_lifecycle()
             if stock_code not in self.state_tracker._l1_cache:
                 self.state_tracker.recover_state_from_crash(stock_code)
                 
         # [최적화] 전체 50개가 아닌 due_targets(예: 3개)에 대해서만 API 호출
         self.analyzer.update_priority_supply(targets)
+        self._checkpoint_shadow_lifecycle()
         self.notifier.start_status_session()
 
     def _evaluate_stocks(self, targets: List[str]) -> List[Dict]:
         """[Parallel] 워커 스레드를 통한 전략 평가"""
+        self._checkpoint_shadow_lifecycle()
         self._assert_open_for_work()
         results = []
         futures = {self.executor.submit(self._worker_task, code): code for code in targets}
         
         for f in as_completed(futures):
             try:
+                self._checkpoint_shadow_lifecycle()
                 if res := f.result(): results.append(res)
             except Exception as e:
+                stop_event = getattr(self, "_stop_event", None)
+                if stop_event is not None and stop_event.is_set():
+                    raise
+                try:
+                    self._checkpoint_shadow_lifecycle()
+                except RuntimeError:
+                    raise
                 logger.error(f"Eval Error ({futures[f]}): {e}")
+        self._checkpoint_shadow_lifecycle()
         return results
 
     def _worker_task(self, code: str) -> Optional[Dict]:
         """[Worker] 단위 작업: 데이터 조회 + 전략 계산"""
+        self._checkpoint_shadow_lifecycle()
         metrics = self.analyzer.supply_cache.get(code)
         if not metrics: return None
         
         if verdict := self.strategy.evaluate(metrics):
+            self._checkpoint_shadow_lifecycle()
             return verdict
         return None
 
     def _process_decisions(self, verdicts: List[Dict]):
         """[Decision] 전략 결과를 바탕으로 매수/매도/관망 결정 (Orchestrator 역할)"""
         for verdict in verdicts:
+            self._checkpoint_shadow_lifecycle()
             self._log_status(verdict)
             stock_code = verdict['stock_code']
 
@@ -437,13 +563,43 @@ class TradingEngine:
                 exit_reason = self.strategy.get_exit_reason(pos, verdict['price'], forces)
                 
                 if exit_reason:
-                    self._execute_order('SELL', verdict, exit_reason)
+                    if getattr(self, "_paper_only", False):
+                        self._execute_paper_transition('SELL', verdict, exit_reason)
+                    else:
+                        self._execute_order('SELL', verdict, exit_reason)
                     if hasattr(self.strategy, '_kinetic_state'):
                         self.strategy._kinetic_state.pop(stock_code, None)
             
             # 2. 매수(진입) 검사 - 미보유 시
             elif self._should_enter(verdict):
-                self._execute_order('BUY', verdict)
+                if getattr(self, "_paper_only", False):
+                    self._execute_paper_transition('BUY', verdict)
+                else:
+                    self._execute_order('BUY', verdict)
+
+    def _execute_paper_transition(
+        self,
+        side: str,
+        verdict: Dict,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Apply a local shadow-paper transition with no broker capability."""
+
+        code = verdict['stock_code']
+        success = False
+        data: Union[Dict, Position, None] = None
+        if side == 'BUY':
+            success, data = self.stock_mgr.apply_paper_buy(verdict)
+            if success and isinstance(data, dict):
+                self.notifier.notify_buy(data)
+        elif side == 'SELL':
+            success, data = self.stock_mgr.apply_paper_sell(
+                verdict, reason if reason else "Unknown"
+            )
+            if success and isinstance(data, Position):
+                self.notifier.notify_sell(data)
+        if not success:
+            raise RuntimeError(f"shadow paper {side} transition failed: {code}")
 
     def _should_enter(self, verdict: Dict) -> bool:
         """[Filter] 진입 조건 종합 검증 (시간, 중복, 신호)"""

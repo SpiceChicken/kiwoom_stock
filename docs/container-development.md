@@ -90,6 +90,22 @@ must enforce that boundary before activation. Until such a validator and an
 actual UID/GID/mode/readability smoke exist, mock/prod activation is BLOCKED and
 must remain DISARMED.
 
+## Bounded shadow-once compose
+
+`compose.shadow.yaml` is a separate, restart-disabled contract for the fixed one-cycle shadow worker. It uses the
+`kiwoom-shadow-data` named volume, `/var/lib/kiwoom/shadow-trades.db`, a read-only root filesystem, 30-second stop
+grace, and external secret files. Compose starts the image as root only for `runtime_entrypoint.py` to copy the two
+file secrets into `/run/kiwoom-secrets` and drop to runtime UID/GID `10001:10001`; the application itself is never
+run with root privileges. The source SHA, image digest, and activation ID are required non-secret tuple inputs. It
+is a contract/preflight file only until a separately approved validator proves the mounted volume permissions and
+real market-read path; it must not be scaled or started with the production-check override.
+
+The worker translates SIGTERM/SIGINT into a cooperative stop event. Checkpoints exist before and after credential,
+HTTP, snapshot, calculation, and local persistence boundaries, with a monotonic 30-second shutdown budget. An
+already in-flight HTTP request can still consume the transport's remaining, clamped timeout (the configured market
+upper bound is `(5, 30)` seconds); the post-response checkpoint then fails closed and the normal resource owner
+performs cleanup.
+
 Do not submit credential values through repository files, `.env`, Compose
 arguments, chat, or CI. The complete delivery and rotation contract is in
 [Kiwoom credential management](security/kiwoom-credential-management.md) and

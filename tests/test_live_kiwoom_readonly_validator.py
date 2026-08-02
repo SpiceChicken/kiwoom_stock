@@ -14,10 +14,23 @@ from typing import Any
 
 import pytest
 from kiwoom_stock.application.credentials import (
+    CredentialProviderError,
     KiwoomClientCredentials,
     SensitiveText,
 )
+from kiwoom_stock.infrastructure.kiwoom_credentials import (
+    APP_KEY_FILE,
+    MATERIALIZED_APP_KEY_FILE,
+    MATERIALIZED_SECRET_KEY_FILE,
+    SECRET_KEY_FILE,
+)
 from kiwoom_stock.validation import live_readonly as validator
+
+
+def test_read_only_boundary_remains_a_validation_error():
+    assert issubclass(validator.ReadOnlyBoundaryError, validator.ValidationError)
+    with pytest.raises(validator.ValidationError):
+        raise validator.ReadOnlyBoundaryError("safe boundary")
 
 
 class FakeResponse:
@@ -317,6 +330,9 @@ def test_unknown_account_revoke_and_order_pairs_fail_before_transport(
             f"https://api.kiwoom.com{path}",
             headers={"api-id": api_id},
             json={"stk_cd": "005930"},
+            timeout=(5, 30),
+            allow_redirects=False,
+            verify=True,
         )
     assert sender.calls == []
 
@@ -332,12 +348,19 @@ def test_chart_boundary_allows_only_stock_5m_and_proxy_60m():
     with pytest.raises(validator.ReadOnlyBoundaryError, match="5m"):
         session.post(
             "https://api.kiwoom.com/api/dostk/chart",
-            headers={"api-id": "ka10080"},
+            headers={
+                "Content-Type": "application/json;charset=UTF-8",
+                "api-id": "ka10080",
+                "authorization": "Bearer synthetic-token",
+            },
             json={
                 "stk_cd": "005930",
                 "tic_scope": "1",
                 "upd_stkpc_tp": "1",
             },
+            timeout=(5, 30),
+            allow_redirects=False,
+            verify=True,
         )
 
 
@@ -360,12 +383,18 @@ def test_attempt_cap_allows_23_transports_and_blocks_24th():
         sender=sender,
     )
     request = {
-        "headers": {"api-id": "au10001"},
+        "headers": {
+            "Content-Type": "application/json;charset=UTF-8",
+            "api-id": "au10001",
+        },
         "json": {
             "grant_type": "client_credentials",
             "appkey": "synthetic-app-key",
             "secretkey": "synthetic-secret-key",
         },
+        "timeout": 10,
+        "allow_redirects": False,
+        "verify": True,
     }
 
     for _ in range(23):
@@ -421,6 +450,24 @@ def test_empty_or_missing_strength_fails_before_analyzer_fallback(
         )
 
     assert "raw-private-value" not in str(caught.value)
+
+
+def test_non_mapping_strength_row_is_normalized_to_validation_error():
+    snapshot = validator.MarketSnapshot(
+        basic={
+            "cur_prc": "70000",
+            "trde_pre": "100",
+            "trde_qty": "1000",
+            "mac": "1000000",
+        },
+        stock_chart=_chart(),
+        proxy_chart=_chart(),
+        strength=["malformed"] * 5,
+        order_book={"tot_sel_req": "100", "tot_buy_req": "200"},
+    )
+    with pytest.raises(validator.ValidationError, match="strength.row0") as caught:
+        validator.validate_market_snapshot(snapshot)
+    assert isinstance(caught.value, validator.ReadOnlyBoundaryError)
 
 
 @pytest.mark.parametrize(
@@ -507,6 +554,58 @@ def test_confirmation_guard_blocks_before_credentials(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "ValidationError" in output
     assert "credential" not in output.casefold()
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        ((APP_KEY_FILE, SECRET_KEY_FILE), (APP_KEY_FILE, SECRET_KEY_FILE)),
+        (
+            (MATERIALIZED_APP_KEY_FILE, MATERIALIZED_SECRET_KEY_FILE),
+            (MATERIALIZED_APP_KEY_FILE, MATERIALIZED_SECRET_KEY_FILE),
+        ),
+    ],
+)
+def test_credential_layout_selector_accepts_only_complete_approved_pairs(
+    tmp_path, names, expected
+):
+    credentials_dir = tmp_path / "credentials"
+    credentials_dir.mkdir()
+    for name in names:
+        (credentials_dir / name).write_text("placeholder", encoding="utf-8")
+
+    assert validator._credential_file_names(credentials_dir) == expected
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        (APP_KEY_FILE,),
+        (SECRET_KEY_FILE,),
+        (MATERIALIZED_APP_KEY_FILE,),
+        (MATERIALIZED_SECRET_KEY_FILE,),
+        (APP_KEY_FILE, MATERIALIZED_SECRET_KEY_FILE),
+        (
+            APP_KEY_FILE,
+            SECRET_KEY_FILE,
+            MATERIALIZED_APP_KEY_FILE,
+            MATERIALIZED_SECRET_KEY_FILE,
+        ),
+    ],
+)
+def test_credential_layout_selector_rejects_missing_or_mixed_pairs(
+    tmp_path, names
+):
+    credentials_dir = tmp_path / "credentials"
+    credentials_dir.mkdir()
+    for name in names:
+        (credentials_dir / name).write_text("placeholder", encoding="utf-8")
+
+    with pytest.raises(
+        CredentialProviderError,
+        match="single approved file pair",
+    ):
+        validator._credential_file_names(credentials_dir)
 
 
 def test_production_cli_keeps_regime_proxy_fixed():

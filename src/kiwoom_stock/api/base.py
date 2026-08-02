@@ -30,6 +30,16 @@ class TokenAuthenticator(Protocol):
         """Refresh only when the rejected generation remains current."""
 
 
+def is_valid_bearer_authorization(value: object) -> bool:
+    """Return whether a value satisfies the shared Kiwoom Bearer grammar."""
+
+    return (
+        isinstance(value, str)
+        and _AUTHORIZATION.fullmatch(value) is not None
+        and value.casefold() != "bearer none"
+    )
+
+
 class BaseClient:
     """POST transport restricted to a typed Kiwoom origin.
 
@@ -189,11 +199,7 @@ class BaseClient:
         )
 
     def _headers(self, api_id: str, authorization: str) -> dict[str, str]:
-        if (
-            not isinstance(authorization, str)
-            or _AUTHORIZATION.fullmatch(authorization) is None
-            or authorization.casefold() == "bearer none"
-        ):
+        if not is_valid_bearer_authorization(authorization):
             raise KiwoomAPIError(
                 "authenticator returned an invalid authorization value",
                 category="invalid_authorization",

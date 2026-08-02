@@ -21,9 +21,13 @@ from urllib.parse import urlsplit
 from pydantic import ValidationError, create_model
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from kiwoom_stock.application.execution import ExecutionMode
+
 
 CONFIGURATION_HELP = ".env.example and docs/configuration.md"
 ALL_ENVIRONMENTS = ("local", "dev", "test", "staging", "prod", "production-like")
+
+
 class KiwoomApiMode(str, Enum):
     DISABLED = "disabled"
     MOCK = "mock"
@@ -82,6 +86,8 @@ def _spec(
 
 
 _SETTING_SPEC_ROWS: Tuple[Tuple[Any, ...], ...] = (
+    ("KIWOOM_EXECUTION_MODE", "enum", "no", "check-only", "execution policy", False,
+     "one of check-only/shadow-once; live unavailable"),
     ("KIWOOM_API_MODE", "enum", "no", "disabled", "runtime composition", False,
      "one of disabled/mock/prod"),
     ("KIWOOM_PROCESS_NAME", "string", "yes", None, "runtime lifecycle", False, "non-empty"),
@@ -185,6 +191,11 @@ class RuntimeSettings:
             raise ValueError("runtime app_env must be a supported environment")
         if not isinstance(self.process_name, str) or not self.process_name.strip():
             raise ValueError("runtime process_name must be a non-empty string")
+
+
+@dataclass(frozen=True)
+class ExecutionSettings:
+    mode: ExecutionMode
 
 
 @dataclass(frozen=True)
@@ -313,6 +324,7 @@ class LegacyMappings:
 @dataclass(frozen=True)
 class Settings:
     runtime: RuntimeSettings
+    execution: ExecutionSettings
     kiwoom: KiwoomSettings
     monitoring: MonitoringSettings
     strategy: StrategySettings
@@ -366,6 +378,9 @@ class Settings:
         warnings.extend(_unknown_legacy_warnings(legacy_data))
 
         api_mode = _api_mode(get("KIWOOM_API_MODE", "disabled"), issues)
+        execution_mode = _execution_mode(
+            get("KIWOOM_EXECUTION_MODE", ExecutionMode.CHECK_ONLY.value), issues
+        )
         process_name = _required_text("KIWOOM_PROCESS_NAME", get("KIWOOM_PROCESS_NAME"), issues)
         app_env = _app_env(get("KIWOOM_APP_ENV", "local"), issues)
         credentials_dir = _path(
@@ -438,6 +453,7 @@ class Settings:
 
         if (
             api_mode is None
+            or execution_mode is None
             or process_name is None
             or app_env is None
             or output_dir is None
@@ -456,6 +472,7 @@ class Settings:
             raise RuntimeError("validated settings unexpectedly remained incomplete")
         return cls(
             RuntimeSettings(app_env, process_name),
+            ExecutionSettings(execution_mode),
             KiwoomSettings(api_mode, credentials_dir),
             MonitoringSettings(fast, slow, workers, proxy_code, max_stocks, etf_keywords),
             StrategySettings(debug_mode, exit_time, entry_deadline, loss_limit, target_profit, stop_loss, regimes),
@@ -794,6 +811,17 @@ def _api_mode(value: Any, issues: List[SettingsIssue]) -> Optional[KiwoomApiMode
         )
         return None
     return KiwoomApiMode(value.strip().lower())
+
+
+def _execution_mode(value: Any, issues: List[SettingsIssue]) -> Optional[ExecutionMode]:
+    if not isinstance(value, str):
+        issues.append(SettingsIssue("KIWOOM_EXECUTION_MODE", "must be check-only or shadow-once"))
+        return None
+    normalized = value.strip().lower()
+    if normalized not in (ExecutionMode.CHECK_ONLY.value, ExecutionMode.SHADOW_ONCE.value):
+        issues.append(SettingsIssue("KIWOOM_EXECUTION_MODE", "must be check-only or shadow-once; live is unavailable"))
+        return None
+    return ExecutionMode(normalized)
 
 
 def _endpoint_for_mode(

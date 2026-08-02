@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -12,6 +13,25 @@ RUNTIME_UID = 10001
 RUNTIME_GID = 10001
 SECRET_NAMES = ("KIWOOM_APP_KEY", "KIWOOM_SECRET_KEY")
 STAGING_DIR = Path("/run/kiwoom-secrets")
+_IMMUTABLE_IMAGE = re.compile(
+    r"^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$"
+)
+
+
+def _validate_shadow_image_tuple() -> None:
+    if (
+        os.environ.get("KIWOOM_PROCESS_NAME") != "kiwoom-shadow-once"
+    ):
+        return
+    image_ref = os.environ.get("KIWOOM_IMAGE_REF")
+    image_digest = os.environ.get("KIWOOM_IMAGE_DIGEST")
+    if (
+        image_ref is None
+        or image_digest is None
+        or image_ref != image_digest
+        or _IMMUTABLE_IMAGE.fullmatch(image_ref) is None
+    ):
+        raise RuntimeError("shadow image reference and activation digest must match")
 
 
 def _copy_secret(source_dir: Path, name: str) -> None:
@@ -84,6 +104,7 @@ def _healthcheck() -> None:
 
 
 def main() -> int:
+    _validate_shadow_image_tuple()
     if len(sys.argv) == 2 and sys.argv[1] == "--healthcheck":
         _healthcheck()
         return 0

@@ -7,7 +7,7 @@ import os
 import queue
 import sqlite3
 import threading
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
 
 from kiwoom_stock.domain.models import Position
 
@@ -33,8 +33,14 @@ _QUEUE_SENTINEL = object()
 
 
 class TradeLogger:
-    def __init__(self, db_name: Union[str, os.PathLike[str]] = "trades.db"):
+    def __init__(
+        self,
+        db_name: Union[str, os.PathLike[str]] = "trades.db",
+        *,
+        clock: Optional[Callable[[], datetime]] = None,
+    ):
         self.db_path = os.path.normpath(os.path.abspath(os.fspath(db_name)))
+        self._clock = clock
         self._async_queue: queue.Queue[object] = queue.Queue()
         self._state_lock = threading.Lock()
         self._close_complete = threading.Event()
@@ -46,6 +52,7 @@ class TradeLogger:
         self._sentinel_enqueued = False
         self._main_connection_closed = False
         self._worker_connection_closed = False
+        self._shutdown_deadline: Optional[Callable[[], float]] = None
 
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -65,6 +72,10 @@ class TradeLogger:
                 worker_conn.close()
             self.conn.close()
             raise
+
+    def _now(self) -> datetime:
+        clock = getattr(self, '_clock', None)
+        return clock() if clock is not None else datetime.now()
 
     def _create_table(self):
         """기존 거래 내역 테이블과 물리학적 상태 저장을 위한 신규 테이블 생성"""
@@ -217,7 +228,7 @@ class TradeLogger:
                 (key, copy.deepcopy(value))
                 for key, value in dict(forces).items()
             ),
-            timestamp_str=datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+            timestamp_str=self._now().strftime('%Y-%m-%d %H:%M:%S.%f'),
         )
         with self._state_lock:
             if not self._accepting_submissions:
@@ -236,6 +247,11 @@ class TradeLogger:
         """Drain all accepted queue tasks and surface the first worker failure."""
         self._async_queue.join()
         self._raise_worker_failure()
+
+    def set_shutdown_deadline(self, deadline_remaining: Callable[[], float]) -> None:
+        """Install a cooperative close budget for bounded shadow shutdown."""
+
+        self._shutdown_deadline = deadline_remaining
 
     @property
     def is_closed(self) -> bool:
@@ -305,11 +321,20 @@ class TradeLogger:
 
         if sentinel_enqueued:
             try:
-                self._worker_thread.join()
+                remaining = self._remaining_shutdown_budget()
+                if remaining is None:
+                    self._worker_thread.join()
+                else:
+                    self._worker_thread.join(timeout=remaining)
             except BaseException as error:
                 self._record_close_failure("worker thread join", error)
 
         worker_stopped = not self._worker_thread.is_alive()
+        if not worker_stopped and self._shutdown_deadline is not None:
+            self._record_close_failure(
+                "worker thread join",
+                RuntimeError("database worker did not stop before the shutdown deadline"),
+            )
         queue_drained = self._async_queue.unfinished_tasks == 0
 
         if worker_stopped and not queue_drained:
@@ -318,7 +343,7 @@ class TradeLogger:
 
         if worker_stopped and queue_drained:
             try:
-                self._async_queue.join()
+                self._join_queue_with_budget()
             except BaseException as error:
                 self._record_close_failure("queue drain", error)
         elif worker_stopped:
@@ -362,6 +387,26 @@ class TradeLogger:
             )
             self._closed = terminal
 
+    def _remaining_shutdown_budget(self) -> Optional[float]:
+        if self._shutdown_deadline is None:
+            return None
+        try:
+            remaining = float(self._shutdown_deadline())
+        except Exception:
+            return 0.0
+        return max(0.0, remaining)
+
+    def _join_queue_with_budget(self) -> None:
+        if self._shutdown_deadline is None:
+            self._async_queue.join()
+            return
+        while self._async_queue.unfinished_tasks:
+            remaining = self._remaining_shutdown_budget()
+            if remaining is None or remaining <= 0:
+                raise RuntimeError("database queue did not drain before the shutdown deadline")
+            with self._async_queue.all_tasks_done:
+                self._async_queue.all_tasks_done.wait(timeout=min(0.05, remaining))
+
     def _consume_orphaned_sentinels(self) -> None:
         with self._state_lock:
             submissions_latched = not self._accepting_submissions
@@ -389,9 +434,15 @@ class TradeLogger:
         row = cursor.fetchone()
         
         if row:
+            timestamp = datetime.strptime(
+                row['last_updated'], '%Y-%m-%d %H:%M:%S.%f'
+            )
+            current = self._now()
+            if timestamp.tzinfo is None and current.tzinfo is not None:
+                timestamp = timestamp.replace(tzinfo=current.tzinfo)
             return {
                 'velocity': row['velocity'],
-                'timestamp': datetime.strptime(row['last_updated'], '%Y-%m-%d %H:%M:%S.%f')
+                'timestamp': timestamp
             }
         return None
 
@@ -431,7 +482,7 @@ class TradeLogger:
         WHERE id = ?
         """
         self.conn.execute(query, (
-            pos.sell_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            pos.sell_price, self._now().strftime('%Y-%m-%d %H:%M:%S'),
             profit_rate, pos.sell_reason, pos.id
         ))
         self.conn.commit()
@@ -442,7 +493,7 @@ class TradeLogger:
         프로그램 재시작 시에도 오늘 하루의 전체 손익을 정확히 추적할 수 있습니다.
         """
         # 1. 오늘 날짜 문자열 생성 (YYYY-MM-DD)
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        today_str = self._now().strftime('%Y-%m-%d')
         
         # 2. SQL 쿼리: 오늘(sell_time LIKE 'YYYY-MM-DD%') 매도된 종목의 profit_rate 합산
         query = "SELECT SUM(profit_rate) as total_pnl FROM trades WHERE status = 'CLOSED' AND sell_time LIKE ?"
@@ -484,7 +535,7 @@ class TradeLogger:
         :param target_date_str: '%Y-%m-%d' 양식의 날짜 문자열. 미입력 시 오늘 날짜 사용.
         """
         if target_date_str is None:
-            target_date_str = datetime.now().strftime('%Y-%m-%d')
+            target_date_str = self._now().strftime('%Y-%m-%d')
         
         # DISTINCT를 사용하여 동일한 종목이 여러 번 거래되었더라도 한 번만 가져옵니다.
         query = """

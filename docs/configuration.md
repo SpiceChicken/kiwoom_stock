@@ -44,6 +44,7 @@ The following table is checked against the machine-readable `SETTING_SPECS` regi
 <!-- settings-matrix:start -->
 | Name | Type | Required | Default | Consumer | Sensitive | Environments | Validation |
 |---|---|---|---|---|---:|---|---|
+| `KIWOOM_EXECUTION_MODE` | enum | no | `check-only` | execution policy | no | all | `check-only` or `shadow-once`; live unavailable |
 | `KIWOOM_API_MODE` | enum | no | `disabled` | runtime composition | no | all | `disabled`, `mock`, or `prod` |
 | `KIWOOM_PROCESS_NAME` | string | yes | none | runtime lifecycle | no | all | non-empty |
 | `KIWOOM_APP_ENV` | enum | no | `local` | retention policy | no | all | allowed environment |
@@ -79,6 +80,10 @@ activation.
 `TradeLogger` with `Settings.database.path`; its ledger connection and physical-state queue worker connection use the
 same normalized file. After the engine closes, each report reader opens that configured path, copies the required rows
 into memory, closes the DB exactly once, and only then performs API, pandas, or CSV work.
+
+The bounded `shadow-once` worker uses the fixed isolated path `/var/lib/kiwoom/shadow-trades.db` on the existing
+`/var/lib/kiwoom` data volume. It never reuses the normal `/var/lib/kiwoom/trades.db` ledger and does not accept a
+per-request path override. The mounted data directory must already exist and be writable by the runtime UID.
 
 The default `trades.db` value exists for direct legacy/local compatibility. It is relative to the process working
 directory and must not be relied on in managed environments. Compose pins the explicit value
