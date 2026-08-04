@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssumeExactLocalOperatorRole",
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole"],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-local-operator"
+    },
+    {
+      "Sid": "AuthorizeExactSameDeviceLocalLogin",
+      "Effect": "Allow",
+      "Action": [
+        "signin:AuthorizeOAuth2Access",
+        "signin:CreateOAuth2Token"
+      ],
+      "Resource": "arn:aws:signin:<AWS_REGION>:<AWS_ACCOUNT_ID>:oauth2/public-client/localhost"
+    }
+  ]
+}
