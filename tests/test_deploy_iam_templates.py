@@ -125,6 +125,119 @@ def test_github_deploy_role_is_ssm_only_and_targets_exact_resources():
     )
 
 
+def test_local_user_can_only_assume_exact_operator_role():
+    statements = _statements(
+        _policy("local-user-assume-role-policy.json.example")
+    )
+
+    assert statements[0] == {
+        "Sid": "AssumeExactLocalOperatorRole",
+        "Effect": "Allow",
+        "Action": ["sts:AssumeRole"],
+        "Resource": (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/"
+            "kiwoom-local-operator"
+        ),
+    }
+    assert statements[1] == {
+        "Sid": "AuthorizeExactSameDeviceLocalLogin",
+        "Effect": "Allow",
+        "Action": [
+            "signin:AuthorizeOAuth2Access",
+            "signin:CreateOAuth2Token",
+        ],
+        "Resource": (
+            "arn:aws:signin:<AWS_REGION>:<AWS_ACCOUNT_ID>:"
+            "oauth2/public-client/localhost"
+        ),
+    }
+
+
+def test_local_operator_trust_requires_exact_user_and_temporary_session():
+    statement = _statements(
+        _policy("local-operator-trust-policy.json.example")
+    )[0]
+
+    assert statement["Principal"] == {
+        "AWS": (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
+        )
+    }
+    assert statement["Action"] == "sts:AssumeRole"
+    assert statement["Condition"] == {
+        "Null": {"aws:TokenIssueTime": "false"}
+    }
+
+
+def test_local_operator_is_read_only_except_exact_shell_session():
+    statements = _statements(
+        _policy("local-operator-policy.json.example")
+    )
+    actions = {
+        action
+        for statement in statements
+        for action in statement["Action"]
+    }
+    start_session = next(
+        statement
+        for statement in statements
+        if statement["Sid"] == "StartDefaultShellOnExactInstance"
+    )
+
+    assert actions == {
+        "ssm:StartSession",
+        "ssmmessages:OpenDataChannel",
+        "ssm:ResumeSession",
+        "ssm:TerminateSession",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ssm:DescribeInstanceInformation",
+        "ssm:DescribeSessions",
+        "ssm:GetConnectionStatus",
+        "ssm:GetCommandInvocation",
+    }
+    assert start_session["Resource"] == [
+        (
+            "arn:aws:ec2:<AWS_REGION>:<AWS_ACCOUNT_ID>:instance/"
+            "<EC2_INSTANCE_ID>"
+        ),
+        (
+            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
+            "SSM-SessionManagerRunShell"
+        ),
+    ]
+    own_session_resources = {
+        statement["Resource"]
+        for statement in statements
+        if statement["Sid"] in {
+            "OpenOwnSessionDataChannel",
+            "ResumeAndTerminateOwnSessions",
+        }
+    }
+    assert own_session_resources == {
+        (
+            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:session/"
+            "${aws:userid}-*"
+        )
+    }
+    wildcard_statements = [
+        statement for statement in statements if statement["Resource"] == "*"
+    ]
+    assert wildcard_statements
+    assert all(
+        statement["Condition"]
+        == {"StringEquals": {"aws:RequestedRegion": "<AWS_REGION>"}}
+        for statement in wildcard_statements
+    )
+    assert "ssm:StartSession" in actions
+    assert "ssm:SendCommand" not in actions
+    assert not {
+        action for action in actions if action.startswith("ssm:GetParameter")
+    }
+    assert not {action for action in actions if action.startswith("iam:")}
+    assert not {action for action in actions if action.startswith("kms:")}
+
+
 def test_custom_ssm_document_only_invokes_preinstalled_allowlisted_command():
     document_path = (
         ROOT / "deploy/ssm/production-check-document.yaml"
