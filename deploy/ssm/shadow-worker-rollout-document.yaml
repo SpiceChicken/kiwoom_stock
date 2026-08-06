@@ -1,0 +1,171 @@
+schemaVersion: "2.2"
+description: Install, read back, or roll back the exact shadow worker pair
+parameters:
+  Action:
+    type: String
+    allowedValues: [install, readback, rollback]
+    interpolationType: ENV_VAR
+  SourceSha:
+    type: String
+    allowedPattern: '^[0-9a-f]{40}$'
+    interpolationType: ENV_VAR
+  WorkerSha256:
+    type: String
+    allowedPattern: '^[0-9a-f]{64}$'
+    interpolationType: ENV_VAR
+  ShadowDocumentSha256:
+    type: String
+    allowedPattern: '^[0-9a-f]{64}$'
+    interpolationType: ENV_VAR
+  RolloutAttemptId:
+    type: String
+    allowedPattern: '^[1-9][0-9]{0,19}$'
+    interpolationType: ENV_VAR
+  ExpectedInstanceId:
+    type: String
+    allowedPattern: '^i-02cb0a404794bd43a$'
+    interpolationType: ENV_VAR
+  Region:
+    type: String
+    allowedPattern: '^ap-northeast-2$'
+    interpolationType: ENV_VAR
+mainSteps:
+  - action: aws:runShellScript
+    name: exactShadowPairRollout
+    precondition:
+      StringEquals: [platformType, Linux]
+    inputs:
+      timeoutSeconds: "300"
+      runCommand:
+        - |
+          exec /bin/bash -s -- \
+          "$SSM_Action" "$SSM_SourceSha" "$SSM_WorkerSha256" \
+          "$SSM_ShadowDocumentSha256" "$SSM_RolloutAttemptId" \
+          "$SSM_ExpectedInstanceId" "$SSM_Region" <<'KIWOOM_ROLLOUT'
+          set -Eeuo pipefail
+          action="$1"; source_sha="$2"; worker_sha="$3"; document_sha="$4"; attempt="$5"; instance="$6"; region="$7"
+          target=/usr/local/sbin/kiwoom-shadow-worker
+          state=/var/lib/kiwoom-stock/shadow-rollout-backups
+          binding=/var/lib/kiwoom-stock/shadow-rollout-current.json
+          lock=/run/lock/kiwoom-stock-shadow.lock
+          backup="${state}/${attempt}"
+          [[ "$instance" == i-02cb0a404794bd43a && "$region" == ap-northeast-2 ]]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$worker_sha" =~ ^[0-9a-f]{64}$ && "$document_sha" =~ ^[0-9a-f]{64}$ && "$attempt" =~ ^[1-9][0-9]{0,19}$ ]]
+          case "$action" in install|readback|rollback) ;; *) printf 'unsupported rollout action: %s\n' "$action" >&2; exit 64 ;; esac
+          install -d -o root -g root -m 0700 "$state"
+          exec 9>"$lock"
+          flock -x -w 240 9
+          fsync_file() { python3 - "$1" <<'PY'
+          import os,sys
+          descriptor=os.open(sys.argv[1],os.O_RDONLY); os.fsync(descriptor); os.close(descriptor)
+          PY
+          }
+          fsync_parent() { python3 - "$1" <<'PY'
+          import os,sys
+          descriptor=os.open(os.path.dirname(sys.argv[1]),os.O_RDONLY|os.O_DIRECTORY); os.fsync(descriptor); os.close(descriptor)
+          PY
+          }
+          fsync_directory() { python3 - "$1" <<'PY'
+          import os,sys
+          descriptor=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY); os.fsync(descriptor); os.close(descriptor)
+          PY
+          }
+          publish() {
+            local source="$1" destination="$2" mode="$3" expected="$4" syntax="$5" directory temporary
+            directory="$(dirname "$destination")"; temporary="$(mktemp "${directory}/.kiwoom-rollout.XXXXXX")"
+            trap 'rm -f "$temporary"' RETURN
+            install -o root -g root -m "$mode" "$source" "$temporary"
+            [[ "$(stat -c '%u:%g:%a:%h:%F' "$temporary")" == "0:0:${mode}:1:regular file" ]]
+            [[ "$(sha256sum "$temporary" | cut -d' ' -f1)" == "$expected" ]]
+            [[ "$syntax" == no ]] || bash -n "$temporary"
+            fsync_file "$temporary"; mv -fT "$temporary" "$destination"; fsync_parent "$destination"
+            trap - RETURN
+          }
+          remove_published() { rm -f -- "$1"; fsync_parent "$1"; }
+          metadata() { [[ -f "$target" && ! -L "$target" ]] && [[ "$(stat -c '%u:%g:%a:%h:%F' "$target")" == '0:0:750:1:regular file' ]]; }
+          emit() { python3 - "$action" "$target" "$binding" <<'PY'
+          import hashlib,json,os,stat,sys
+          def metadata(path,expected_mode):
+              try: value=os.lstat(path)
+              except FileNotFoundError: return {"present":False,"owner":"","mode":"","links":0,"regular":False,"metadata_valid":True,"sha256":""}
+              regular=stat.S_ISREG(value.st_mode); mode=format(stat.S_IMODE(value.st_mode),"03o"); owner=f"{value.st_uid}:{value.st_gid}"
+              return {"present":True,"owner":owner,"mode":mode,"links":value.st_nlink,"regular":regular,"metadata_valid":regular and not stat.S_ISLNK(value.st_mode) and owner=="0:0" and mode==expected_mode and value.st_nlink==1,"sha256":hashlib.sha256(open(path,"rb").read()).hexdigest() if regular else ""}
+          worker=metadata(sys.argv[2],"750"); marker=metadata(sys.argv[3],"600")
+          try:
+              with open(sys.argv[3],encoding="utf-8") as stream: binding=json.load(stream)
+          except Exception:
+              binding={}
+          output={"action":sys.argv[1],"source_sha":binding.get("source_sha",""),"worker_sha256":binding.get("worker_sha256",""),"shadow_document_sha256":binding.get("shadow_document_sha256",""),"rollout_attempt_id":binding.get("rollout_attempt_id",""),"observed_worker_sha256":worker["sha256"],"worker_present":worker["present"],"worker_owner":worker["owner"],"worker_mode":worker["mode"],"worker_links":worker["links"],"worker_regular":worker["regular"],"worker_metadata_valid":worker["metadata_valid"],"binding_present":marker["present"],"binding_owner":marker["owner"],"binding_mode":marker["mode"],"binding_links":marker["links"],"binding_regular":marker["regular"],"binding_metadata_valid":marker["metadata_valid"]}
+          print(json.dumps(output,sort_keys=True,separators=(",",":")))
+          PY
+          }
+          verify_backup() { python3 - "$backup" "$source_sha" "$worker_sha" "$document_sha" "$attempt" <<'PY'
+          import hashlib,json,os,stat,sys
+          root,source,worker,document,attempt=sys.argv[1:]
+          root_stat=os.stat(root,follow_symlinks=False)
+          if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid!=0 or root_stat.st_gid!=0 or stat.S_IMODE(root_stat.st_mode)!=0o700: raise SystemExit(1)
+          with open(os.path.join(root,"manifest.json"),encoding="utf-8") as stream: manifest=json.load(stream)
+          manifest_stat=os.stat(os.path.join(root,"manifest.json"),follow_symlinks=False)
+          if not stat.S_ISREG(manifest_stat.st_mode) or manifest_stat.st_uid!=0 or manifest_stat.st_gid!=0 or stat.S_IMODE(manifest_stat.st_mode)!=0o600 or manifest_stat.st_nlink!=1: raise SystemExit(1)
+          if any((manifest.get("source_sha")!=source,manifest.get("worker_sha256")!=worker,manifest.get("shadow_document_sha256")!=document,manifest.get("rollout_attempt_id")!=attempt)): raise SystemExit(1)
+          for name,key in (("worker","prior_worker_sha256"),("binding","prior_binding_sha256")):
+              expected=manifest.get(key); path=os.path.join(root,name); sentinel=path+".absent"
+              if expected=="absent":
+                  selected=sentinel
+                  if not os.path.isfile(selected) or os.path.exists(path): raise SystemExit(1)
+              else:
+                  selected=path
+                  if not isinstance(expected,str) or not os.path.isfile(path) or hashlib.sha256(open(path,"rb").read()).hexdigest()!=expected: raise SystemExit(1)
+              selected_stat=os.stat(selected,follow_symlinks=False)
+              if not stat.S_ISREG(selected_stat.st_mode) or selected_stat.st_uid!=0 or selected_stat.st_gid!=0 or stat.S_IMODE(selected_stat.st_mode)!=0o600 or selected_stat.st_nlink!=1: raise SystemExit(1)
+          PY
+          }
+          rollback_pair() {
+            local expected
+            verify_backup
+            if [[ -f "$backup/worker.absent" ]]; then remove_published "$target"; else expected="$(sha256sum "$backup/worker" | cut -d' ' -f1)"; publish "$backup/worker" "$target" 750 "$expected" yes; fi
+            if [[ -f "$backup/binding.absent" ]]; then remove_published "$binding"; else expected="$(sha256sum "$backup/binding" | cut -d' ' -f1)"; publish "$backup/binding" "$binding" 600 "$expected" no; fi
+            if [[ -f "$backup/worker.absent" ]]; then [[ ! -e "$target" ]]; else metadata; cmp -s "$backup/worker" "$target"; fi
+            if [[ -f "$backup/binding.absent" ]]; then [[ ! -e "$binding" ]]; else [[ -f "$binding" && ! -L "$binding" && "$(stat -c '%u:%g:%a:%h:%F' "$binding")" == '0:0:600:1:regular file' ]]; cmp -s "$backup/binding" "$binding"; fi
+          }
+          if [[ "$action" == readback ]]; then
+            if [[ -e "$target" ]]; then metadata; fi
+            if [[ -e "$binding" ]]; then [[ -f "$binding" && ! -L "$binding" && "$(stat -c '%u:%g:%a:%h:%F' "$binding")" == '0:0:600:1:regular file' ]]; fi
+            emit; exit
+          fi
+          if [[ "$action" == install ]]; then
+            if metadata && [[ "$(sha256sum "$target" | cut -d' ' -f1)" == "$worker_sha" ]] && python3 - "$binding" "$source_sha" "$worker_sha" "$document_sha" "$attempt" <<'PY'
+          import json,sys
+          try: value=json.load(open(sys.argv[1],encoding="utf-8"))
+          except Exception: raise SystemExit(1)
+          raise SystemExit(0 if value == {"source_sha":sys.argv[2],"worker_sha256":sys.argv[3],"shadow_document_sha256":sys.argv[4],"rollout_attempt_id":sys.argv[5]} else 1)
+          PY
+            then emit; exit; fi
+            if [[ -e "$backup" ]]; then
+              [[ -d "$backup" && ! -L "$backup" ]]; verify_backup
+            else
+              staging="$(mktemp -d "$state/.attempt-${attempt}.staging.XXXXXX")"; chmod 0700 "$staging"; chown root:root "$staging"
+              if [[ -e "$target" ]]; then metadata; install -o root -g root -m 0600 "$target" "$staging/worker"; worker_before="$(sha256sum "$staging/worker" | cut -d' ' -f1)"; fsync_file "$staging/worker"; else : >"$staging/worker.absent"; chmod 0600 "$staging/worker.absent"; chown root:root "$staging/worker.absent"; fsync_file "$staging/worker.absent"; worker_before=absent; fi
+              if [[ -e "$binding" ]]; then [[ -f "$binding" && ! -L "$binding" ]]; install -o root -g root -m 0600 "$binding" "$staging/binding"; binding_before="$(sha256sum "$staging/binding" | cut -d' ' -f1)"; fsync_file "$staging/binding"; else : >"$staging/binding.absent"; chmod 0600 "$staging/binding.absent"; chown root:root "$staging/binding.absent"; fsync_file "$staging/binding.absent"; binding_before=absent; fi
+              python3 - "$source_sha" "$worker_sha" "$document_sha" "$attempt" "$worker_before" "$binding_before" >"$staging/manifest.json" <<'PY'
+          import json,sys
+          print(json.dumps({"source_sha":sys.argv[1],"worker_sha256":sys.argv[2],"shadow_document_sha256":sys.argv[3],"rollout_attempt_id":sys.argv[4],"prior_worker_sha256":sys.argv[5],"prior_binding_sha256":sys.argv[6]},sort_keys=True,separators=(",",":")))
+          PY
+              chmod 0600 "$staging/manifest.json"; chown root:root "$staging/manifest.json"; fsync_file "$staging/manifest.json"; fsync_directory "$staging"
+              mv -T "$staging" "$backup"; fsync_directory "$state"; verify_backup
+            fi
+            trap 'rc=$?; trap - ERR; rollback_pair >/dev/null 2>&1 || true; exit "$rc"' ERR
+            downloaded="$(mktemp "$state/.worker-download.XXXXXX")"; marker="$(mktemp "$state/.binding-stage.XXXXXX")"; trap 'rm -f "$downloaded" "$marker"' EXIT
+            timeout 45 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "https://raw.githubusercontent.com/SpiceChicken/kiwoom_stock/${source_sha}/deploy/ec2/shadow_worker_control.sh" -o "$downloaded"
+            [[ "$(sha256sum "$downloaded" | cut -d' ' -f1)" == "$worker_sha" ]]; bash -n "$downloaded"
+            python3 - "$source_sha" "$worker_sha" "$document_sha" "$attempt" >"$marker" <<'PY'
+          import json,sys
+          print(json.dumps({"source_sha":sys.argv[1],"worker_sha256":sys.argv[2],"shadow_document_sha256":sys.argv[3],"rollout_attempt_id":sys.argv[4]},sort_keys=True,separators=(",",":")))
+          PY
+            marker_sha="$(sha256sum "$marker" | cut -d' ' -f1)"
+            publish "$downloaded" "$target" 750 "$worker_sha" yes
+            publish "$marker" "$binding" 600 "$marker_sha" no
+            trap - ERR; metadata; emit; exit
+          fi
+          rollback_pair; emit
+          KIWOOM_ROLLOUT

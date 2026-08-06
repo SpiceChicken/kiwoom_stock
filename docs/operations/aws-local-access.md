@@ -24,7 +24,8 @@ kiwoom-local-operator (IAM role)
   └─ IAM 변경, Parameter Store 값 조회, 임의 SendCommand 권한 없음
 
 GitHub OIDC roles
-  └─ 기존 배포·production-check·shadow 실행 경계 유지
+  ├─ 기존 배포·production-check·shadow activation 경계 유지
+  └─ 별도 shadow rollout role로 worker/document pair만 갱신
 ```
 
 `aws login` 세션은 영구 로그인이 아니다. 최대 12시간인 임시 세션이므로 만료 시
@@ -32,6 +33,13 @@ IAM 사용자로 다시 로그인한다. 운영 역할은 role chaining 제한�
 발급되며 source 로그인이 유효한 동안 CLI가 다시 발급한다. 중요한 개선점은 이때
 root가 아니라 권한이 제한된 사용자를 이용하고, Access Key/Secret Key를 PC에
 저장하지 않는다는 것이다.
+
+일상적인 shadow worker rollout과 activation은 로컬 CLI 작업이 아니다. protected
+`production-shadow` GitHub Environment의 required reviewer 승인 뒤 각 workflow가
+OIDC 단기 credential을 새로 발급받는다. 따라서 bootstrap이 검증된 뒤에는 이 두
+작업을 위해 `kiwoom-aws-login`을 반복할 필요가 없다. 로컬 profile은 임의 진단과
+Session Manager에만 유지하며, rollout 실패를 로컬 `send-command`나 장기 Access
+Key로 우회하지 않는다.
 
 ## 1. 저장소 템플릿 렌더링
 

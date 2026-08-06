@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid":"RunExactShadowRollout","Effect":"Allow","Action":["ssm:SendCommand"],"Resource":["arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/KiwoomStock-ShadowWorkerRollout","arn:aws:ec2:<AWS_REGION>:<AWS_ACCOUNT_ID>:instance/<EC2_INSTANCE_ID>"]},
+    {"Sid":"ReadRolloutInvocation","Effect":"Allow","Action":["ssm:GetCommandInvocation"],"Resource":"*"},
+    {"Sid":"ReadShadowCommandAcceptanceForLegacyTransition","Effect":"Allow","Action":["ssm:ListCommands"],"Resource":"*"},
+    {"Sid":"ReadShadowCommandHistoryForLegacyTransition","Effect":"Allow","Action":["ssm:ListCommandInvocations"],"Resource":"*"},
+    {"Sid":"AttestExactRolloutDocument","Effect":"Allow","Action":["ssm:GetDocument","ssm:DescribeDocument"],"Resource":"arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/KiwoomStock-ShadowWorkerRollout"},
+    {"Sid":"ManageExactShadowActivationDocument","Effect":"Allow","Action":["ssm:GetDocument","ssm:DescribeDocument","ssm:ListDocumentVersions","ssm:UpdateDocument","ssm:UpdateDocumentDefaultVersion"],"Resource":"arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/KiwoomStock-ShadowWorker"}
+  ]
+}

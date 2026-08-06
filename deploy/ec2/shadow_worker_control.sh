@@ -24,6 +24,7 @@ readonly DOWNLOAD_TIMEOUT_SECONDS="${KIWOOM_SHADOW_DOWNLOAD_TIMEOUT_SECONDS:-45}
 readonly FIRST_TICK_TIMEOUT_SECONDS="${KIWOOM_SHADOW_FIRST_TICK_TIMEOUT_SECONDS:-240}"
 readonly CONTAINER_NAME="kiwoom-shadow-once"
 readonly SHADOW_EVIDENCE_SCHEMA_VERSION=1
+readonly ROLLOUT_BINDING_FILE="${KIWOOM_SHADOW_BINDING_FILE:-/var/lib/kiwoom-stock/shadow-rollout-current.json}"
 
 ACTIVE_CONTAINER_NAME=""
 WORK_DIR=""
@@ -45,6 +46,72 @@ validate_source_sha() {
 
 validate_hash() {
     [[ "$1" =~ ^[0-9a-f]{64}$ ]] || fail "Compose hash must be 64 lowercase hex characters"
+}
+
+validate_rollout_binding() {
+    local expected_worker_hash="$1"
+    local expected_document_hash="$2"
+    local actual_worker_hash metadata
+    validate_hash "${expected_worker_hash}"
+    validate_hash "${expected_document_hash}"
+    [[ -f "${BASH_SOURCE[0]}" && ! -L "${BASH_SOURCE[0]}" ]] \
+        || fail "installed worker metadata is invalid"
+    metadata="$(stat -c '%u:%g:%a:%h:%F' -- "${BASH_SOURCE[0]}")" \
+        || fail "installed worker metadata is unavailable"
+    [[ "${metadata}" == "0:0:750:1:regular file" ]] \
+        || fail "installed worker must be root:root, mode 0750, one regular link"
+    actual_worker_hash="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
+    [[ "${actual_worker_hash}" == "${expected_worker_hash}" ]] \
+        || fail "installed worker hash does not match the approved pair"
+    [[ -f "${ROLLOUT_BINDING_FILE}" && ! -L "${ROLLOUT_BINDING_FILE}" ]] \
+        || fail "rollout binding marker is absent or invalid"
+    metadata="$(stat -c '%u:%g:%a:%h:%F' -- "${ROLLOUT_BINDING_FILE}")" \
+        || fail "rollout binding metadata is unavailable"
+    [[ "${metadata}" == "0:0:600:1:regular file" ]] \
+        || fail "rollout binding must be root:root, mode 0600, one regular link"
+    python3 - "${ROLLOUT_BINDING_FILE}" "${expected_worker_hash}" \
+        "${expected_document_hash}" <<'PY' \
+        || fail "rollout binding does not match the approved pair"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    binding = json.load(stream)
+expected_keys = {
+    "source_sha", "worker_sha256", "shadow_document_sha256", "rollout_attempt_id"
+}
+valid = (
+    set(binding) == expected_keys
+    and binding.get("worker_sha256") == sys.argv[2]
+    and binding.get("shadow_document_sha256") == sys.argv[3]
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
+acquire_activation_lock() {
+    local inherited_fd="$1"
+    local expected_identity actual_identity
+    if [[ -n "${inherited_fd}" ]]; then
+        [[ "${inherited_fd}" =~ ^[3-9][0-9]?$ ]] \
+            || fail "inherited lock FD has an invalid bounded format"
+        [[ -e "/proc/self/fd/${inherited_fd}" ]] \
+            || fail "inherited lock FD is not open"
+        [[ "$(readlink -f "/proc/self/fd/${inherited_fd}")" == "$(readlink -f "${LOCK_FILE}")" ]] \
+            || fail "inherited lock FD does not reference the approved lock"
+        expected_identity="$(stat -Lc '%d:%i:%F' -- "${LOCK_FILE}")" \
+            || fail "approved lock metadata is unavailable"
+        actual_identity="$(stat -Lc '%d:%i:%F' -- "/proc/self/fd/${inherited_fd}")" \
+            || fail "inherited lock metadata is unavailable"
+        [[ "${actual_identity}" == "${expected_identity}" ]] \
+            || fail "inherited lock FD inode mismatch"
+        flock -n "${inherited_fd}" \
+            || fail "inherited activation lock is not exclusively held"
+        return
+    fi
+    exec {KIWOOM_SHADOW_LOCK_FD}>"${LOCK_FILE}"
+    flock -n "${KIWOOM_SHADOW_LOCK_FD}" \
+        || fail "another shadow activation owns the lock"
 }
 
 validate_activation_id() {
@@ -460,21 +527,29 @@ usage() {
     cat >&2 <<'EOF'
 usage:
   kiwoom-shadow-worker --desired-state oneshot|continuous --image DIGEST --source-sha SHA --activation-id ID \
-    --compose-shadow-sha256 HASH --expected-instance-id INSTANCE --region REGION
+    --compose-shadow-sha256 HASH --expected-worker-sha256 HASH --expected-shadow-document-sha256 HASH \
+    --expected-instance-id INSTANCE --region REGION
   kiwoom-shadow-worker --desired-state stop --image DIGEST --source-sha SHA \
-    --activation-id ID --expected-instance-id INSTANCE --region REGION
+    --activation-id ID --expected-worker-sha256 HASH --expected-shadow-document-sha256 HASH \
+    --expected-instance-id INSTANCE --region REGION
+  The fixed SSM wrapper additionally passes --inherited-lock-fd 9.
 EOF
 }
 
 main() {
     local image="" source_sha="" activation_id="" compose_hash=""
     local expected_instance="" region="" desired_state=""
+    local expected_worker_hash="" expected_document_hash=""
+    local inherited_lock_fd=""
     while (( $# )); do
         case "$1" in
             --image) image="${2:-}"; shift 2 ;;
             --source-sha) source_sha="${2:-}"; shift 2 ;;
             --activation-id) activation_id="${2:-}"; shift 2 ;;
             --compose-shadow-sha256) compose_hash="${2:-}"; shift 2 ;;
+            --expected-worker-sha256) expected_worker_hash="${2:-}"; shift 2 ;;
+            --expected-shadow-document-sha256) expected_document_hash="${2:-}"; shift 2 ;;
+            --inherited-lock-fd) inherited_lock_fd="${2:-}"; shift 2 ;;
             --expected-instance-id) expected_instance="${2:-}"; shift 2 ;;
             --region) region="${2:-}"; shift 2 ;;
             --desired-state) desired_state="${2:-}"; shift 2 ;;
@@ -487,9 +562,9 @@ main() {
     [[ "${region}" == "${EXPECTED_REGION}" ]] || fail "region is not approved"
     command -v flock >/dev/null || fail "flock is unavailable"
     command -v docker >/dev/null || fail "Docker is unavailable"
-    exec 9>"${LOCK_FILE}"
-    flock -n 9 || fail "another shadow activation owns the lock"
+    acquire_activation_lock "${inherited_lock_fd}"
     validate_instance_identity
+    validate_rollout_binding "${expected_worker_hash}" "${expected_document_hash}"
     case "${desired_state}" in
       oneshot|continuous|stop) ;;
       *) fail "desired state must be exactly oneshot, continuous, or stop" ;;

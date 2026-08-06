@@ -15,6 +15,9 @@ CD_WORKFLOW_PATH = Path(".github/workflows/cd-production-check.yml")
 PROMOTION_WORKFLOW_PATH = Path(
     ".github/workflows/cd-production-promotion.yml"
 )
+SHADOW_ROLLOUT_WORKFLOW_PATH = Path(
+    ".github/workflows/cd-shadow-worker-rollout.yml"
+)
 DEPLOYMENT_BOUNDARY_DOC = Path("docs/operations/deployment-boundary.md")
 CONTAINER_DEPLOYMENT_DOC = Path(
     "docs/operations/github-ec2-container-deployment.md"
@@ -57,6 +60,22 @@ def _promotion_workflow():
     return yaml.safe_load(
         PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8")
     )
+
+
+def test_shadow_rollout_cd_has_exact_protected_source_only_wiring():
+    workflow = yaml.safe_load(
+        SHADOW_ROLLOUT_WORKFLOW_PATH.read_text(encoding="utf-8")
+    )
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers["workflow_dispatch"]["inputs"]) == {"source_sha"}
+    assert workflow["concurrency"] == {
+        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "cancel-in-progress": False,
+    }
+    text = SHADOW_ROLLOUT_WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "vars.KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN" in text
+    assert "ref: ${{ inputs.source_sha }}" in text
+    assert "github.ref == 'refs/heads/main'" in text
 
 
 def _single_python_heredoc(step):

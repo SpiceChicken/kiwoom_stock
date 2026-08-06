@@ -11,7 +11,7 @@ This approval is **check-only**. It is not approval to start a worker, schedule 
 process, query an account, place or revoke an order, write a production database,
 or invoke Slack, S3, or Gemini.
 
-## Four separate activation boundaries
+## Five separate activation boundaries
 
 1. **Candidate publication** builds and tests an immutable
    `sha-<full commit SHA>` image. A new tag is published once; an existing tag is
@@ -26,10 +26,13 @@ or invoke Slack, S3, or Gemini.
    original run, build job, unique artifact, exact source Compose bytes, and
    anonymous public image contract before it sends one bounded SSM command and
    polls it to completion. That command runs only `--check-config`.
-3. **Shadow worker activation** is a separate protected, bounded command plane.
+3. **Shadow worker rollout** accepts one exact main source SHA and uses a
+   separate protected OIDC role to install/read back the immutable host worker
+   and activation-document pair. It does not start or stop a container.
+4. **Shadow worker activation** is a separate protected, bounded command plane.
    It admits exact `oneshot`, `continuous`, or `stop` actions and never grants
    order or account capability.
-4. **Live trading activation** is a separate, explicit approval. No workflow in
+5. **Live trading activation** is a separate, explicit approval. No workflow in
    this repository grants it.
 
 The candidate workflow and the production promotion workflow are separate manual
@@ -187,12 +190,114 @@ identity comparison, stop verifies either a clean signal transition
 (`DEADLINE`/`run-deadline`), requires a non-137 zero exit, removes that exact
 container, and preserves its named volume and image.
 
+Activation also requires the exact installed worker SHA-256 and deterministic
+canonical activation-document SHA-256 recorded by rollout evidence. The
+root-owned worker compares its own root:root `0750` bytes and the root-only
+`0600` binding marker before any `oneshot`, `continuous`, or `stop` logic. A
+missing marker, mismatch, incomplete rollback, or document/host skew fails
+before Docker or Kiwoom execution.
+
+The activation role has read-only `DescribeDocument`/`GetDocument` on that exact
+activation document. Immediately before `SendCommand`, the workflow reads the
+numeric `DefaultVersion`, requires `Status=Active`, canonicalizes that version's
+JSON content with duplicate-key rejection, and compares its hash with rollout
+evidence. It sends that explicit numeric version. `$LATEST` is forbidden;
+therefore a failed rollout that leaves a newer non-default version cannot bypass
+default rollback.
+The activation artifact records that attested numeric version and both strict
+pair hashes beside the command ID/status. Rollout host before/new/reconciled/final
+evidence records bounded owner, mode, link count, regular-file and metadata-valid
+fields for worker and binding; raw stdout and credentials remain excluded.
+
 The protected `production-shadow` Environment must provide the distinct
 `KIWOOM_AWS_SHADOW_ROLE_ARN` variable. The role policy is limited to the custom
 SSM document, the fixed instance, and `ssm:GetCommandInvocation`; it does not
 read Kiwoom SecureString parameters. Registering that document, role, host
 script, and Environment is an external change and must be read back before the
 first activation.
+
+## Protected shadow rollout boundary
+
+`.github/workflows/cd-shadow-worker-rollout.yml` has one required, no-default
+`source_sha` input. It requires `refs/heads/main`, equality with the trigger SHA,
+and exact-SHA checkout before OIDC. Region, instance, document names, raw GitHub
+URL, host paths, and actions are fixed. The separate
+`KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN` can run only the fixed rollout document on
+the exact instance and update only the exact activation document; activation
+role gains only the exact-document read-only attestation actions described above.
+
+The rollout role additionally has read-only `DescribeDocument`/`GetDocument` on
+the exact rollout document. Before its first host command, every routine run
+requires rollout document `Status=Active`, default/latest/version `1`, exact
+semantic structure, and the deterministic canonical content hash derived from
+the checked-out source. Bootstrap attestation alone is not sufficient.
+
+Only when the previous activation default differs from the checked-out
+pre-exec-lock document, the executor performs a one-time legacy transition
+drain before its first host command. It explicitly pages metadata-only
+`ListCommands` acceptance/aggregate history filtered by exact instance plus
+`KiwoomStock-ShadowWorker`, then cross-checks node execution state through
+metadata-only `ListCommandInvocations`. Both use explicit bounded service
+pagination. Every aggregate command and node invocation must be terminal, and
+none may have been requested during the preceding 3,600 seconds. Requiring the
+aggregate plane prevents an accepted Pending command that has not yet produced
+a node invocation from escaping the drain. A single snapshot is insufficient:
+the complete acceptance/execution scan pair runs three times at monotonic
+offsets 0, 30, and 60 seconds. Every scan must pass, and the final execution
+scan immediately precedes the first rollout host command while shared
+non-cancelling concurrency remains held. The one-hour quiet window
+conservatively exceeds the activation document's 1,020-second delivery/execution
+budget and leaves margin for delayed SSM visibility. Malformed responses,
+timestamps/statuses, pagination ambiguity, any nonterminal command, or any
+recent command fail before host mutation. Once the new document is already the
+default this is steady mode and the gate is `n-a`. Audit records mode, checked
+timestamp, quiet-window size, required/completed scan counts, configured and
+observed settling seconds, first/last checked timestamps, and bounded per-scan
+aggregate-command/node-invocation total/recent/nonterminal counts and results.
+The shared non-cancelling concurrency group prevents a new activation from
+starting after this gate while the rollout remains in progress.
+
+The executor recalculates worker raw, activation-document raw/canonical, and
+rollout-document hashes. It captures pre-state, installs and reads back the host
+pair, creates and defaults one activation-document version, requires semantic
+and canonical-byte read-back, then reads the host again. Failure restores and
+confirms the previous document default first, then restores the exact attempt
+backup. Uncertain rollback records `skew=true`; activation stays paused. Audit is
+bounded/redacted, atomic mode `0600`, retained 14 days, and excludes credentials,
+source bodies, and raw command output.
+
+The host transaction uses the same fixed exclusive flock as activation. Worker and binding
+are each completed in private temporary files on their destination filesystem,
+checked for owner/mode/hash (and worker `bash -n`), file-fsynced, atomically
+renamed, then parent-fsynced. Binding publishes last. Rollback uses the same
+primitive and an exact attempt manifest. The executor marks install as applying
+before submission; terminal/evidence/transport ambiguity triggers bounded host
+read-back and rollback when state differs. Unknown command acceptance remains
+`skew=true` even when the immediate read-back matches, because a late command
+cannot be proven absent. Audit records per-action command acceptance, ID,
+terminal status/response, host before/new/final, default reconciliation, and
+separate rollback failure category.
+
+The stable activation SSM document acquires that lock before it opens or execs
+the mutable worker path and passes inherited FD `9`. The worker verifies the FD
+is open, resolves to the exact approved lock inode, and can exclusively reuse
+the lock before any self-hash/binding guard. A direct host invocation receives
+no inherited FD and acquires the same lock itself. An argv/environment marker
+without the real approved lock FD cannot bypass this check.
+
+Attempt backup publication is also atomic and durable. Prior worker/binding or
+their absence sentinels plus the manifest are created in a private staging
+directory, checked for root ownership/mode/link/hash, individually fsynced, then
+the directory is fsynced and atomically renamed to the final attempt directory;
+the state parent is fsynced afterward. A sealed exact same-attempt backup is
+reusable after host-side rollback, while an incomplete private staging directory
+does not occupy the attempt ID and a different tuple fails closed.
+
+Rollout and activation share concurrency group
+`kiwoom-stock-shadow-i-02cb0a404794bd43a` with cancellation disabled. Rollout
+success is not activation approval. Until validator evidence proves real AWS/EC2
+bootstrap, install/read-back, negative IAM decisions, and rollback, the external
+path remains unverified.
 
 ## Startup and shadow-worker first-activation gate
 
