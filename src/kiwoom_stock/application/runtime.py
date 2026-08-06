@@ -17,11 +17,18 @@ from kiwoom_stock.application.credential_preflight import (
 )
 from kiwoom_stock.application.credentials import CredentialProvider
 from kiwoom_stock.application.ports import PaperTradeLedger, PhysicalStateRepository
-from kiwoom_stock.application.execution import ExecutionPolicy
+from kiwoom_stock.application.execution import ExecutionMode, ExecutionPolicy
 from kiwoom_stock.application.shadow_worker import (
     CalendarDecision,
     ShadowAdmission,
+    ShadowCycleTerminated,
     ShadowExecutionReceipt,
+    ShadowTerminalReason,
+)
+from kiwoom_stock.application.shadow_lifecycle import (
+    ShadowRunDeadlineExceeded,
+    ShadowShutdownDeadlineExceeded,
+    ShadowStopRequested,
 )
 from kiwoom_stock.core import config as default_config
 from kiwoom_stock.core.database import TradeLogger
@@ -140,13 +147,22 @@ class TradingRuntime:
     monitor: Any
 
 
-class ShadowExecutionFailure(RuntimeError):
+class ShadowExecutionFailure(ShadowCycleTerminated):
     """Redacted execution/cleanup failure preserving only safe type names."""
 
-    def __init__(self, primary_type: str | None, cleanup_types: tuple[str, ...]):
+    def __init__(
+        self,
+        reason: ShadowTerminalReason,
+        primary_type: str | None,
+        cleanup_types: tuple[str, ...],
+    ):
         self.primary_type = primary_type
         self.cleanup_types = cleanup_types
-        super().__init__("shadow execution failed")
+        super().__init__(
+            reason,
+            resources_closed=not cleanup_types,
+            error_type=primary_type or (cleanup_types[0] if cleanup_types else None),
+        )
 
     @property
     def cleanup_type(self) -> str | None:
@@ -209,19 +225,43 @@ class ShadowRuntime:
         with self._state_lock:
             self._state = "terminal"
         if primary is not None or cleanup_types:
+            reason = _terminal_reason_after_cleanup(
+                primary,
+                self._deadline_remaining,
+            )
             raise ShadowExecutionFailure(
+                reason,
                 type(primary).__name__ if primary is not None else None,
                 cleanup_types,
             ) from None
         if self._db_path != self._policy.shadow_database_path:
             raise RuntimeError("shadow runtime database identity drifted")
-        if not isinstance(attempts, int) or attempts < 0:
+        if type(attempts) is not int or attempts < 0:
             raise RuntimeError("shadow runtime reported invalid HTTP evidence")
         if not isinstance(api_counts, Mapping) or any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            type(value) is not int or value < 0
             for value in api_counts.values()
         ):
             raise RuntimeError("shadow runtime reported invalid API evidence")
+        expected_local_keys = {
+            "status",
+            "paper_buy",
+            "paper_sell",
+            "error",
+            "critical",
+        }
+        if (
+            not isinstance(local_counts, Mapping)
+            or set(local_counts) != expected_local_keys
+            or any(type(value) is not int for value in local_counts.values())
+            or local_counts["status"] != 1
+            or local_counts["error"] != 0
+            or local_counts["critical"] != 0
+            or local_counts["paper_buy"] not in (0, 1)
+            or local_counts["paper_sell"] not in (0, 1)
+            or local_counts["paper_buy"] + local_counts["paper_sell"] > 1
+        ):
+            raise RuntimeError("shadow runtime reported invalid local evidence")
         return ShadowExecutionReceipt(
             cycles=1,
             http_attempts=attempts,
@@ -232,13 +272,10 @@ class ShadowRuntime:
         )
 
     def _checkpoint_lifecycle(self) -> None:
-        if self._stop_event is not None and self._stop_event.is_set():
-            raise RuntimeError("shadow stop requested")
         if self._deadline_remaining is not None:
-            try:
-                self._deadline_remaining()
-            except Exception as error:
-                raise RuntimeError("shadow shutdown deadline exceeded") from error
+            self._deadline_remaining()
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise ShadowStopRequested("shadow stop requested")
 
 
 def create_trading_runtime(
@@ -326,11 +363,20 @@ def create_shadow_runtime(
     """Build the bounded shadow graph after calendar admission has succeeded."""
 
     if settings.execution.mode is not policy.mode:
-        raise RuntimeDisabledError("CLI and KIWOOM_EXECUTION_MODE must both be shadow-once")
+        raise RuntimeDisabledError("CLI and KIWOOM_EXECUTION_MODE must select the same shadow mode")
+    process_names = {
+        ExecutionMode.SHADOW_ONCE: "kiwoom-shadow-once",
+        ExecutionMode.SHADOW_CONTINUOUS: "kiwoom-shadow-worker",
+    }
+    expected_process_name = process_names.get(policy.mode)
+    if expected_process_name is None:
+        raise RuntimeDisabledError("runtime construction requires an admitted shadow mode")
     if settings.kiwoom.api_mode is not KiwoomApiMode.PROD:
-        raise RuntimeDisabledError("shadow-once requires KIWOOM_API_MODE=prod")
-    if settings.runtime.process_name != "kiwoom-shadow-once":
-        raise RuntimeError("shadow-once requires KIWOOM_PROCESS_NAME=kiwoom-shadow-once")
+        raise RuntimeDisabledError("shadow execution requires KIWOOM_API_MODE=prod")
+    if settings.runtime.process_name != expected_process_name:
+        raise RuntimeError(
+            f"{policy.mode.value} requires KIWOOM_PROCESS_NAME={expected_process_name}"
+        )
     db_path = policy.assert_shadow_database_identity(settings.database.path)
     _assert_shadow_volume_attestation(db_path)
     if (
@@ -351,7 +397,7 @@ def create_shadow_runtime(
             settings.storage.s3_bucket_name,
         )
     ):
-        raise RuntimeError("shadow-once forbids notification, AI, and archive configuration")
+        raise RuntimeError("shadow execution forbids notification, AI, and archive configuration")
 
     admission.checkpoint()
     preflight = preflight_settings(settings, credential_provider_factory)
@@ -404,9 +450,15 @@ def create_shadow_runtime(
             stop_event=admission.stop_event,
             deadline_remaining=admission.deadline_remaining,
         )
-    except BaseException:
-        _close_failed_shadow_resources(repository, ledger, client, session)
-        raise
+    except BaseException as error:
+        cleanup_types = _close_failed_shadow_resources(
+            repository, ledger, client, session
+        )
+        raise ShadowExecutionFailure(
+            _terminal_reason_after_cleanup(error, admission.deadline_remaining),
+            type(error).__name__,
+            cleanup_types,
+        ) from None
     return ShadowRuntime(
         policy=policy,
         client=client,
@@ -448,9 +500,10 @@ def _close_failed_shadow_resources(
     ledger: PaperTradeLedger | None,
     client: Any,
     session: AllowlistedReadOnlySession | None,
-) -> None:
+) -> tuple[str, ...]:
     """Retire local work before clearing the market-only token owner."""
 
+    failures = []
     for label, resource in (
         ("physical-state repository", repository),
         ("paper ledger", ledger),
@@ -461,8 +514,45 @@ def _close_failed_shadow_resources(
             continue
         try:
             resource.close()
-        except BaseException:
+        except BaseException as error:
+            failures.append(type(error).__name__)
             logger.error("Failed to close shadow %s during construction rollback.", label)
+    return tuple(failures)
+
+
+def _terminal_reason_for_error(error: BaseException | None) -> ShadowTerminalReason:
+    current = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ShadowStopRequested):
+            return ShadowTerminalReason.STOP_REQUESTED
+        if isinstance(current, ShadowRunDeadlineExceeded):
+            return ShadowTerminalReason.RUN_DEADLINE
+        if isinstance(current, ShadowShutdownDeadlineExceeded):
+            return ShadowTerminalReason.SHUTDOWN_DEADLINE
+        current = current.__cause__
+    return ShadowTerminalReason.FAILURE
+
+
+def _terminal_reason_after_cleanup(
+    error: BaseException | None,
+    deadline_remaining: Callable[[], float] | None,
+) -> ShadowTerminalReason:
+    """Resolve a genuine lifecycle primary after all owned cleanup completes."""
+
+    reason = _terminal_reason_for_error(error)
+    if reason is not ShadowTerminalReason.STOP_REQUESTED or deadline_remaining is None:
+        return reason
+    try:
+        deadline_remaining()
+    except ShadowShutdownDeadlineExceeded:
+        return ShadowTerminalReason.SHUTDOWN_DEADLINE
+    except ShadowRunDeadlineExceeded:
+        return ShadowTerminalReason.RUN_DEADLINE
+    except Exception:
+        pass
+    return reason
 
 
 def _close_failed_runtime_resources(

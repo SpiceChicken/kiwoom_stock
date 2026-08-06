@@ -87,14 +87,14 @@ def _spec(
 
 _SETTING_SPEC_ROWS: Tuple[Tuple[Any, ...], ...] = (
     ("KIWOOM_EXECUTION_MODE", "enum", "no", "check-only", "execution policy", False,
-     "one of check-only/shadow-once; live unavailable"),
-    ("KIWOOM_IMAGE_REF", "OCI image digest", "shadow-once", None,
+     "one of check-only/shadow-once/shadow-continuous; live unavailable"),
+    ("KIWOOM_IMAGE_REF", "OCI image digest", "shadow execution", None,
      "shadow activation attestation", False,
      "exact ghcr.io/spicechicken/kiwoom_stock@sha256 digest", ("prod", "production-like")),
-    ("KIWOOM_IMAGE_DIGEST", "OCI image digest", "shadow-once", None,
+    ("KIWOOM_IMAGE_DIGEST", "OCI image digest", "shadow execution", None,
      "shadow activation attestation", False,
      "exact ghcr.io/spicechicken/kiwoom_stock@sha256 digest", ("prod", "production-like")),
-    ("KIWOOM_REQUIRE_SHADOW_VOLUME", "strict boolean", "shadow-once", None,
+    ("KIWOOM_REQUIRE_SHADOW_VOLUME", "strict boolean", "shadow execution", None,
      "shadow volume attestation", False,
      "exactly 1 when the admitted named volume is required", ("prod", "production-like")),
     ("KIWOOM_API_MODE", "enum", "no", "disabled", "runtime composition", False,
@@ -823,12 +823,18 @@ def _api_mode(value: Any, issues: List[SettingsIssue]) -> Optional[KiwoomApiMode
 
 
 def _execution_mode(value: Any, issues: List[SettingsIssue]) -> Optional[ExecutionMode]:
+    admitted = (
+        ExecutionMode.CHECK_ONLY.value,
+        ExecutionMode.SHADOW_ONCE.value,
+        ExecutionMode.SHADOW_CONTINUOUS.value,
+    )
+    rule = "must be check-only, shadow-once, or shadow-continuous; live is unavailable"
     if not isinstance(value, str):
-        issues.append(SettingsIssue("KIWOOM_EXECUTION_MODE", "must be check-only or shadow-once"))
+        issues.append(SettingsIssue("KIWOOM_EXECUTION_MODE", rule))
         return None
     normalized = value.strip().lower()
-    if normalized not in (ExecutionMode.CHECK_ONLY.value, ExecutionMode.SHADOW_ONCE.value):
-        issues.append(SettingsIssue("KIWOOM_EXECUTION_MODE", "must be check-only or shadow-once; live is unavailable"))
+    if normalized not in admitted:
+        issues.append(SettingsIssue("KIWOOM_EXECUTION_MODE", rule))
         return None
     return ExecutionMode(normalized)
 

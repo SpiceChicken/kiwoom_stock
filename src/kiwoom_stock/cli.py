@@ -27,6 +27,13 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_once.add_argument("--source-sha", required=True)
     shadow_once.add_argument("--image-digest", required=True)
     shadow_once.add_argument("--activation-id", required=True)
+    shadow_worker = subparsers.add_parser(
+        "shadow-worker",
+        help="run the bounded fixed-target continuous shadow worker",
+    )
+    shadow_worker.add_argument("--source-sha", required=True)
+    shadow_worker.add_argument("--image-digest", required=True)
+    shadow_worker.add_argument("--activation-id", required=True)
     return parser
 
 
@@ -65,20 +72,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("warning: %s" % warning, file=sys.stderr)
         print("Configuration OK")
         return 0
-    if args.command == "shadow-once":
+    if args.command in ("shadow-once", "shadow-worker"):
         from kiwoom_stock.application.execution import (
             ActivationTuple,
+            ExecutionMode,
             ExecutionPolicy,
+            ExecutionPolicyError,
             SHADOW_PROCESS_LOCK_PATH,
         )
         from kiwoom_stock.application.runtime import create_shadow_runtime
-        from kiwoom_stock.application.shadow_worker import run_shadow_once_managed
+        from kiwoom_stock.application.shadow_worker import (
+            run_shadow_continuous,
+            run_shadow_once_managed,
+        )
         from kiwoom_stock.core import config
         from kiwoom_stock.infrastructure.shadow_process_lock import ShadowProcessLock
         from kiwoom_stock.settings import SettingsValidationError
 
         try:
             settings = config.validate_environment_settings()
+            requested_mode = (
+                ExecutionMode.SHADOW_ONCE
+                if args.command == "shadow-once"
+                else ExecutionMode.SHADOW_CONTINUOUS
+            )
+            if settings.execution.mode is not requested_mode:
+                raise ExecutionPolicyError(
+                    "CLI command and KIWOOM_EXECUTION_MODE must select the same shadow mode"
+                )
             policy = ExecutionPolicy.for_request(
                 settings.execution.mode,
                 ActivationTuple(
@@ -87,16 +108,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     activation_id=args.activation_id,
                 ),
             )
-            result = run_shadow_once_managed(
-                policy,
-                lock_path=SHADOW_PROCESS_LOCK_PATH,
-                runtime_factory=lambda admitted, admission: create_shadow_runtime(
-                    policy=admitted,
-                    settings=settings,
-                    admission=admission,
-                ),
-                lock_factory=ShadowProcessLock,
+            runtime_factory = lambda admitted, admission: create_shadow_runtime(
+                policy=admitted,
+                settings=settings,
+                admission=admission,
             )
+            if requested_mode is ExecutionMode.SHADOW_ONCE:
+                once_result = run_shadow_once_managed(
+                    policy,
+                    lock_path=SHADOW_PROCESS_LOCK_PATH,
+                    runtime_factory=runtime_factory,
+                    lock_factory=ShadowProcessLock,
+                )
+                result_payload = once_result.to_safe_dict()
+                exit_code = 0
+            else:
+                continuous_result = run_shadow_continuous(
+                    policy,
+                    lock_path=SHADOW_PROCESS_LOCK_PATH,
+                    runtime_factory=runtime_factory,
+                    emit=lambda evidence: print(
+                        json.dumps(evidence, sort_keys=True), flush=True
+                    ),
+                    lock_factory=ShadowProcessLock,
+                )
+                result_payload = continuous_result.to_safe_dict()
+                exit_code = continuous_result.exit_code
         except SettingsValidationError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -109,7 +146,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(json.dumps(result.to_safe_dict(), sort_keys=True))
-        return 0
+        print(json.dumps(result_payload, sort_keys=True))
+        return exit_code
     parser.print_help()
     return 0

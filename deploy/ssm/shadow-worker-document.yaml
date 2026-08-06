@@ -1,11 +1,12 @@
 schemaVersion: "2.2"
-description: Run one bounded market-only Kiwoom shadow cycle or stop its container
+description: Start or stop bounded market-only Kiwoom shadow execution
 parameters:
   DesiredState:
     type: String
     description: Bounded shadow action
     allowedValues:
       - oneshot
+      - continuous
       - stop
     interpolationType: ENV_VAR
   ImageDigest:
@@ -49,16 +50,21 @@ mainSteps:
       timeoutSeconds: "1020"
       runCommand:
         - >-
-          if [ "$SSM_DesiredState" = oneshot ]; then
+          if [ "$SSM_DesiredState" = oneshot ] || [ "$SSM_DesiredState" = continuous ]; then
           exec /usr/local/sbin/kiwoom-shadow-worker
+          --desired-state "$SSM_DesiredState"
           --image "$SSM_ImageDigest"
           --source-sha "$SSM_SourceSha"
           --activation-id "$SSM_ActivationId"
           --compose-shadow-sha256 "$SSM_ComposeShadowSha256"
           --expected-instance-id "$SSM_ExpectedInstanceId"
           --region "$SSM_Region";
-          else
-          exec /usr/local/sbin/kiwoom-shadow-worker --stop
+          elif [ "$SSM_DesiredState" = stop ]; then
+          exec /usr/local/sbin/kiwoom-shadow-worker --desired-state stop
+          --image "$SSM_ImageDigest"
+          --source-sha "$SSM_SourceSha"
+          --activation-id "$SSM_ActivationId"
           --expected-instance-id "$SSM_ExpectedInstanceId"
           --region "$SSM_Region";
+          else exit 64;
           fi
