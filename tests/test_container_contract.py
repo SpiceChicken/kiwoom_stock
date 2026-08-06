@@ -1,10 +1,12 @@
 """Static contract checks for Docker and Compose files."""
 
 import ast
+import importlib.util
 import os
 from pathlib import Path
 
 import yaml
+import pytest
 
 from kiwoom_stock.settings import SETTING_SPEC_BY_NAME
 
@@ -353,6 +355,52 @@ def test_runtime_secret_entrypoint_is_the_only_enabled_mode_copy_boundary():
         assert "/run/secrets:mode=0700" in app["tmpfs"]
         assert "/run/kiwoom-secrets:mode=0700" in app["tmpfs"]
         assert app["cap_add"] == ["CHOWN", "SETGID", "SETUID"]
+
+
+def test_runtime_entrypoint_enforces_image_tuple_for_both_shadow_modes(monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "kiwoom_runtime_entrypoint",
+        "docker/runtime_entrypoint.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    digest = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "a" * 64
+
+    for mode, process in (
+        ("shadow-once", "kiwoom-shadow-once"),
+        ("shadow-continuous", "kiwoom-shadow-worker"),
+    ):
+        monkeypatch.setenv("KIWOOM_EXECUTION_MODE", mode)
+        monkeypatch.setenv("KIWOOM_PROCESS_NAME", process)
+        monkeypatch.setenv("KIWOOM_IMAGE_REF", digest)
+        monkeypatch.setenv("KIWOOM_IMAGE_DIGEST", digest)
+        module._validate_shadow_image_tuple()
+
+        monkeypatch.setenv(
+            "KIWOOM_IMAGE_DIGEST",
+            "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64,
+        )
+        with pytest.raises(RuntimeError, match="must match"):
+            module._validate_shadow_image_tuple()
+
+
+def test_runtime_entrypoint_rejects_crossed_shadow_mode_process_pair(monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "kiwoom_runtime_entrypoint_cross_pair",
+        "docker/runtime_entrypoint.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    digest = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "a" * 64
+    monkeypatch.setenv("KIWOOM_EXECUTION_MODE", "shadow-continuous")
+    monkeypatch.setenv("KIWOOM_PROCESS_NAME", "kiwoom-shadow-once")
+    monkeypatch.setenv("KIWOOM_IMAGE_REF", digest)
+    monkeypatch.setenv("KIWOOM_IMAGE_DIGEST", digest)
+
+    with pytest.raises(RuntimeError, match="mode and process name"):
+        module._validate_shadow_image_tuple()
 
 
 def test_documented_database_consumer_matches_typed_registry():

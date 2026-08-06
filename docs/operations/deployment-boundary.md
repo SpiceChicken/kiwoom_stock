@@ -26,9 +26,9 @@ or invoke Slack, S3, or Gemini.
    original run, build job, unique artifact, exact source Compose bytes, and
    anonymous public image contract before it sends one bounded SSM command and
    polls it to completion. That command runs only `--check-config`.
-3. **Shadow worker activation** is a separate protected, one-shot command plane.
-   The first real run is still pending immutable-image publication and host
-   rollout; it does not grant order or account capability.
+3. **Shadow worker activation** is a separate protected, bounded command plane.
+   It admits exact `oneshot`, `continuous`, or `stop` actions and never grants
+   order or account capability.
 4. **Live trading activation** is a separate, explicit approval. No workflow in
    this repository grants it.
 
@@ -151,21 +151,41 @@ Missing package visibility, GitHub Environment approval, OIDC configuration, IAM
 application, SSM execution, or host evidence is `BLOCKED`, not a presumed success.
 See [GitHub-to-EC2 container deployment](github-ec2-container-deployment.md).
 
-## Shadow one-shot activation boundary
+## Bounded shadow activation boundary
 
 The shadow activation artifacts are deliberately separate from the check-only
 promotion path:
 
 - `.github/workflows/cd-shadow-worker-activation.yml` accepts only an exact
-  source SHA, public GHCR digest, successful candidate run ID, shadow Compose
-  hash, and a bounded activation ID;
-- `KiwoomStock-ShadowWorker` accepts only `oneshot` or `stop` and invokes the
+  source SHA, public GHCR digest, and bounded activation ID. `oneshot` and
+  `continuous` additionally require a successful candidate run and shadow
+  Compose hash; `stop` does not revalidate or pull a new candidate;
+- `KiwoomStock-ShadowWorker` accepts only `oneshot`, `continuous`, or `stop` and invokes the
   root-owned `/usr/local/sbin/kiwoom-shadow-worker` on the fixed EC2 instance;
 - `deploy/ec2/shadow_worker_control.sh` verifies instance identity, root-owned
   `0400` credential files, image revision/user/entrypoint, and the exact
-  `compose.shadow.yaml` hash before running one container;
+  `compose.shadow.yaml` hash before running one exact container;
 - the shadow named volume is never removed by the executor, and the command
   reports only redacted tuple/status evidence.
+
+One-shot remains the Compose default. Continuous render is selected only by the
+root-owned host executor with the exact mode/process/CLI triple; arbitrary shell
+or command input is not accepted by workflow or SSM. Continuous start is detached
+only after a first redacted safe cycle is observed. That versioned evidence must
+report exactly six HTTP attempts, one call to each allowlisted market endpoint,
+and strict integer local counters. Status is exactly one, error/critical are zero,
+and one cycle permits no paper transition, one buy, or one sell; missing, extra,
+boolean, floating-point, out-of-range, or simultaneous buy/sell values fail
+activation. It uses a fresh one-shot
+runtime per cycle, a 60-second completion-to-start gate, one process lock, a
+15-minute hard cap, `restart: "no"`, and 30-second signal shutdown. Stop targets
+only the exact container. The expected source SHA, image digest, and activation
+ID travel through workflow, SSM, host arguments, container labels/config, and
+terminal JSON. Mismatch or container absence is a nonzero failure. After exact
+identity comparison, stop verifies either a clean signal transition
+(`STOPPED`/`stop-requested`) or an already-exited natural cap
+(`DEADLINE`/`run-deadline`), requires a non-137 zero exit, removes that exact
+container, and preserves its named volume and image.
 
 The protected `production-shadow` Environment must provide the distinct
 `KIWOOM_AWS_SHADOW_ROLE_ARN` variable. The role policy is limited to the custom

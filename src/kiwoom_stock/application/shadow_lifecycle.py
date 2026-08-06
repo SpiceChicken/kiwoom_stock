@@ -23,9 +23,70 @@ class ShadowDeadlineExceeded(ShadowLifecycleError):
     """The monotonic shutdown deadline has elapsed."""
 
 
+class ShadowRunDeadlineExceeded(ShadowDeadlineExceeded):
+    """The fixed process-level exposure cap elapsed."""
+
+
+class ShadowShutdownDeadlineExceeded(ShadowDeadlineExceeded):
+    """The signal-triggered graceful shutdown budget elapsed."""
+
+
 MonotonicClock = Callable[[], float]
 LifecycleResult = TypeVar("LifecycleResult")
 SHUTDOWN_TIMEOUT_SECONDS = 30.0
+SHADOW_CONTINUOUS_INTERVAL_SECONDS = 60.0
+SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS = 15.0 * 60.0
+
+
+class SignalLatch:
+    """Event-compatible owner that records signal time without handler locking."""
+
+    def __init__(self, event: threading.Event, clock: MonotonicClock) -> None:
+        self._event = event
+        self._clock = clock
+        self._signal_times: list[float] = []
+        self._lock = threading.Lock()
+        self._shutdown_deadline: ShutdownDeadline | None = None
+
+    def signal(self) -> None:
+        """Record a signal using only reentrant-safe primitives, then set Event."""
+
+        self._signal_times.append(self._clock())
+        self._event.set()
+
+    def _materialize_deadline(self) -> None:
+        if not self._event.is_set():
+            return
+        if not self._signal_times:
+            self._signal_times.append(self._clock())
+        first_signal_at = min(self._signal_times)
+        candidate = ShutdownDeadline(
+            expires_at=first_signal_at + SHUTDOWN_TIMEOUT_SECONDS,
+            timeout_seconds=SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        with self._lock:
+            if (
+                self._shutdown_deadline is None
+                or candidate.expires_at < self._shutdown_deadline.expires_at
+            ):
+                self._shutdown_deadline = candidate
+
+    def set(self) -> None:
+        self.signal()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        observed = self._event.wait(timeout)
+        if observed:
+            self._materialize_deadline()
+        return observed
+
+    @property
+    def shutdown_deadline(self) -> ShutdownDeadline | None:
+        self._materialize_deadline()
+        return self._shutdown_deadline
 
 
 def check_lifecycle(
@@ -35,10 +96,10 @@ def check_lifecycle(
 ) -> None:
     """Cooperatively stop at every application/infrastructure boundary."""
 
-    if stop_event is not None and stop_event.is_set():
-        raise ShadowStopRequested("shadow stop requested")
     if deadline_remaining is not None:
         deadline_remaining()
+    if stop_event is not None and stop_event.is_set():
+        raise ShadowStopRequested("shadow stop requested")
 
 
 @dataclass(frozen=True)
@@ -84,6 +145,65 @@ class ShutdownDeadline:
         return remaining
 
 
+@dataclass(frozen=True)
+class RunDeadline:
+    """Process-level monotonic exposure cap for continuous shadow execution."""
+
+    started_at: float
+    expires_at: float
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        clock: MonotonicClock = time.monotonic,
+        timeout_seconds: float = SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS,
+    ) -> "RunDeadline":
+        if isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
+            raise ValueError("run timeout must be positive")
+        started_at = clock()
+        return cls(started_at=started_at, expires_at=started_at + float(timeout_seconds))
+
+    def remaining(self, *, clock: MonotonicClock = time.monotonic) -> float:
+        remaining = self.expires_at - clock()
+        if remaining <= 0:
+            raise ShadowRunDeadlineExceeded("shadow continuous run deadline exceeded")
+        return remaining
+
+    def elapsed(self, *, clock: MonotonicClock = time.monotonic) -> float:
+        return max(0.0, clock() - self.started_at)
+
+
+@dataclass
+class ContinuousLifecycle:
+    """Own the run cap and a lazily-started signal shutdown budget."""
+
+    stop_event: SignalLatch
+    run_deadline: RunDeadline
+    clock: MonotonicClock = time.monotonic
+
+    def stop_requested(self) -> bool:
+        requested = self.stop_event.is_set()
+        return requested
+
+    def remaining(self) -> float:
+        run_remaining = self.run_deadline.remaining(clock=self.clock)
+        if not self.stop_requested():
+            return run_remaining
+        shutdown_deadline = self.stop_event.shutdown_deadline
+        if shutdown_deadline is None:
+            raise ShadowShutdownDeadlineExceeded(
+                "shadow signal timestamp was not latched"
+            )
+        try:
+            shutdown_remaining = shutdown_deadline.remaining(clock=self.clock)
+        except ShadowDeadlineExceeded:
+            raise ShadowShutdownDeadlineExceeded(
+                "shadow signal shutdown deadline exceeded"
+            ) from None
+        return min(run_remaining, shutdown_remaining)
+
+
 @dataclass
 class ShadowStopController:
     """Translate process signals into an async-safe Event state change."""
@@ -94,7 +214,11 @@ class ShadowStopController:
 
     def _handle_signal(self, signum: int, _frame: FrameType | None) -> None:
         del signum
-        self.stop_event.set()
+        signal_setter = getattr(self.stop_event, "signal", None)
+        if callable(signal_setter):
+            signal_setter()
+        else:
+            self.stop_event.set()
 
     @property
     def stop_requested(self) -> bool:

@@ -14,11 +14,20 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as xcals
 
 from kiwoom_stock.application.execution import (
+    ExecutionMode,
     ExecutionPolicy,
     SHADOW_PROCESS_LOCK_PATH,
 )
 from kiwoom_stock.application.shadow_lifecycle import (
+    ContinuousLifecycle,
+    RunDeadline,
+    SHADOW_CONTINUOUS_INTERVAL_SECONDS,
+    SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS,
     SHUTDOWN_TIMEOUT_SECONDS,
+    SignalLatch,
+    ShadowRunDeadlineExceeded,
+    ShadowShutdownDeadlineExceeded,
+    ShadowStopRequested,
     ShutdownDeadline,
     check_lifecycle,
     signal_stop_event,
@@ -26,10 +35,35 @@ from kiwoom_stock.application.shadow_lifecycle import (
 
 
 _SEOUL = ZoneInfo("Asia/Seoul")
+SHADOW_EVIDENCE_SCHEMA_VERSION = 1
 
 
 class ShadowWorkerError(RuntimeError):
     """Safe terminal shadow worker failure."""
+
+
+class ShadowTerminalReason(str, Enum):
+    STOP_REQUESTED = "stop-requested"
+    RUN_DEADLINE = "run-deadline"
+    SHUTDOWN_DEADLINE = "shutdown-deadline"
+    FAILURE = "failure"
+    CALENDAR_CLOSED = "calendar-closed"
+
+
+class ShadowCycleTerminated(ShadowWorkerError):
+    """Typed terminal outcome after runtime cleanup has completed."""
+
+    def __init__(
+        self,
+        reason: ShadowTerminalReason,
+        *,
+        resources_closed: bool,
+        error_type: str | None = None,
+    ) -> None:
+        self.reason = reason
+        self.resources_closed = resources_closed
+        self.error_type = error_type
+        super().__init__("shadow cycle terminated")
 
 
 class CalendarUnavailableError(ShadowWorkerError):
@@ -73,6 +107,42 @@ class ShadowRuntimePort(Protocol):
     def execute_once(self) -> ShadowExecutionReceipt: ...
 
 
+class StopEventPort(Protocol):
+    def set(self) -> None: ...
+
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+class RuntimeStopEvent:
+    """Raise the typed stop transition at runtime lifecycle checkpoints."""
+
+    def __init__(
+        self,
+        event: StopEventPort,
+        observe_stop: Callable[[], bool],
+    ) -> None:
+        self._event = event
+        self._observe_stop = observe_stop
+        self._terminal_raised = False
+
+    def set(self) -> None:
+        self._event.set()
+
+    def is_set(self) -> bool:
+        if self._event.is_set():
+            self._observe_stop()
+            if not self._terminal_raised:
+                self._terminal_raised = True
+                raise ShadowStopRequested("shadow stop requested")
+            return True
+        return False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
+
 def seoul_now() -> datetime:
     return datetime.now(_SEOUL)
 
@@ -110,6 +180,7 @@ class ShadowRunResult:
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": SHADOW_EVIDENCE_SCHEMA_VERSION,
             "status": self.status,
             "mode": self.mode,
             "kst_date": self.kst_date,
@@ -129,6 +200,46 @@ class ShadowRunResult:
         }
 
 
+@dataclass(frozen=True)
+class ShadowContinuousResult:
+    """Redacted terminal summary for one bounded continuous process."""
+
+    status: str
+    mode: str
+    source_sha: str
+    image_digest: str
+    activation_id: str
+    cycles: int
+    elapsed_seconds: float
+    resources_closed: bool
+    side_effects: Mapping[str, bool]
+    reason: str
+    error_type: str | None = None
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.status == "FAILED" or not self.resources_closed else 0
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "schema_version": SHADOW_EVIDENCE_SCHEMA_VERSION,
+            "event": "terminal",
+            "status": self.status,
+            "mode": self.mode,
+            "source_sha": self.source_sha,
+            "image_digest": self.image_digest,
+            "activation_id": self.activation_id,
+            "cycles": self.cycles,
+            "elapsed_seconds": round(self.elapsed_seconds, 6),
+            "resources_closed": self.resources_closed,
+            "side_effects": dict(self.side_effects),
+            "reason": self.reason,
+        }
+        if self.error_type is not None:
+            result["error_type"] = self.error_type
+        return result
+
+
 def run_shadow_once(
     policy: ExecutionPolicy,
     *,
@@ -145,6 +256,18 @@ def run_shadow_once(
             stop_event=stop_event,
             deadline_remaining=deadline_remaining,
         )
+    except ShadowStopRequested:
+        raise ShadowCycleTerminated(
+            ShadowTerminalReason.STOP_REQUESTED,
+            resources_closed=True,
+        ) from None
+    except (ShadowRunDeadlineExceeded, ShadowShutdownDeadlineExceeded) as error:
+        reason = (
+            ShadowTerminalReason.RUN_DEADLINE
+            if isinstance(error, ShadowRunDeadlineExceeded)
+            else ShadowTerminalReason.SHUTDOWN_DEADLINE
+        )
+        raise ShadowCycleTerminated(reason, resources_closed=True) from None
     except Exception as error:
         raise ShadowWorkerError("shadow lifecycle budget rejected admission") from error
     now = clock()
@@ -158,6 +281,18 @@ def run_shadow_once(
             stop_event=stop_event,
             deadline_remaining=deadline_remaining,
         )
+    except ShadowStopRequested:
+        raise ShadowCycleTerminated(
+            ShadowTerminalReason.STOP_REQUESTED,
+            resources_closed=True,
+        ) from None
+    except (ShadowRunDeadlineExceeded, ShadowShutdownDeadlineExceeded) as error:
+        reason = (
+            ShadowTerminalReason.RUN_DEADLINE
+            if isinstance(error, ShadowRunDeadlineExceeded)
+            else ShadowTerminalReason.SHUTDOWN_DEADLINE
+        )
+        raise ShadowCycleTerminated(reason, resources_closed=True) from None
     except Exception as error:
         raise ShadowWorkerError("shadow lifecycle budget rejected admission") from error
     if not isinstance(decision, CalendarDecision):
@@ -186,29 +321,55 @@ def run_shadow_once(
             **common,
         )
 
-    runtime = runtime_factory(
-        policy,
-        ShadowAdmission(
-            now=kst_now,
-            kst_date=kst_date,
-            decision=decision,
-            stop_event=stop_event,
-            deadline_remaining=deadline_remaining,
-        ),
-    )
     try:
-        check_lifecycle(
-            stop_event=stop_event,
-            deadline_remaining=deadline_remaining,
+        runtime = runtime_factory(
+            policy,
+            ShadowAdmission(
+                now=kst_now,
+                kst_date=kst_date,
+                decision=decision,
+                stop_event=stop_event,
+                deadline_remaining=deadline_remaining,
+            ),
         )
-    except Exception as error:
-        raise ShadowWorkerError("shadow lifecycle budget rejected runtime") from error
+    except ShadowCycleTerminated:
+        raise
+    except ShadowStopRequested:
+        raise ShadowCycleTerminated(
+            ShadowTerminalReason.STOP_REQUESTED,
+            resources_closed=True,
+        ) from None
+    except ShadowRunDeadlineExceeded:
+        raise ShadowCycleTerminated(
+            ShadowTerminalReason.RUN_DEADLINE,
+            resources_closed=True,
+        ) from None
+    except ShadowShutdownDeadlineExceeded:
+        raise ShadowCycleTerminated(
+            ShadowTerminalReason.SHUTDOWN_DEADLINE,
+            resources_closed=True,
+        ) from None
     receipt = runtime.execute_once()
     try:
         check_lifecycle(
             stop_event=stop_event,
             deadline_remaining=deadline_remaining,
         )
+    except ShadowStopRequested:
+        raise ShadowCycleTerminated(
+            ShadowTerminalReason.STOP_REQUESTED,
+            resources_closed=receipt.resources_closed,
+        ) from None
+    except (ShadowRunDeadlineExceeded, ShadowShutdownDeadlineExceeded) as error:
+        reason = (
+            ShadowTerminalReason.RUN_DEADLINE
+            if isinstance(error, ShadowRunDeadlineExceeded)
+            else ShadowTerminalReason.SHUTDOWN_DEADLINE
+        )
+        raise ShadowCycleTerminated(
+            reason,
+            resources_closed=receipt.resources_closed,
+        ) from None
     except Exception as error:
         raise ShadowWorkerError("shadow lifecycle budget exceeded during execution") from error
     if receipt.cycles != 1:
@@ -264,16 +425,162 @@ def run_shadow_once_managed(
                     "shadow stop requested before admission "
                     f"(remaining={deadline.remaining(monotonic=monotonic_clock):.6f})"
                 )
-            result = run_shadow_once(
-                policy,
-                runtime_factory=runtime_factory,
-                clock=clock,
-                calendar=calendar,
-                stop_event=event,
-                deadline_remaining=lambda: deadline.remaining(monotonic=monotonic_clock),
-            )
+            try:
+                result = run_shadow_once(
+                    policy,
+                    runtime_factory=runtime_factory,
+                    clock=clock,
+                    calendar=calendar,
+                    stop_event=event,
+                    deadline_remaining=lambda: deadline.remaining(
+                        monotonic=monotonic_clock
+                    ),
+                )
+            except ShadowCycleTerminated as error:
+                raise ShadowWorkerError(
+                    "shadow lifecycle budget terminated one-shot execution"
+                ) from error
             deadline.remaining(monotonic=monotonic_clock)
             return result
+
+
+def run_shadow_continuous(
+    policy: ExecutionPolicy,
+    *,
+    runtime_factory: Callable[[ExecutionPolicy, ShadowAdmission], ShadowRuntimePort],
+    emit: Callable[[Mapping[str, Any]], None],
+    lock_path: str | Path = SHADOW_PROCESS_LOCK_PATH,
+    clock: Callable[[], datetime] = seoul_now,
+    calendar: Callable[[date], CalendarDecision] = strict_krx_calendar,
+    stop_event: StopEventPort | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    lock_factory: Callable[[str | Path], Any] | None = None,
+) -> ShadowContinuousResult:
+    """Repeat the verified one-shot primitive under one bounded process owner."""
+
+    if policy.mode is not ExecutionMode.SHADOW_CONTINUOUS:
+        raise ShadowWorkerError("continuous runner requires shadow-continuous policy")
+    if lock_factory is None:
+        raise ShadowWorkerError("shadow process lock adapter was not injected")
+    event: StopEventPort = stop_event if stop_event is not None else Event()
+    deadline = RunDeadline.start(
+        clock=monotonic,
+        timeout_seconds=SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS,
+    )
+    signal_latch = SignalLatch(event, monotonic)  # type: ignore[arg-type]
+    lifecycle = ContinuousLifecycle(
+        stop_event=signal_latch,
+        run_deadline=deadline,
+        clock=monotonic,
+    )
+    runtime_stop_event = RuntimeStopEvent(signal_latch, lifecycle.stop_requested)
+    activation = policy.activation
+    cycles = 0
+    last_closed = True
+
+    def terminal(
+        status: str,
+        reason: ShadowTerminalReason,
+        error_type: str | None = None,
+    ) -> ShadowContinuousResult:
+        return ShadowContinuousResult(
+            status=status,
+            mode=policy.mode.value,
+            source_sha=activation.source_sha,
+            image_digest=activation.image_digest,
+            activation_id=activation.activation_id,
+            cycles=cycles,
+            elapsed_seconds=deadline.elapsed(clock=monotonic),
+            resources_closed=last_closed,
+            side_effects=_zero_external_side_effects(),
+            reason=reason.value,
+            error_type=error_type,
+        )
+
+    try:
+        with signal_stop_event(signal_latch):  # type: ignore[arg-type]
+            with lock_factory(lock_path):
+                while True:
+                    if lifecycle.stop_requested():
+                        return terminal("STOPPED", ShadowTerminalReason.STOP_REQUESTED)
+                    try:
+                        lifecycle.remaining()
+                    except ShadowRunDeadlineExceeded:
+                        return terminal("DEADLINE", ShadowTerminalReason.RUN_DEADLINE)
+                    except ShadowShutdownDeadlineExceeded:
+                        return terminal("FAILED", ShadowTerminalReason.SHUTDOWN_DEADLINE)
+                    cycle_started = monotonic()
+                    last_closed = False
+                    try:
+                        result = run_shadow_once(
+                            policy,
+                            runtime_factory=runtime_factory,
+                            clock=clock,
+                            calendar=calendar,
+                            stop_event=runtime_stop_event,  # type: ignore[arg-type]
+                            deadline_remaining=lifecycle.remaining,
+                        )
+                    except ShadowCycleTerminated as error:
+                        last_closed = error.resources_closed
+                        if not last_closed:
+                            return terminal(
+                                "FAILED",
+                                error.reason,
+                                error.error_type,
+                            )
+                        if error.reason is ShadowTerminalReason.STOP_REQUESTED:
+                            return terminal("STOPPED", error.reason)
+                        if error.reason is ShadowTerminalReason.RUN_DEADLINE:
+                            return terminal("DEADLINE", error.reason)
+                        return terminal("FAILED", error.reason, error.error_type)
+                    except BaseException as error:
+                        last_closed = False
+                        return terminal(
+                            "FAILED",
+                            ShadowTerminalReason.FAILURE,
+                            type(error).__name__,
+                        )
+                    last_closed = result.resources_closed
+                    if result.status == "CLOSED":
+                        return terminal(
+                            "CLOSED",
+                            ShadowTerminalReason.CALENDAR_CLOSED,
+                        )
+                    cycles += 1
+                    cycle_evidence = result.to_safe_dict()
+                    cycle_evidence.update(
+                        {
+                            "event": "cycle",
+                            "cycle_index": cycles,
+                            "elapsed_seconds": round(
+                                max(0.0, monotonic() - cycle_started), 6
+                            ),
+                            "interval_seconds": SHADOW_CONTINUOUS_INTERVAL_SECONDS,
+                        }
+                    )
+                    emit(cycle_evidence)
+                    try:
+                        remaining = lifecycle.remaining()
+                    except ShadowRunDeadlineExceeded:
+                        return terminal("DEADLINE", ShadowTerminalReason.RUN_DEADLINE)
+                    except ShadowShutdownDeadlineExceeded:
+                        return terminal("FAILED", ShadowTerminalReason.SHUTDOWN_DEADLINE)
+                    wait_seconds = min(SHADOW_CONTINUOUS_INTERVAL_SECONDS, remaining)
+                    if signal_latch.wait(wait_seconds):
+                        lifecycle.stop_requested()
+                        return terminal("STOPPED", ShadowTerminalReason.STOP_REQUESTED)
+                    try:
+                        lifecycle.remaining()
+                    except ShadowRunDeadlineExceeded:
+                        return terminal("DEADLINE", ShadowTerminalReason.RUN_DEADLINE)
+                    except ShadowShutdownDeadlineExceeded:
+                        return terminal("FAILED", ShadowTerminalReason.SHUTDOWN_DEADLINE)
+    except BaseException as error:
+        return terminal(
+            "FAILED",
+            ShadowTerminalReason.FAILURE,
+            type(error).__name__,
+        )
 
 
 def _zero_external_side_effects() -> dict[str, bool]:

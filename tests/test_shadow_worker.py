@@ -26,13 +26,21 @@ from kiwoom_stock.application.runtime import (
     ShadowRuntime,
     create_shadow_runtime,
 )
+from kiwoom_stock.application.shadow_lifecycle import (
+    ShadowRunDeadlineExceeded,
+    ShadowStopRequested,
+)
 from kiwoom_stock.application.shadow_worker import (
     CalendarDecision,
     CalendarUnavailableError,
     ShadowAdmission,
     ShadowExecutionReceipt,
+    ShadowCycleTerminated,
+    ShadowTerminalReason,
+    RuntimeStopEvent,
     ShadowWorkerError,
     run_shadow_once,
+    run_shadow_continuous,
     run_shadow_once_managed,
 )
 from kiwoom_stock.infrastructure.kiwoom_market_only import (
@@ -48,6 +56,17 @@ from kiwoom_stock.settings import Settings
 def _policy() -> ExecutionPolicy:
     return ExecutionPolicy.for_request(
         ExecutionMode.SHADOW_ONCE,
+        ActivationTuple(
+            source_sha="a" * 40,
+            image_digest="ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64,
+            activation_id="shadow-test-1",
+        ),
+    )
+
+
+def _continuous_policy() -> ExecutionPolicy:
+    return ExecutionPolicy.for_request(
+        ExecutionMode.SHADOW_CONTINUOUS,
         ActivationTuple(
             source_sha="a" * 40,
             image_digest="ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64,
@@ -75,6 +94,299 @@ class FakeRuntime:
             resources_closed=True,
             local_counts={},
         )
+
+
+class AdvancingStopEvent:
+    def __init__(self, now, *, stop_after_waits=None):
+        self.now = now
+        self.stop_after_waits = stop_after_waits
+        self.waits = []
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def is_set(self):
+        return self._set
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        self.now[0] += timeout or 0
+        if self.stop_after_waits == len(self.waits):
+            self._set = True
+        return self._set
+
+
+def test_runtime_stop_event_raises_typed_transition_once_then_allows_cleanup_checks():
+    raw = threading.Event()
+    observations = []
+    event = RuntimeStopEvent(raw, lambda: observations.append("stop") or True)
+    assert event.is_set() is False
+    raw.set()
+    with pytest.raises(ShadowStopRequested):
+        event.is_set()
+    assert event.is_set() is True
+    assert observations == ["stop", "stop"]
+
+def test_continuous_uses_fresh_one_shot_runtime_and_interruptible_sixty_second_gate(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now, stop_after_waits=2)
+    runtimes = []
+    evidence = []
+
+    def factory(*_args):
+        runtime = FakeRuntime()
+        runtimes.append(runtime)
+        return runtime
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=evidence.append,
+        lock_path=(tmp_path / "continuous.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "STOPPED"
+    assert result.exit_code == 0
+    assert len(runtimes) == 2
+    assert all(runtime.events == ["execute_once"] for runtime in runtimes)
+    assert event.waits == [60.0, 60.0]
+    assert [item["cycle_index"] for item in evidence] == [1, 2]
+    assert all(item["resources_closed"] is True for item in evidence)
+    assert all(not any(item["side_effects"].values()) for item in evidence)
+
+
+def test_continuous_hard_deadline_stops_before_constructing_another_cycle(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now)
+    constructions = []
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda *_args: constructions.append(now[0]) or FakeRuntime(),
+        emit=lambda _evidence: None,
+        lock_path=(tmp_path / "deadline.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "DEADLINE"
+    assert result.cycles == 15
+    assert len(constructions) == 15
+    assert now[0] == 900.0
+
+
+def test_continuous_failure_is_redacted_and_never_starts_next_cycle(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now)
+    constructions = []
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda *_args: constructions.append("runtime") or FakeRuntime(
+            cycle_error=RuntimeError("secret provider body")
+        ),
+        emit=lambda _evidence: pytest.fail("failed cycle emitted as safe"),
+        lock_path=(tmp_path / "failure.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.exit_code == 1
+    assert result.error_type == "RuntimeError"
+    assert constructions == ["runtime"]
+    assert "secret" not in json.dumps(result.to_safe_dict())
+
+
+def test_continuous_signal_cleanup_failure_is_failed_nonzero(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now)
+
+    class CleanupFailureRuntime:
+        def __init__(self, admission):
+            self.admission = admission
+
+        def execute_once(self):
+            self.admission.stop_event.set()
+            raise ShadowCycleTerminated(
+                ShadowTerminalReason.STOP_REQUESTED,
+                resources_closed=False,
+                error_type="CleanupError",
+            )
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda _policy_value, admission: CleanupFailureRuntime(admission),
+        emit=lambda _evidence: pytest.fail("failed cycle emitted"),
+        lock_path=(tmp_path / "cleanup-failure.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.exit_code == 1
+    assert result.resources_closed is False
+    assert result.reason == "stop-requested"
+
+
+def test_active_cycle_signal_gives_runtime_dynamic_thirty_second_close_budget(tmp_path):
+    now = [10.0]
+    event = AdvancingStopEvent(now)
+    remaining_seen = []
+
+    class SignalDuringRuntime:
+        def __init__(self, admission):
+            self.admission = admission
+
+        def execute_once(self):
+            self.admission.stop_event.set()
+            remaining_seen.append(self.admission.deadline_remaining())
+            now[0] += 29.0
+            remaining_seen.append(self.admission.deadline_remaining())
+            return ShadowExecutionReceipt(
+                cycles=1,
+                http_attempts=0,
+                api_counts={},
+                db_identity=str(SHADOW_DATABASE_PATH),
+                resources_closed=True,
+                local_counts={},
+            )
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda _policy_value, admission: SignalDuringRuntime(admission),
+        emit=lambda _evidence: pytest.fail("stopped cycle emitted"),
+        lock_path=(tmp_path / "signal-budget.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert remaining_seen == [30.0, 1.0]
+    assert result.status == "STOPPED"
+    assert result.exit_code == 0
+    assert result.resources_closed is True
+    assert result.reason == "stop-requested"
+
+
+def test_active_cycle_shutdown_budget_expiry_preserves_typed_failure_reason(tmp_path):
+    now = [10.0]
+    event = AdvancingStopEvent(now)
+
+    class Monitor:
+        def __init__(self, stop_event):
+            self.stop_event = stop_event
+
+        def run_shadow_cycle(self, _stock_code):
+            self.stop_event.set()
+            self.stop_event.is_set()
+            pytest.fail("typed stop was not raised")
+
+        def close(self):
+            now[0] += 30.0
+
+    class Closable:
+        attempt_count = 0
+
+        def safe_counts(self):
+            return {}
+
+        def close(self):
+            return None
+
+    def factory(policy, admission):
+        client = Closable()
+        return ShadowRuntime(
+            policy=policy,
+            client=client,
+            monitor=Monitor(admission.stop_event),
+            notifier=SimpleNamespace(safe_counts=lambda: {}),
+            db_path=SHADOW_DATABASE_PATH,
+            session=Closable(),
+            stop_event=admission.stop_event,
+            deadline_remaining=admission.deadline_remaining,
+        )
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: pytest.fail("expired cycle emitted"),
+        lock_path=(tmp_path / "shutdown-expired.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.exit_code == 1
+    assert result.reason == "shutdown-deadline"
+
+
+def test_unrelated_primary_failure_crossing_run_deadline_remains_failed(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now)
+
+    class Monitor:
+        def run_shadow_cycle(self, _stock_code):
+            raise ValueError("provider failure")
+
+        def close(self):
+            now[0] = 900.0
+
+    class Closable:
+        attempt_count = 0
+
+        def safe_counts(self):
+            return {}
+
+        def close(self):
+            return None
+
+    def factory(policy, admission):
+        return ShadowRuntime(
+            policy=policy,
+            client=Closable(),
+            monitor=Monitor(),
+            notifier=SimpleNamespace(safe_counts=lambda: {}),
+            db_path=SHADOW_DATABASE_PATH,
+            session=Closable(),
+            stop_event=admission.stop_event,
+            deadline_remaining=admission.deadline_remaining,
+        )
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: pytest.fail("failed cycle emitted"),
+        lock_path=(tmp_path / "failure-precedence.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.exit_code == 1
+    assert result.reason == "failure"
+    assert result.error_type == "ValueError"
 
 
 def test_closed_calendar_constructs_no_credentials_client_or_database():
@@ -532,6 +844,32 @@ def _shadow_settings(tmp_path, _db_path):
     )
 
 
+def test_continuous_shadow_composition_requires_exact_process_name_before_credentials(tmp_path):
+    credentials_dir = tmp_path / "continuous-credentials"
+    credentials_dir.mkdir()
+    settings = Settings.from_mapping(
+        {
+            "KIWOOM_EXECUTION_MODE": "shadow-continuous",
+            "KIWOOM_API_MODE": "prod",
+            "KIWOOM_APP_ENV": "prod",
+            "KIWOOM_PROCESS_NAME": "kiwoom-shadow-once",
+            "KIWOOM_CREDENTIALS_DIR": str(credentials_dir.resolve()),
+            "KIWOOM_DB_PATH": str(SHADOW_DATABASE_PATH),
+        }
+    )
+    calls = []
+
+    with pytest.raises(RuntimeError, match="kiwoom-shadow-worker"):
+        create_shadow_runtime(
+            policy=_continuous_policy(),
+            settings=settings,
+            admission=_open_admission(),
+            credential_provider_factory=lambda _path: calls.append("credentials"),
+        )
+
+    assert calls == []
+
+
 def _shadow_runtime(tmp_path, db_path, now, configure_engine=None):
     credentials = KiwoomClientCredentials(
         SensitiveText("synthetic-app-key"),
@@ -793,12 +1131,19 @@ class _LatchClient:
         return None
 
 
-def _latch_runtime(monitor, client=None, session=None):
+def _latch_runtime(monitor, client=None, session=None, local_counts=None):
+    safe_local_counts = local_counts if local_counts is not None else {
+        "status": 1,
+        "paper_buy": 0,
+        "paper_sell": 0,
+        "error": 0,
+        "critical": 0,
+    }
     return ShadowRuntime(
         policy=_policy(),
         client=client or _LatchClient(),
         monitor=monitor,
-        notifier=SimpleNamespace(safe_counts=lambda: {}),
+        notifier=SimpleNamespace(safe_counts=lambda: dict(safe_local_counts)),
         db_path=SHADOW_DATABASE_PATH,
         session=session or SimpleNamespace(close=lambda: None),
     )
@@ -819,6 +1164,23 @@ def test_runtime_latch_rejects_repeat_after_success_and_failure():
     assert "secret detail" not in str(first.value)
     with pytest.raises(RuntimeError, match="consumed"):
         failure.execute_once()
+
+
+@pytest.mark.parametrize(
+    "local_counts",
+    (
+        {},
+        {"status": 1, "paper_buy": 0, "paper_sell": 0, "error": 0, "critical": 0, "extra": 0},
+        {"status": True, "paper_buy": 0, "paper_sell": 0, "error": 0, "critical": 0},
+        {"status": 1.0, "paper_buy": 0, "paper_sell": 0, "error": 0, "critical": 0},
+        {"status": 1, "paper_buy": 2, "paper_sell": 0, "error": 0, "critical": 0},
+        {"status": 1, "paper_buy": 1, "paper_sell": 1, "error": 0, "critical": 0},
+    ),
+)
+def test_runtime_rejects_invalid_local_evidence_schema(local_counts):
+    runtime = _latch_runtime(_LatchMonitor(), local_counts=local_counts)
+    with pytest.raises(RuntimeError, match="invalid local evidence"):
+        runtime.execute_once()
 
 
 def test_runtime_latch_rejects_concurrent_second_caller_before_work():
@@ -923,7 +1285,7 @@ def test_shadow_construction_closes_unclaimed_session_when_client_factory_fails(
     events = []
     session = _CloseRecorder(events, "session")
 
-    with pytest.raises(RuntimeError, match="client construction"):
+    with pytest.raises(ShadowExecutionFailure) as caught:
         create_shadow_runtime(
             policy=_policy(),
             settings=_shadow_settings(tmp_path, db_path),
@@ -937,7 +1299,156 @@ def test_shadow_construction_closes_unclaimed_session_when_client_factory_fails(
             ),
         )
 
+    assert caught.value.primary_type == "RuntimeError"
+    assert caught.value.resources_closed is True
     assert events == ["session"]
+
+
+def test_shadow_construction_rollback_failure_is_typed_and_not_closed(tmp_path):
+    db_path = (tmp_path / "kiwoom-shadow" / "trades.db").resolve()
+    db_path.parent.mkdir()
+    events = []
+    class FailingClose(_CloseRecorder):
+        def close(self):
+            super().close()
+            raise RuntimeError("close failed")
+
+    session = FailingClose(events, "session")
+
+    with pytest.raises(ShadowExecutionFailure) as caught:
+        create_shadow_runtime(
+            policy=_policy(),
+            settings=_shadow_settings(tmp_path, db_path),
+            admission=_open_admission(),
+            credential_provider_factory=lambda _path: SimpleNamespace(
+                load=_shadow_credentials
+            ),
+            session_factory=lambda **_kwargs: session,
+            market_client_factory=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("client construction")
+            ),
+        )
+
+    assert caught.value.reason is ShadowTerminalReason.FAILURE
+    assert caught.value.resources_closed is False
+    assert caught.value.cleanup_types == ("RuntimeError",)
+
+
+def test_continuous_pre_resource_construction_stop_is_clean_typed_terminal(tmp_path):
+    event = threading.Event()
+
+    def factory(_policy_value, admission):
+        admission.stop_event.set()
+        admission.checkpoint()
+        pytest.fail("stop checkpoint returned")
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: pytest.fail("construction stop emitted cycle"),
+        lock_path=(tmp_path / "construction-stop.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: 0.0,
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "STOPPED"
+    assert result.resources_closed is True
+    assert result.exit_code == 0
+
+
+def test_continuous_construction_run_deadline_is_clean_typed_terminal(tmp_path):
+    def factory(_policy_value, _admission):
+        raise ShadowRunDeadlineExceeded("construction deadline")
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: pytest.fail("construction deadline emitted cycle"),
+        lock_path=(tmp_path / "construction-deadline.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        monotonic=lambda: 0.0,
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "DEADLINE"
+    assert result.reason == "run-deadline"
+    assert result.resources_closed is True
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    ("close_at", "close_fails", "status", "reason", "closed", "exit_code"),
+    (
+        (29.0, False, "STOPPED", "stop-requested", True, 0),
+        (30.0, False, "FAILED", "shutdown-deadline", True, 1),
+        (29.0, True, "FAILED", "stop-requested", False, 1),
+        (30.0, True, "FAILED", "shutdown-deadline", False, 1),
+    ),
+)
+def test_continuous_construction_stop_resolves_after_rollback_cleanup(
+    tmp_path,
+    close_at,
+    close_fails,
+    status,
+    reason,
+    closed,
+    exit_code,
+):
+    now = [0.0]
+    credentials_dir = tmp_path / "continuous-credentials"
+    credentials_dir.mkdir()
+    settings = Settings.from_mapping(
+        {
+            "KIWOOM_EXECUTION_MODE": "shadow-continuous",
+            "KIWOOM_API_MODE": "prod",
+            "KIWOOM_APP_ENV": "prod",
+            "KIWOOM_PROCESS_NAME": "kiwoom-shadow-worker",
+            "KIWOOM_CREDENTIALS_DIR": str(credentials_dir.resolve()),
+            "KIWOOM_DB_PATH": str(SHADOW_DATABASE_PATH),
+        }
+    )
+
+    class ConstructionSession:
+        def close(self):
+            now[0] = close_at
+            if close_fails:
+                raise RuntimeError("rollback close failure")
+
+    def factory(policy, admission):
+        def session_factory(**_kwargs):
+            assert admission.stop_event is not None
+            admission.stop_event.set()
+            return ConstructionSession()
+
+        return create_shadow_runtime(
+            policy=policy,
+            settings=settings,
+            admission=admission,
+            credential_provider_factory=lambda _path: SimpleNamespace(
+                load=_shadow_credentials
+            ),
+            session_factory=session_factory,
+        )
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: pytest.fail("construction stop emitted cycle"),
+        lock_path=(tmp_path / f"construction-{close_at}-{close_fails}.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == status
+    assert result.reason == reason
+    assert result.resources_closed is closed
+    assert result.exit_code == exit_code
 
 
 def test_shadow_runtime_rejects_non_kst_admission_before_credentials(tmp_path):
@@ -1002,7 +1513,7 @@ def test_shadow_construction_closes_owned_resources_when_engine_factory_fails(
     ledger = _CloseRecorder(events, "ledger")
     repository = _CloseRecorder(events, "repository")
 
-    with pytest.raises(RuntimeError, match="engine construction"):
+    with pytest.raises(ShadowExecutionFailure) as caught:
         create_shadow_runtime(
             policy=_policy(),
             settings=_shadow_settings(tmp_path, db_path),
@@ -1019,4 +1530,6 @@ def test_shadow_construction_closes_owned_resources_when_engine_factory_fails(
             ),
         )
 
+    assert caught.value.primary_type == "RuntimeError"
+    assert caught.value.resources_closed is True
     assert events == ["repository", "ledger", "client", "session"]

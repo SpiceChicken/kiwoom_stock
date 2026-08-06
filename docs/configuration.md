@@ -44,10 +44,10 @@ The following table is checked against the machine-readable `SETTING_SPECS` regi
 <!-- settings-matrix:start -->
 | Name | Type | Required | Default | Consumer | Sensitive | Environments | Validation |
 |---|---|---|---|---|---:|---|---|
-| `KIWOOM_EXECUTION_MODE` | enum | no | `check-only` | execution policy | no | all | `check-only` or `shadow-once`; live unavailable |
-| `KIWOOM_IMAGE_REF` | OCI image digest | shadow-once | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
-| `KIWOOM_IMAGE_DIGEST` | OCI image digest | shadow-once | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
-| `KIWOOM_REQUIRE_SHADOW_VOLUME` | strict boolean | shadow-once | none | shadow volume attestation | no | prod/prod-like | exactly `1` when required |
+| `KIWOOM_EXECUTION_MODE` | enum | no | `check-only` | execution policy | no | all | `check-only`, `shadow-once`, or `shadow-continuous`; live unavailable |
+| `KIWOOM_IMAGE_REF` | OCI image digest | shadow execution | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
+| `KIWOOM_IMAGE_DIGEST` | OCI image digest | shadow execution | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
+| `KIWOOM_REQUIRE_SHADOW_VOLUME` | strict boolean | shadow execution | none | shadow volume attestation | no | prod/prod-like | exactly `1` when required |
 | `KIWOOM_API_MODE` | enum | no | `disabled` | runtime composition | no | all | `disabled`, `mock`, or `prod` |
 | `KIWOOM_PROCESS_NAME` | string | yes | none | runtime lifecycle | no | all | non-empty |
 | `KIWOOM_APP_ENV` | enum | no | `local` | retention policy | no | all | allowed environment |
@@ -84,9 +84,21 @@ activation.
 same normalized file. After the engine closes, each report reader opens that configured path, copies the required rows
 into memory, closes the DB exactly once, and only then performs API, pandas, or CSV work.
 
-The bounded `shadow-once` worker uses the fixed isolated path `/var/lib/kiwoom/shadow-trades.db` on the existing
+The bounded `shadow-once` and `shadow-continuous` workers use the fixed isolated path `/var/lib/kiwoom/shadow-trades.db` on the existing
 `/var/lib/kiwoom` data volume. It never reuses the normal `/var/lib/kiwoom/trades.db` ledger and does not accept a
 per-request path override. The mounted data directory must already exist and be writable by the runtime UID.
+
+`shadow-continuous` is not an unbounded service. It creates and closes a fresh one-shot runtime for each cycle,
+waits at least 60 seconds after a completed cycle using the signal event, and exits at a fixed 15-minute monotonic
+deadline. `SIGTERM`/`SIGINT` only request stop; the main thread owns closure within the 30-second container grace.
+The signal handler records a monotonic timestamp and sets the Event without acquiring an application lock; a consumer
+materializes the distinct 30-second shutdown deadline from the earliest timestamp. Repeated signals and delayed
+consumers cannot extend it. Runtime, HTTP and database-close consumers see the minimum of the remaining
+15-minute run cap and this shutdown budget. A clean
+`STOPPED` result requires typed stop ownership and complete resource closure. Cleanup failure or shutdown-budget
+expiry is `FAILED` with a nonzero process exit.
+The interval, deadline, target/proxy, database, capability set, process count, and restart behavior have no user
+configuration surface.
 
 The default `trades.db` value exists for direct legacy/local compatibility. It is relative to the process working
 directory and must not be relied on in managed environments. Compose pins the explicit value

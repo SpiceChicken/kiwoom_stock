@@ -12,8 +12,8 @@ SHADOW_STOCK_CODE = "005930"
 SHADOW_PROXY_CODE = "069500"
 SHADOW_MAX_HTTP_ATTEMPTS = 23
 SHADOW_MAX_CYCLES = 1
-# Keep the shadow ledger on the existing managed data volume while separating
-# it from the continuous/legacy ledger file.
+# Keep both bounded shadow modes on the isolated shadow ledger, separate from
+# the legacy trading ledger file.
 SHADOW_DATABASE_PATH = Path("/var/lib/kiwoom/shadow-trades.db")
 SHADOW_PROCESS_LOCK_PATH = Path("/var/lib/kiwoom/shadow-worker.lock")
 
@@ -35,6 +35,7 @@ class LiveActivationNotImplemented(ExecutionPolicyError):
 class ExecutionMode(str, Enum):
     CHECK_ONLY = "check-only"
     SHADOW_ONCE = "shadow-once"
+    SHADOW_CONTINUOUS = "shadow-continuous"
     LIVE = "live"
 
 
@@ -75,8 +76,11 @@ class ExecutionPolicy:
     reports: bool = False
 
     def __post_init__(self) -> None:
-        if self.mode is not ExecutionMode.SHADOW_ONCE:
-            raise ExecutionPolicyError("only shadow-once can construct the shadow policy")
+        if self.mode not in (
+            ExecutionMode.SHADOW_ONCE,
+            ExecutionMode.SHADOW_CONTINUOUS,
+        ):
+            raise ExecutionPolicyError("only an admitted shadow mode can construct the shadow policy")
         expected = (
             self.stock_code == SHADOW_STOCK_CODE
             and self.proxy_code == SHADOW_PROXY_CODE
@@ -92,7 +96,7 @@ class ExecutionPolicy:
             and not self.reports
         )
         if not expected:
-            raise ExecutionPolicyError("shadow-once capability invariant was modified")
+            raise ExecutionPolicyError("shadow capability invariant was modified")
 
     @classmethod
     def for_request(
@@ -102,21 +106,24 @@ class ExecutionPolicy:
     ) -> "ExecutionPolicy":
         if mode is ExecutionMode.LIVE:
             raise LiveActivationNotImplemented("live execution is not implemented")
-        if mode is not ExecutionMode.SHADOW_ONCE:
-            raise ExecutionPolicyError("shadow-once requires KIWOOM_EXECUTION_MODE=shadow-once")
+        if mode not in (ExecutionMode.SHADOW_ONCE, ExecutionMode.SHADOW_CONTINUOUS):
+            raise ExecutionPolicyError("an admitted shadow execution mode is required")
         if activation is None:
-            raise ExecutionPolicyError("shadow-once requires the exact activation tuple")
+            raise ExecutionPolicyError("shadow execution requires the exact activation tuple")
         return cls(mode=mode, activation=activation)
 
     def assert_paper_transition(self) -> None:
         """Authorize only the isolated shadow paper-ledger transition."""
 
-        if self.mode is not ExecutionMode.SHADOW_ONCE or not self.paper_ledger_writes:
+        if self.mode not in (
+            ExecutionMode.SHADOW_ONCE,
+            ExecutionMode.SHADOW_CONTINUOUS,
+        ) or not self.paper_ledger_writes:
             raise ExecutionPolicyError("paper transition is not admitted")
 
     def assert_broker_orders_disabled(self) -> None:
         if self.broker_orders:
-            raise ExecutionPolicyError("broker order capability is forbidden in shadow-once")
+            raise ExecutionPolicyError("broker order capability is forbidden in shadow execution")
 
     def assert_shadow_database_identity(
         self,

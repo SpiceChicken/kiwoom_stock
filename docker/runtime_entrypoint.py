@@ -16,13 +16,26 @@ STAGING_DIR = Path("/run/kiwoom-secrets")
 _IMMUTABLE_IMAGE = re.compile(
     r"^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$"
 )
+_SHADOW_PROCESS_PAIRS = frozenset(
+    {
+        ("shadow-once", "kiwoom-shadow-once"),
+        ("shadow-continuous", "kiwoom-shadow-worker"),
+    }
+)
 
 
 def _validate_shadow_image_tuple() -> None:
-    if (
-        os.environ.get("KIWOOM_PROCESS_NAME") != "kiwoom-shadow-once"
-    ):
+    execution_mode = os.environ.get("KIWOOM_EXECUTION_MODE")
+    process_name = os.environ.get("KIWOOM_PROCESS_NAME")
+    pair = (execution_mode, process_name)
+    shadow_selected = (
+        execution_mode in {item[0] for item in _SHADOW_PROCESS_PAIRS}
+        or process_name in {item[1] for item in _SHADOW_PROCESS_PAIRS}
+    )
+    if not shadow_selected:
         return
+    if pair not in _SHADOW_PROCESS_PAIRS:
+        raise RuntimeError("shadow execution mode and process name must match")
     image_ref = os.environ.get("KIWOOM_IMAGE_REF")
     image_digest = os.environ.get("KIWOOM_IMAGE_DIGEST")
     if (

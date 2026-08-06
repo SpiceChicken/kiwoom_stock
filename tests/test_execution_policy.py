@@ -57,6 +57,24 @@ def test_shadow_policy_is_fixed_and_fail_closed():
             activation=_activation(),
             shadow_database_path=SHADOW_DATABASE_PATH.parent / "other.db",
         )
+
+
+def test_continuous_policy_reuses_exact_frozen_shadow_capabilities():
+    once = ExecutionPolicy.for_request(ExecutionMode.SHADOW_ONCE, _activation())
+    continuous = ExecutionPolicy.for_request(
+        ExecutionMode.SHADOW_CONTINUOUS, _activation()
+    )
+
+    assert replace(continuous, mode=ExecutionMode.SHADOW_ONCE) == once
+    assert continuous.max_cycles == 1
+    assert continuous.max_http_attempts == 23
+    assert continuous.shadow_database_path == SHADOW_DATABASE_PATH
+    assert continuous.account_reads is False
+    assert continuous.broker_orders is False
+    assert continuous.oauth_revoke is False
+    assert continuous.external_notifications is False
+    assert continuous.reports is False
+    continuous.assert_paper_transition()
     with pytest.raises(TypeError):
         ExecutionPolicy.for_request(
             ExecutionMode.SHADOW_ONCE,
@@ -71,6 +89,7 @@ def test_shadow_policy_is_fixed_and_fail_closed():
         (ExecutionMode.CHECK_ONLY, None),
         (ExecutionMode.CHECK_ONLY, _activation()),
         (ExecutionMode.SHADOW_ONCE, None),
+        (ExecutionMode.SHADOW_CONTINUOUS, None),
     ],
 )
 def test_missing_and_check_only_requests_cannot_activate_shadow(mode, activation):
@@ -101,6 +120,17 @@ def test_shadow_cli_requires_exact_activation_tuple_arguments():
     )
     assert parsed.command == "shadow-once"
 
+    continuous = build_parser().parse_args(
+        [
+            "shadow-worker",
+            "--source-sha", "a" * 40,
+            "--image-digest",
+            "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64,
+            "--activation-id", "shadow-test-1",
+        ]
+    )
+    assert continuous.command == "shadow-worker"
+
 
 def test_typed_execution_mode_defaults_check_only_and_rejects_live_unknown():
     base = {"KIWOOM_PROCESS_NAME": "config-check"}
@@ -108,6 +138,9 @@ def test_typed_execution_mode_defaults_check_only_and_rejects_live_unknown():
     assert Settings.from_mapping(
         {**base, "KIWOOM_EXECUTION_MODE": "shadow-once"}
     ).execution.mode is ExecutionMode.SHADOW_ONCE
+    assert Settings.from_mapping(
+        {**base, "KIWOOM_EXECUTION_MODE": "shadow-continuous"}
+    ).execution.mode is ExecutionMode.SHADOW_CONTINUOUS
     for value in ("live", "unknown", ""):
         with pytest.raises(SettingsValidationError):
             Settings.from_mapping({**base, "KIWOOM_EXECUTION_MODE": value})
@@ -140,6 +173,51 @@ def test_cli_check_only_mode_rejects_shadow_before_runtime_construction(monkeypa
         ]
     )
     assert result == 1
+
+
+def test_continuous_cli_dispatches_only_the_frozen_continuous_policy(monkeypatch, capsys):
+    settings = SimpleNamespace(
+        execution=SimpleNamespace(mode=ExecutionMode.SHADOW_CONTINUOUS)
+    )
+    captured = []
+    from kiwoom_stock.core import config
+    from kiwoom_stock.application import runtime, shadow_worker
+
+    monkeypatch.setattr(config, "validate_environment_settings", lambda: settings)
+    monkeypatch.setattr(
+        runtime,
+        "create_shadow_runtime",
+        lambda **_kwargs: pytest.fail("runner must own runtime construction"),
+    )
+    monkeypatch.setattr(
+        shadow_worker,
+        "run_shadow_continuous",
+        lambda policy, **_kwargs: captured.append(policy)
+        or SimpleNamespace(
+            exit_code=0,
+            to_safe_dict=lambda: {
+                "event": "terminal",
+                "status": "STOPPED",
+                "mode": "shadow-continuous",
+            },
+        ),
+    )
+
+    result = cli.main(
+        [
+            "shadow-worker",
+            "--source-sha", "a" * 40,
+            "--image-digest",
+            "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64,
+            "--activation-id", "continuous-test",
+        ]
+    )
+
+    assert result == 0
+    assert len(captured) == 1
+    assert captured[0].mode is ExecutionMode.SHADOW_CONTINUOUS
+    assert captured[0].max_cycles == 1
+    assert '"status": "STOPPED"' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

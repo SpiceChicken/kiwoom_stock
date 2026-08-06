@@ -3,6 +3,14 @@ name: Shadow worker activation
 on:
   workflow_dispatch:
     inputs:
+      desired_state:
+        description: Exact bounded shadow action
+        required: true
+        type: choice
+        options:
+          - oneshot
+          - continuous
+          - stop
       source_sha:
         description: Full 40-character lowercase source SHA
         required: true
@@ -13,11 +21,11 @@ on:
         type: string
       build_run_id:
         description: Successful production-check candidate run ID
-        required: true
+        required: false
         type: string
       compose_shadow_sha256:
         description: SHA256 of compose.shadow.yaml at source SHA
-        required: true
+        required: false
         type: string
       activation_id:
         description: Unique non-secret activation identifier
@@ -38,7 +46,7 @@ env:
 
 jobs:
   activate:
-    name: protected one-shot shadow activation
+    name: protected bounded shadow action
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 22
@@ -66,16 +74,22 @@ jobs:
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
           ACTIVATION_ID: ${{ inputs.activation_id }}
+          DESIRED_STATE: ${{ inputs.desired_state }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "${GITHUB_REF}" == refs/heads/main ]]
-          [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
+          [[ "${ACTIVATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+          [[ "${DESIRED_STATE}" == oneshot || "${DESIRED_STATE}" == continuous || "${DESIRED_STATE}" == stop ]]
+          if [[ "${DESIRED_STATE}" == stop ]]; then
+            [[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]
+            exit 0
+          fi
+          [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
           [[ "${BUILD_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${COMPOSE_SHADOW_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "${ACTIVATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
           test "$(sha256sum compose.shadow.yaml | cut -d' ' -f1)" = "${COMPOSE_SHADOW_SHA256}"
           run_json="${RUNNER_TEMP}/candidate-run.json"
           gh api --method GET \
@@ -121,7 +135,7 @@ jobs:
           output-env-credentials: false
           unset-current-credentials: true
 
-      - name: Execute one bounded shadow cycle
+      - name: Execute bounded shadow action
         timeout-minutes: 18
         env:
           AWS_ACCESS_KEY_ID: ${{ steps.oidc.outputs.aws-access-key-id }}
@@ -132,15 +146,20 @@ jobs:
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
           ACTIVATION_ID: ${{ inputs.activation_id }}
+          DESIRED_STATE: ${{ inputs.desired_state }}
         shell: bash
         run: |
           set -euo pipefail
+          ssm_compose_hash="${COMPOSE_SHADOW_SHA256}"
+          if [[ "${DESIRED_STATE}" == stop ]]; then
+            ssm_compose_hash="$(printf '0%.0s' {1..64})"
+          fi
           command_id="$(aws ssm send-command \
             --document-name "${SHADOW_DOCUMENT_NAME}" \
             --document-version '$LATEST' \
             --instance-ids "${EC2_INSTANCE_ID}" \
             --parameters \
-              "DesiredState=oneshot,ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=${COMPOSE_SHADOW_SHA256},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" \
+              "DesiredState=${DESIRED_STATE},ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=${ssm_compose_hash},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" \
             --comment "kiwoom shadow activation ${ACTIVATION_ID}" \
             --timeout-seconds 1020 \
             --max-concurrency 1 \
@@ -167,11 +186,14 @@ jobs:
             --command-id "${command_id}" \
             --instance-id "${EC2_INSTANCE_ID}" \
             --output json)"
-          runtime_evidence="$(python3 - "${invocation_json}" <<'PY'
+          runtime_evidence="$(python3 - "${invocation_json}" "${DESIRED_STATE}" \
+            "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${ACTIVATION_ID}" <<'PY'
           import json
           import sys
 
           invocation = json.loads(sys.argv[1])
+          desired_state = sys.argv[2]
+          source_sha, image_digest, activation_id = sys.argv[3:]
           stdout = invocation.get("StandardOutputContent", "")
           records = []
           for raw_line in stdout.splitlines():
@@ -182,17 +204,68 @@ jobs:
                   candidate = json.loads(line)
               except json.JSONDecodeError:
                   continue
-              if candidate.get("mode") == "shadow-once" and "side_effects" in candidate:
+              if candidate.get("mode") in ("shadow-once", "shadow-continuous") and "side_effects" in candidate:
                   records.append(candidate)
           if not records:
               raise SystemExit("shadow runtime safe result was not found")
           result = records[-1]
+          if any((
+              result.get("source_sha") != source_sha,
+              result.get("image_digest") != image_digest,
+              result.get("activation_id") != activation_id,
+          )):
+              raise SystemExit("shadow runtime activation tuple mismatch")
           side_effects = result.get("side_effects")
           required = ("broker_orders", "account", "oauth_revoke", "slack", "gemini", "s3", "reports")
           if not isinstance(side_effects, dict) or any(
-              not isinstance(side_effects.get(name), bool) for name in required
+              side_effects.get(name) is not False for name in required
           ):
-              raise SystemExit("shadow runtime side-effect evidence is incomplete")
+              raise SystemExit("shadow runtime side-effect evidence is unsafe")
+          expected_mode = "shadow-once" if desired_state == "oneshot" else "shadow-continuous"
+          if result.get("mode") != expected_mode or result.get("resources_closed") is not True:
+              raise SystemExit("shadow runtime mode or closure mismatch")
+          if desired_state == "continuous":
+              attempts = result.get("http_attempts")
+              api_counts = result.get("api_counts")
+              local_counts = result.get("local_counts")
+              expected_api = {"token": 1, "stock_basic": 1, "stock_chart_5m": 1, "proxy_chart_60m": 1, "stock_strength": 1, "stock_orderbook": 1}
+              expected_local_keys = {"status", "paper_buy", "paper_sell", "error", "critical"}
+              integer_fields = (result.get("schema_version"), result.get("cycle_index"), result.get("cycles"), attempts)
+              local_valid = (
+                  isinstance(local_counts, dict)
+                  and set(local_counts) == expected_local_keys
+                  and all(type(value) is int for value in local_counts.values())
+                  and local_counts["status"] == 1
+                  and local_counts["error"] == 0
+                  and local_counts["critical"] == 0
+                  and local_counts["paper_buy"] in (0, 1)
+                  and local_counts["paper_sell"] in (0, 1)
+                  and local_counts["paper_buy"] + local_counts["paper_sell"] <= 1
+              )
+              if (
+                  any(type(value) is not int for value in integer_fields)
+                  or result.get("schema_version") != 1
+                  or result.get("event") != "cycle"
+                  or result.get("status") != "PASS"
+                  or result.get("cycle_index") != 1
+                  or result.get("cycles") != 1
+                  or attempts != 6
+                  or result.get("db_identity") != "/var/lib/kiwoom/shadow-trades.db"
+                  or not isinstance(api_counts, dict)
+                  or set(api_counts) != set(expected_api)
+                  or any(type(value) is not int for value in api_counts.values())
+                  or api_counts != expected_api
+                  or not local_valid
+                  or result.get("interval_seconds") != 60.0
+              ):
+                  raise SystemExit("continuous first tick evidence is invalid")
+          elif desired_state == "stop":
+              if result.get("event") != "terminal" or (
+                  result.get("status"), result.get("reason")
+              ) not in {("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline")}:
+                  raise SystemExit("continuous stop evidence is invalid")
+          elif result.get("status") not in ("PASS", "CLOSED"):
+              raise SystemExit("shadow one-shot evidence is invalid")
           evidence = {
               "runtime_status": result.get("status"),
               "cycles": result.get("cycles"),
@@ -208,24 +281,23 @@ jobs:
                   "s3": side_effects["s3"],
               },
           }
-          if evidence["runtime_status"] not in ("PASS", "CLOSED"):
-              raise SystemExit("shadow runtime did not produce a bounded result")
           print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
           PY
           )"
           python3 - "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${BUILD_RUN_ID}" "${ACTIVATION_ID}" \
-            "${command_id}" "${status}" "${response_code}" "${runtime_evidence}" \
+            "${DESIRED_STATE}" "${command_id}" "${status}" "${response_code}" "${runtime_evidence}" \
             >"${EVIDENCE_FILENAME}" <<'PY'
           import json
           import sys
 
-          source_sha, image_digest, build_run_id, activation_id, command_id, status, response_code, runtime = sys.argv[1:]
+          source_sha, image_digest, build_run_id, activation_id, desired_state, command_id, status, response_code, runtime = sys.argv[1:]
           evidence = json.loads(runtime)
           payload = {
               "source_sha": source_sha,
               "image_digest": image_digest,
               "build_run_id": build_run_id,
               "activation_id": activation_id,
+              "desired_state": desired_state,
               "command_id": command_id,
               "status": status,
               "response_code": response_code,
