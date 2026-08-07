@@ -225,6 +225,44 @@ jobs:
               if candidate.get("mode") in ("shadow-once", "shadow-continuous") and "side_effects" in candidate:
                   records.append(candidate)
           if not records:
+              safe_keys = {
+                  "schema_version", "event", "status", "mode", "source_sha",
+                  "image_digest", "activation_id", "cycles", "cycle_index",
+                  "http_attempts", "resources_closed", "reason", "error_type",
+              }
+
+              def safe_records(content):
+                  summaries = []
+                  for raw_line in content.splitlines():
+                      line = raw_line.split("|", 1)[-1].strip()
+                      if not line.startswith("{"):
+                          continue
+                      try:
+                          candidate = json.loads(line)
+                      except json.JSONDecodeError:
+                          continue
+                      if isinstance(candidate, dict):
+                          summaries.append({
+                              key: candidate[key]
+                              for key in safe_keys
+                              if key in candidate
+                          })
+                  return summaries[-3:]
+
+              diagnostic = {
+                  "status": invocation.get("Status"),
+                  "status_details": invocation.get("StatusDetails"),
+                  "response_code": invocation.get("ResponseCode"),
+                  "stdout_bytes": len(stdout.encode("utf-8")),
+                  "stderr_bytes": len(invocation.get("StandardErrorContent", "").encode("utf-8")),
+                  "stdout_records": safe_records(stdout),
+                  "stderr_records": safe_records(invocation.get("StandardErrorContent", "")),
+              }
+              print(
+                  "shadow runtime safe result was not found; bounded diagnostic="
+                  + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")),
+                  file=sys.stderr,
+              )
               raise SystemExit("shadow runtime safe result was not found")
           result = records[-1]
           if any((
