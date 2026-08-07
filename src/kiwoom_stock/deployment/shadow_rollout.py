@@ -513,7 +513,7 @@ def _scan_legacy_commands(
                     "nonterminal_count": nonterminal_count,
                 })
             token = response.get("NextToken")
-            if token is None:
+            if token is None or token == "":
                 next_token = None
                 break
             if (
@@ -603,7 +603,7 @@ def _scan_legacy_invocations(
                     "nonterminal_count": nonterminal_count,
                 })
             token = response.get("NextToken")
-            if token is None:
+            if token is None or token == "":
                 next_token = None
                 break
             if (
