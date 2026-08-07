@@ -461,9 +461,12 @@ def test_legacy_history_quiet_pass_is_metadata_only_and_explicitly_paginated():
 
 def test_legacy_history_null_invocations_member_is_empty_and_quiet():
     aws = _HistoryAws([
-        {"Commands": []}, {"CommandInvocations": None},
-        {"Commands": []}, {"CommandInvocations": None},
-        {"Commands": []}, {"CommandInvocations": None},
+        {"Commands": [], "NextToken": ""},
+        {"CommandInvocations": None, "NextToken": ""},
+        {"Commands": [], "NextToken": ""},
+        {"CommandInvocations": None, "NextToken": ""},
+        {"Commands": [], "NextToken": ""},
+        {"CommandInvocations": None, "NextToken": ""},
     ])
     checked = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
     evidence = shadow_rollout.attest_legacy_command_quiet(
