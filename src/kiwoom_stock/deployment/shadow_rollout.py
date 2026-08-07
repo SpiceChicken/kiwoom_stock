@@ -560,13 +560,15 @@ def _scan_legacy_invocations(
                 or not set(response).issubset({"CommandInvocations", "NextToken"})
                 or (
                     "CommandInvocations" in response
+                    and response["CommandInvocations"] is not None
                     and not isinstance(response["CommandInvocations"], list)
                 )
             ):
                 raise RolloutError("legacy_history_shape_invalid")
             # AWS documents CommandInvocations as optional; an empty result
-            # may be returned with the member omitted entirely.
-            invocations = response.get("CommandInvocations", [])
+            # may be returned with the member omitted or represented as null.
+            invocations_value = response.get("CommandInvocations")
+            invocations = [] if invocations_value is None else invocations_value
             if len(invocations) > LEGACY_HISTORY_PAGE_SIZE:
                 raise RolloutError("legacy_history_page_oversized")
             for invocation in invocations:

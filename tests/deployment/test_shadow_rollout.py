@@ -459,6 +459,20 @@ def test_legacy_history_quiet_pass_is_metadata_only_and_explicitly_paginated():
     assert "--next-token" in aws.calls[3][0]
 
 
+def test_legacy_history_null_invocations_member_is_empty_and_quiet():
+    aws = _HistoryAws([
+        {"Commands": []}, {"CommandInvocations": None},
+        {"Commands": []}, {"CommandInvocations": None},
+        {"Commands": []}, {"CommandInvocations": None},
+    ])
+    checked = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    evidence = shadow_rollout.attest_legacy_command_quiet(
+        aws, **_drain_kwargs(checked)
+    )
+    assert evidence["result"] == "PASS"
+    assert evidence["scans"][0]["node_invocations"]["count"] == 0
+
+
 @pytest.mark.parametrize(
     ("response", "category"),
     [
