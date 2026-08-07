@@ -31,6 +31,7 @@ WORK_DIR=""
 
 fail() {
     printf 'shadow worker failed: %s\n' "$1" >&2
+    printf 'shadow worker failed: %s\n' "$1"
     exit 1
 }
 
@@ -273,6 +274,23 @@ validate_image_revision() {
     [[ "${image_user}" == "10001:10001" ]] || fail "image user does not match the runtime contract"
 }
 
+pull_image() {
+    local image="$1"
+    local attempt
+    for attempt in 1 2; do
+        if timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}"; then
+            return 0
+        fi
+        if docker image inspect "${image}" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ "${attempt}" == 1 ]]; then
+            sleep 5
+        fi
+    done
+    return 1
+}
+
 cleanup_container() {
     local status=0
     set +e
@@ -438,7 +456,7 @@ run_shadow_once() {
     fi
     trap 'cleanup' EXIT
     trap 'cleanup; exit 143' TERM
-    timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \
+    pull_image "${image}" \
         || fail "immutable shadow image pull failed or timed out"
     validate_image_revision "${image}" "${source_sha}"
     KIWOOM_IMAGE="${image}" \
@@ -480,7 +498,7 @@ run_shadow_continuous() {
         fail "shadow container already exists; use stop before a new activation"
     fi
     trap 'cleanup' EXIT TERM
-    timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \
+    pull_image "${image}" \
         || fail "immutable shadow image pull failed or timed out"
     validate_image_revision "${image}" "${source_sha}"
     KIWOOM_IMAGE="${image}" \
