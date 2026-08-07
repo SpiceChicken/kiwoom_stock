@@ -138,13 +138,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         except BaseException as exc:
-            print(
-                json.dumps(
-                    {"status": "FAILED", "error_type": type(exc).__name__},
-                    sort_keys=True,
-                ),
-                file=sys.stderr,
+            failure = json.dumps(
+                {"status": "FAILED", "error_type": type(exc).__name__},
+                sort_keys=True,
             )
+            # Keep the bounded type-only sentinel visible to container log
+            # collectors; no exception message or credential-bearing payload
+            # is ever emitted.
+            print(failure, file=sys.stderr)
+            print(failure, flush=True)
             return 1
         print(json.dumps(result_payload, sort_keys=True))
         return exit_code
