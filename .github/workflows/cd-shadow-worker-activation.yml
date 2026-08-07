@@ -249,14 +249,34 @@ jobs:
                           })
                   return summaries[-3:]
 
+              def safe_messages(content):
+                  messages = []
+                  allowed_prefixes = (
+                      "shadow worker failed: ",
+                      "shadow-once passed: ",
+                      "shadow continuous started: ",
+                      "shadow worker cleaned: ",
+                  )
+                  for raw_line in content.splitlines():
+                      line = raw_line.split("|", 1)[-1].strip()
+                      if not line.startswith(allowed_prefixes):
+                          continue
+                      message = line[:256]
+                      if all(char.isprintable() or char == "\t" for char in message):
+                          messages.append(message)
+                  return messages[-3:]
+
+              stderr = invocation.get("StandardErrorContent", "")
               diagnostic = {
                   "status": invocation.get("Status"),
                   "status_details": invocation.get("StatusDetails"),
                   "response_code": invocation.get("ResponseCode"),
                   "stdout_bytes": len(stdout.encode("utf-8")),
-                  "stderr_bytes": len(invocation.get("StandardErrorContent", "").encode("utf-8")),
+                  "stderr_bytes": len(stderr.encode("utf-8")),
                   "stdout_records": safe_records(stdout),
-                  "stderr_records": safe_records(invocation.get("StandardErrorContent", "")),
+                  "stderr_records": safe_records(stderr),
+                  "stdout_messages": safe_messages(stdout),
+                  "stderr_messages": safe_messages(stderr),
               }
               print(
                   "shadow runtime safe result was not found; bounded diagnostic="
