@@ -119,6 +119,21 @@ def _run_workflow_cycle_parser(evidence):
     )
 
 
+def _run_activation_evidence_builder(document_version="7", worker_hash="c" * 64):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(
+        item for item in workflow["jobs"]["activate"]["steps"]
+        if item.get("name") == "Execute bounded shadow action"
+    )
+    parser = step["run"].rsplit("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    return subprocess.run(
+        [sys.executable, "-", SOURCE_SHA, IMAGE, "123", ACTIVATION_ID,
+         "oneshot", "00000000-0000-0000-0000-000000000001", "Success", "0",
+         document_version, worker_hash, "d" * 64, '{"runtime_status":"PASS"}'],
+        input=parser, check=False, capture_output=True, text=True,
+    )
+
+
 def test_shadow_host_executor_is_shell_valid_and_bounded():
     completed = subprocess.run(
         ["bash", "-n", str(SCRIPT)],
@@ -169,6 +184,8 @@ def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters(
         "SourceSha",
         "ActivationId",
         "ComposeShadowSha256",
+        "ExpectedWorkerSha256",
+        "ExpectedShadowDocumentSha256",
         "ExpectedInstanceId",
         "Region",
     }
@@ -178,6 +195,75 @@ def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters(
     assert "SecureString" not in text
     assert "AppKey" not in text
     assert "SecretKey" not in text
+    command = document["mainSteps"][0]["inputs"]["runCommand"][0]
+    assert command.index("exec 9>/run/lock/kiwoom-stock-shadow.lock") < command.index(
+        "flock -x -w 240 9"
+    ) < command.index("exec /usr/local/sbin/kiwoom-shadow-worker")
+    assert command.count("--inherited-lock-fd 9") == 2
+
+
+def test_activation_prelock_prevents_old_inode_execution(tmp_path):
+    document = yaml.safe_load(DOCUMENT.read_text(encoding="utf-8"))
+    command = document["mainSteps"][0]["inputs"]["runCommand"][0]
+    lock = tmp_path / "shadow.lock"
+    worker = tmp_path / "worker"
+    replacement = tmp_path / "replacement"
+    worker.write_text("#!/usr/bin/env bash\necho OLD\n", encoding="utf-8")
+    replacement.write_text("#!/usr/bin/env bash\necho NEW\n", encoding="utf-8")
+    worker.chmod(0o755)
+    replacement.chmod(0o755)
+    command = command.replace(
+        "/run/lock/kiwoom-stock-shadow.lock", str(lock)
+    ).replace("/usr/local/sbin/kiwoom-shadow-worker", str(worker))
+    holder = subprocess.Popen(
+        ["bash", "-c", 'exec 8>"$1"; flock -x 8; echo READY; read -r _',
+         "holder", str(lock)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    assert holder.stdout is not None and holder.stdout.readline().strip() == "READY"
+    environment = dict(**__import__("os").environ)
+    environment.update({
+        "SSM_DesiredState": "stop", "SSM_ImageDigest": IMAGE,
+        "SSM_SourceSha": SOURCE_SHA, "SSM_ActivationId": ACTIVATION_ID,
+        "SSM_ComposeShadowSha256": "0" * 64,
+        "SSM_ExpectedWorkerSha256": "c" * 64,
+        "SSM_ExpectedShadowDocumentSha256": "d" * 64,
+        "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+        "SSM_Region": "ap-northeast-2",
+    })
+    activation = subprocess.Popen(
+        ["bash", "-c", command], env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    replacement.replace(worker)
+    assert holder.stdin is not None
+    holder.stdin.write("release\n")
+    holder.stdin.flush()
+    holder.stdin.close()
+    assert holder.wait(timeout=5) == 0
+    stdout, stderr = activation.communicate(timeout=5)
+    assert activation.returncode == 0, stderr
+    assert stdout.strip() == "NEW"
+
+
+def test_worker_rejects_spoofed_inherited_lock_fd(tmp_path):
+    approved = tmp_path / "approved.lock"
+    wrong = tmp_path / "wrong.lock"
+    environment = dict(**__import__("os").environ)
+    environment["KIWOOM_SHADOW_LOCK_FILE"] = str(approved)
+    valid = subprocess.run(
+        ["bash", "-c", 'source "$1"; exec 8>"$2"; flock -x 8; acquire_activation_lock 8',
+         "test", str(SCRIPT), str(approved)],
+        env=environment, capture_output=True, text=True,
+    )
+    assert valid.returncode == 0, valid.stderr
+    spoofed = subprocess.run(
+        ["bash", "-c", 'source "$1"; exec 8>"$2"; flock -x 8; acquire_activation_lock 8',
+         "test", str(SCRIPT), str(wrong)],
+        env=environment, capture_output=True, text=True,
+    )
+    assert spoofed.returncode != 0
+    assert "does not reference the approved lock" in spoofed.stderr
 
 
 def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
@@ -191,9 +277,13 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
         "compose_shadow_sha256",
         "activation_id",
         "desired_state",
+        "worker_sha256",
+        "shadow_document_sha256",
     }
     assert triggers["workflow_dispatch"]["inputs"]["build_run_id"]["required"] is False
     assert triggers["workflow_dispatch"]["inputs"]["compose_shadow_sha256"]["required"] is False
+    assert triggers["workflow_dispatch"]["inputs"]["worker_sha256"]["required"] is True
+    assert triggers["workflow_dispatch"]["inputs"]["shadow_document_sha256"]["required"] is True
     assert workflow["permissions"] == {}
     assert workflow["concurrency"]["cancel-in-progress"] is False
     job = workflow["jobs"]["activate"]
@@ -210,11 +300,29 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert "ssm get-parameter" not in text.lower()
     assert "ssm get-parameters" not in text.lower()
     assert "DesiredState=${DESIRED_STATE}" in text
+    assert "ExpectedWorkerSha256=${WORKER_SHA256}" in text
+    assert "ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256}" in text
     assert "runtime safe result was not found" in text
     assert '"orders": side_effects["broker_orders"]' in text
     assert '"database": bool(result.get("db_identity"))' in text
     assert 'if [[ "${DESIRED_STATE}" == stop ]]' in text
     assert '[[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]' in text
+    assert '"${document_version}" "${WORKER_SHA256}" "${SHADOW_DOCUMENT_SHA256}"' in text
+    assert '"document_version": document_version' in text
+    assert '"worker_sha256": worker_sha256' in text
+    assert '"shadow_document_sha256": shadow_document_sha256' in text
+    assert 're.fullmatch(r"[1-9][0-9]*", document_version)' in text
+
+
+def test_activation_evidence_binds_attested_numeric_version_and_pair_hashes():
+    completed = _run_activation_evidence_builder()
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(completed.stdout)
+    assert evidence["document_version"] == "7"
+    assert evidence["worker_sha256"] == "c" * 64
+    assert evidence["shadow_document_sha256"] == "d" * 64
+    assert _run_activation_evidence_builder(document_version="$LATEST").returncode != 0
+    assert _run_activation_evidence_builder(worker_hash="bad").returncode != 0
 
 
 def test_host_evidence_parser_rejects_stale_and_malformed_first_ticks(tmp_path):
@@ -453,3 +561,16 @@ def test_shadow_iam_policy_is_document_and_instance_scoped():
         "Action": ["ssm:GetCommandInvocation"],
         "Resource": "*",
     }
+    assert statements[2] == {
+        "Sid": "AttestExactShadowDocument",
+        "Effect": "Allow",
+        "Action": ["ssm:DescribeDocument", "ssm:GetDocument"],
+        "Resource": (
+            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
+            "KiwoomStock-ShadowWorker"
+        ),
+    }
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    assert "attest_activation_document" in workflow_text
+    assert "--document-version \"${document_version}\"" in workflow_text
+    assert "$LATEST" not in workflow_text

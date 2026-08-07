@@ -211,10 +211,67 @@ AWS가 현재 신뢰하는 CA로 GitHub OIDC TLS chain을 검증할 수 있으�
 
 - <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html>
 
+## Shadow rollout role 1회 bootstrap
+
+shadow host worker와 activation document를 갱신하는 role은 activation role과 합치지
+않는다. trust는 audience `sts.amazonaws.com`과 subject
+`repo:SpiceChicken/kiwoom_stock:environment:production-shadow`의 exact equality다.
+템플릿은 `deploy/iam/github-shadow-rollout-{trust,policy}.json.example`, 고정 document
+source는 `deploy/ssm/shadow-worker-rollout-document.yaml`이다.
+
+admin credential이 있는 승인된 1회 세션에서만 create-only 도구를 사용한다.
+
+```bash
+python3 deploy/bootstrap_shadow_rollout.py --account-id <12_DIGIT_ACCOUNT_ID>
+```
+
+도구는 role `kiwoom-stock-github-shadow-rollout`, exact inline policy,
+`KiwoomStock-ShadowWorkerRollout` v1만 생성한다. 기존 리소스가 exact하면 재사용하고
+drift나 v1 외 document는 overwrite하지 않는다. role/trust와 고정 rollout document를
+먼저 생성·read-back하고, upsert인 inline policy 쓰기를 마지막 mutation으로 둔다.
+policy phase pre-read에 진입하기 전 실패만 이번 실행 소유가 확정된 document와 role을
+역순 제거한다. 기존 provider, Environment protection, activation role/document는
+항상 보존한다. strict parse, Access Analyzer, 적용 후
+trust/policy/role ARN/document content/version read-back과 allow/deny simulation은
+validator가 별도로 기록해야 한다.
+
+role/document create는 정상 응답과 후속 exact read-back이 모두 있을 때만
+`created-by-attempt` cleanup 소유권을 확정한다. Inline policy phase의 pre-read 직전이
+commit boundary다. 이 경계 뒤에는 기존/concurrent exact policy 관측, drift/read 실패,
+정상 write 응답이나 응답 유실 어느 경우에도 role/policy/document를 자동 삭제하지
+않는다. 정상 응답 뒤
+policy/trust/document exact final read-back만 PASS이며, 응답 유실 뒤 exact policy는
+`ownership-uncertain`, absent/drift는 manual recovery가 필요한 FAIL이다. 다음
+idempotent 실행은 exact existing state를 재사용한다. 기존 exact policy는 mutation 없이
+final read-back한다. document는 bounded wait 안에
+`Active`, default/latest `1`, exact YAML content가 모두 보여야 한다. cleanup은 한 삭제
+실패가 뒤 role 정리를 막지 않도록 각 리소스를 독립 시도하고, original failure,
+journal, cleanup 결과와 orphan 목록을 함께 보존한다. final PASS는 role ARN뿐 아니라
+exact trust/policy/document를 모두 다시 읽은 뒤에만 출력한다.
+
+Rollout policy의 legacy transition read는 AWS IAM resource-level 특성 때문에 별도
+`Resource: "*"` Sid 두 개로만 허용한다. `ssm:ListCommands`는 exact instance와
+document filter의 acceptance/aggregate history, `ssm:ListCommandInvocations`는 exact
+instance/document의 node execution history 교차검증 전용이다. 두 action은 mutation이나
+command output read 권한을 포함하지 않는다.
+
+이 script는 GitHub token을 받지 않고 GitHub API나 `gh`를 호출하지 않는다. GitHub
+Environment write는 AWS partial rollback과 원자적으로 묶을 수 없으므로 fail-closed
+수동 경계다. AWS read-back 뒤 `production-shadow` required reviewer/main policy를
+재확인하고 Environment variable `KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN`에 출력된 exact
+ARN을 등록한 다음 API/화면에서 byte-for-byte read-back한다. Kiwoom secret이나 장기
+AWS key는 등록하지 않는다. 이 read-back 전에는 rollout을 실행하지 않는다.
+
+일상 순서는 protected exact-main rollout → 14일 audit 검토 → 별도 protected activation
+승인이다. 실패 또는 `skew=true`면 activation을 중지하고 previous default 복원 뒤
+attempt backup host pair를 확인한다. generic `AWS-RunShellScript`, direct local
+`send-command`, arbitrary URL/path/command로 우회하지 않는다.
+
 ## 롤백
 
-- workflow를 실행하기 전 role 생성에 실패하면 생성된 inline policy와 role만 정확한
-  이름으로 제거한다.
+- rollout bootstrap의 inline policy phase pre-read boundary 전 실패만 journal에서
+  `created-by-attempt`가 확인된 rollout document/role을 제거한다. policy write 시도 뒤
+  실패는 자동 제거하지 않고 exact read-back과 수동 복구 대상으로 남긴다.
 - OIDC provider는 다른 role이 참조하지 않는 것을 확인한 뒤 제거한다.
 - managed core 제거 후 SSM Online, 새 Session, `/usr/bin/true` RunCommand 또는
   결과 조회 중 하나라도 실패하면 즉시 cutover 실패로 판정한다.

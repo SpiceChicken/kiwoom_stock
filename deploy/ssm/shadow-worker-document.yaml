@@ -1,70 +1,21 @@
-schemaVersion: "2.2"
-description: Start or stop bounded market-only Kiwoom shadow execution
-parameters:
-  DesiredState:
-    type: String
-    description: Bounded shadow action
-    allowedValues:
-      - oneshot
-      - continuous
-      - stop
-    interpolationType: ENV_VAR
-  ImageDigest:
-    type: String
-    description: Exact public GHCR OCI digest
-    allowedPattern: '^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$'
-    interpolationType: ENV_VAR
-  SourceSha:
-    type: String
-    description: Exact source commit
-    allowedPattern: '^[0-9a-f]{40}$'
-    interpolationType: ENV_VAR
-  ActivationId:
-    type: String
-    description: Unique non-secret activation identifier
-    allowedPattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
-    interpolationType: ENV_VAR
-  ComposeShadowSha256:
-    type: String
-    description: compose.shadow.yaml SHA256
-    allowedPattern: '^[0-9a-f]{64}$'
-    interpolationType: ENV_VAR
-  ExpectedInstanceId:
-    type: String
-    description: Exact approved EC2 instance
-    allowedPattern: '^i-02cb0a404794bd43a$'
-    interpolationType: ENV_VAR
-  Region:
-    type: String
-    description: Exact AWS region
-    allowedPattern: '^ap-northeast-2$'
-    interpolationType: ENV_VAR
-mainSteps:
-  - action: aws:runShellScript
-    name: runBoundedShadowAction
-    precondition:
-      StringEquals:
-        - platformType
-        - Linux
-    inputs:
-      timeoutSeconds: "1020"
-      runCommand:
-        - >-
-          if [ "$SSM_DesiredState" = oneshot ] || [ "$SSM_DesiredState" = continuous ]; then
-          exec /usr/local/sbin/kiwoom-shadow-worker
-          --desired-state "$SSM_DesiredState"
-          --image "$SSM_ImageDigest"
-          --source-sha "$SSM_SourceSha"
-          --activation-id "$SSM_ActivationId"
-          --compose-shadow-sha256 "$SSM_ComposeShadowSha256"
-          --expected-instance-id "$SSM_ExpectedInstanceId"
-          --region "$SSM_Region";
-          elif [ "$SSM_DesiredState" = stop ]; then
-          exec /usr/local/sbin/kiwoom-shadow-worker --desired-state stop
-          --image "$SSM_ImageDigest"
-          --source-sha "$SSM_SourceSha"
-          --activation-id "$SSM_ActivationId"
-          --expected-instance-id "$SSM_ExpectedInstanceId"
-          --region "$SSM_Region";
-          else exit 64;
-          fi
+{
+  "schemaVersion": "2.2",
+  "description": "Start or stop bounded market-only Kiwoom shadow execution",
+  "parameters": {
+    "DesiredState": {"type":"String","allowedValues":["oneshot","continuous","stop"],"interpolationType":"ENV_VAR"},
+    "ImageDigest": {"type":"String","allowedPattern":"^ghcr\\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "SourceSha": {"type":"String","allowedPattern":"^[0-9a-f]{40}$","interpolationType":"ENV_VAR"},
+    "ActivationId": {"type":"String","allowedPattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$","interpolationType":"ENV_VAR"},
+    "ComposeShadowSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "ExpectedWorkerSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "ExpectedShadowDocumentSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "ExpectedInstanceId": {"type":"String","allowedPattern":"^i-02cb0a404794bd43a$","interpolationType":"ENV_VAR"},
+    "Region": {"type":"String","allowedPattern":"^ap-northeast-2$","interpolationType":"ENV_VAR"}
+  },
+  "mainSteps": [{
+    "action":"aws:runShellScript",
+    "name":"runBoundedShadowAction",
+    "precondition":{"StringEquals":["platformType","Linux"]},
+    "inputs":{"timeoutSeconds":"1020","runCommand":["exec 9>/run/lock/kiwoom-stock-shadow.lock; flock -x -w 240 9 || exit 75; if [ \"$SSM_DesiredState\" = oneshot ] || [ \"$SSM_DesiredState\" = continuous ]; then exec /usr/local/sbin/kiwoom-shadow-worker --inherited-lock-fd 9 --desired-state \"$SSM_DesiredState\" --image \"$SSM_ImageDigest\" --source-sha \"$SSM_SourceSha\" --activation-id \"$SSM_ActivationId\" --compose-shadow-sha256 \"$SSM_ComposeShadowSha256\" --expected-worker-sha256 \"$SSM_ExpectedWorkerSha256\" --expected-shadow-document-sha256 \"$SSM_ExpectedShadowDocumentSha256\" --expected-instance-id \"$SSM_ExpectedInstanceId\" --region \"$SSM_Region\"; elif [ \"$SSM_DesiredState\" = stop ]; then exec /usr/local/sbin/kiwoom-shadow-worker --inherited-lock-fd 9 --desired-state stop --image \"$SSM_ImageDigest\" --source-sha \"$SSM_SourceSha\" --activation-id \"$SSM_ActivationId\" --expected-worker-sha256 \"$SSM_ExpectedWorkerSha256\" --expected-shadow-document-sha256 \"$SSM_ExpectedShadowDocumentSha256\" --expected-instance-id \"$SSM_ExpectedInstanceId\" --region \"$SSM_Region\"; else exit 64; fi"]}
+  }]
+}

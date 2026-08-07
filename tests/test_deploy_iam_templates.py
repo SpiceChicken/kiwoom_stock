@@ -125,6 +125,69 @@ def test_github_deploy_role_is_ssm_only_and_targets_exact_resources():
     )
 
 
+def test_shadow_rollout_role_is_separate_and_exact():
+    trust = _policy("github-shadow-rollout-trust.json.example")
+    statement = _statements(trust)[0]
+    assert statement["Condition"]["StringEquals"] == {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:sub": (
+            "repo:SpiceChicken/kiwoom_stock:environment:production-shadow"
+        ),
+    }
+    statements = _statements(
+        _policy("github-shadow-rollout-policy.json.example")
+    )
+    actions = {
+        action for item in statements for action in item["Action"]
+    }
+    assert actions == {
+        "ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:GetDocument",
+        "ssm:DescribeDocument", "ssm:ListDocumentVersions",
+        "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion",
+        "ssm:ListCommandInvocations", "ssm:ListCommands",
+    }
+    wildcard = [item for item in statements if item["Resource"] == "*"]
+    assert wildcard == [
+        {
+            "Sid": "ReadRolloutInvocation", "Effect": "Allow",
+            "Action": ["ssm:GetCommandInvocation"], "Resource": "*",
+        },
+        {
+            "Sid": "ReadShadowCommandAcceptanceForLegacyTransition",
+            "Effect": "Allow", "Action": ["ssm:ListCommands"],
+            "Resource": "*",
+        },
+        {
+            "Sid": "ReadShadowCommandHistoryForLegacyTransition",
+            "Effect": "Allow", "Action": ["ssm:ListCommandInvocations"],
+            "Resource": "*",
+        },
+    ]
+    by_sid = {item["Sid"]: item for item in statements}
+    assert by_sid["AttestExactRolloutDocument"] == {
+        "Sid": "AttestExactRolloutDocument",
+        "Effect": "Allow",
+        "Action": ["ssm:GetDocument", "ssm:DescribeDocument"],
+        "Resource": (
+            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
+            "KiwoomStock-ShadowWorkerRollout"
+        ),
+    }
+    assert by_sid["ManageExactShadowActivationDocument"]["Resource"].endswith(
+        ":document/KiwoomStock-ShadowWorker"
+    )
+    assert by_sid["RunExactShadowRollout"]["Resource"] == [
+        (
+            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
+            "KiwoomStock-ShadowWorkerRollout"
+        ),
+        (
+            "arn:aws:ec2:<AWS_REGION>:<AWS_ACCOUNT_ID>:instance/"
+            "<EC2_INSTANCE_ID>"
+        ),
+    ]
+
+
 def test_local_user_can_only_assume_exact_operator_role():
     statements = _statements(
         _policy("local-user-assume-role-policy.json.example")

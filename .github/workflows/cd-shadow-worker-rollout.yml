@@ -1,0 +1,131 @@
+name: Shadow worker exact rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full 40-character lowercase main source SHA
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: kiwoom-stock-shadow-i-02cb0a404794bd43a
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  EC2_INSTANCE_ID: i-02cb0a404794bd43a
+  ROLLOUT_DOCUMENT_NAME: KiwoomStock-ShadowWorkerRollout
+  SHADOW_DOCUMENT_NAME: KiwoomStock-ShadowWorker
+  EVIDENCE_FILENAME: shadow-rollout-evidence.json
+
+jobs:
+  rollout:
+    name: protected exact worker and document rollout
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production-shadow
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout exact trusted rollout executor
+        timeout-minutes: 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate immutable rollout sources before OIDC
+        id: source
+        timeout-minutes: 2
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TRIGGER_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == refs/heads/main ]]
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          bash -n deploy/ec2/shadow_worker_control.sh
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def reject(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise SystemExit("duplicate activation document key")
+                  result[key] = value
+              return result
+
+          worker = Path("deploy/ec2/shadow_worker_control.sh").read_bytes()
+          raw = Path("deploy/ssm/shadow-worker-document.yaml").read_bytes()
+          value = json.loads(raw, object_pairs_hook=reject)
+          canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+          rollout = Path("deploy/ssm/shadow-worker-rollout-document.yaml").read_bytes()
+          print("worker_sha256=" + hashlib.sha256(worker).hexdigest())
+          print("shadow_document_raw_sha256=" + hashlib.sha256(raw).hexdigest())
+          print("shadow_document_sha256=" + hashlib.sha256(canonical).hexdigest())
+          print("rollout_document_sha256=" + hashlib.sha256(rollout).hexdigest())
+          PY
+
+      - name: Configure exact shadow rollout role with OIDC
+        id: oidc
+        timeout-minutes: 1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: kiwoom-shadow-rollout
+          output-credentials: true
+          output-env-credentials: false
+          unset-current-credentials: true
+
+      - name: Execute authoritative exact rollout
+        timeout-minutes: 18
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.oidc.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.oidc.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.oidc.outputs.aws-session-token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ROLLOUT_ATTEMPT_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+          python3 -m kiwoom_stock.deployment.shadow_rollout \
+            --source-sha "${SOURCE_SHA}" \
+            --rollout-attempt-id "${ROLLOUT_ATTEMPT_ID}" \
+            --audit "${EVIDENCE_FILENAME}"
+
+      - name: Clear OIDC credentials before evidence upload
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          {
+            echo 'AWS_ACCESS_KEY_ID='
+            echo 'AWS_SECRET_ACCESS_KEY='
+            echo 'AWS_SESSION_TOKEN='
+            echo 'AWS_REGION='
+            echo 'AWS_DEFAULT_REGION='
+          } >>"${GITHUB_ENV}"
+
+      - name: Upload bounded rollout evidence
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: shadow-rollout-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: ${{ env.EVIDENCE_FILENAME }}
+          if-no-files-found: error
+          retention-days: 14

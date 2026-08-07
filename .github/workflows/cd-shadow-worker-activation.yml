@@ -31,6 +31,14 @@ on:
         description: Unique non-secret activation identifier
         required: true
         type: string
+      worker_sha256:
+        description: Exact installed shadow worker SHA256 from rollout evidence
+        required: true
+        type: string
+      shadow_document_sha256:
+        description: Exact canonical activation document SHA256 from rollout evidence
+        required: true
+        type: string
 
 permissions: {}
 
@@ -75,6 +83,9 @@ jobs:
           COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
           ACTIVATION_ID: ${{ inputs.activation_id }}
           DESIRED_STATE: ${{ inputs.desired_state }}
+          WORKER_SHA256: ${{ inputs.worker_sha256 }}
+          SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
+          PYTHONPATH: ${{ github.workspace }}/src
         shell: bash
         run: |
           set -euo pipefail
@@ -82,6 +93,8 @@ jobs:
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
           [[ "${ACTIVATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+          [[ "${WORKER_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${SHADOW_DOCUMENT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           [[ "${DESIRED_STATE}" == oneshot || "${DESIRED_STATE}" == continuous || "${DESIRED_STATE}" == stop ]]
           if [[ "${DESIRED_STATE}" == stop ]]; then
             [[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]
@@ -147,19 +160,24 @@ jobs:
           COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
           ACTIVATION_ID: ${{ inputs.activation_id }}
           DESIRED_STATE: ${{ inputs.desired_state }}
+          WORKER_SHA256: ${{ inputs.worker_sha256 }}
+          SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
+          PYTHONPATH: ${{ github.workspace }}/src
         shell: bash
         run: |
           set -euo pipefail
+          document_version="$(python3 -c 'import os; from kiwoom_stock.deployment.shadow_rollout import attest_activation_document; print(attest_activation_document(os.environ["SHADOW_DOCUMENT_SHA256"]))')"
+          [[ "${document_version}" =~ ^[1-9][0-9]*$ ]]
           ssm_compose_hash="${COMPOSE_SHADOW_SHA256}"
           if [[ "${DESIRED_STATE}" == stop ]]; then
             ssm_compose_hash="$(printf '0%.0s' {1..64})"
           fi
           command_id="$(aws ssm send-command \
             --document-name "${SHADOW_DOCUMENT_NAME}" \
-            --document-version '$LATEST' \
+            --document-version "${document_version}" \
             --instance-ids "${EC2_INSTANCE_ID}" \
             --parameters \
-              "DesiredState=${DESIRED_STATE},ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=${ssm_compose_hash},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" \
+              "DesiredState=${DESIRED_STATE},ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=${ssm_compose_hash},ExpectedWorkerSha256=${WORKER_SHA256},ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" \
             --comment "kiwoom shadow activation ${ACTIVATION_ID}" \
             --timeout-seconds 1020 \
             --max-concurrency 1 \
@@ -285,12 +303,18 @@ jobs:
           PY
           )"
           python3 - "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${BUILD_RUN_ID}" "${ACTIVATION_ID}" \
-            "${DESIRED_STATE}" "${command_id}" "${status}" "${response_code}" "${runtime_evidence}" \
+            "${DESIRED_STATE}" "${command_id}" "${status}" "${response_code}" \
+            "${document_version}" "${WORKER_SHA256}" "${SHADOW_DOCUMENT_SHA256}" "${runtime_evidence}" \
             >"${EVIDENCE_FILENAME}" <<'PY'
           import json
+          import re
           import sys
 
-          source_sha, image_digest, build_run_id, activation_id, desired_state, command_id, status, response_code, runtime = sys.argv[1:]
+          source_sha, image_digest, build_run_id, activation_id, desired_state, command_id, status, response_code, document_version, worker_sha256, shadow_document_sha256, runtime = sys.argv[1:]
+          if re.fullmatch(r"[1-9][0-9]*", document_version) is None:
+              raise SystemExit("attested document version is invalid")
+          if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (worker_sha256, shadow_document_sha256)):
+              raise SystemExit("attested pair hash is invalid")
           evidence = json.loads(runtime)
           payload = {
               "source_sha": source_sha,
@@ -301,6 +325,9 @@ jobs:
               "command_id": command_id,
               "status": status,
               "response_code": response_code,
+              "document_version": document_version,
+              "worker_sha256": worker_sha256,
+              "shadow_document_sha256": shadow_document_sha256,
               **evidence,
           }
           print(json.dumps(payload, sort_keys=True, separators=(",", ":")))

@@ -15,6 +15,12 @@
       "Effect": "Allow",
       "Action": ["ssm:GetCommandInvocation"],
       "Resource": "*"
+    },
+    {
+      "Sid": "AttestExactShadowDocument",
+      "Effect": "Allow",
+      "Action": ["ssm:DescribeDocument", "ssm:GetDocument"],
+      "Resource": "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/KiwoomStock-ShadowWorker"
     }
   ]
 }
