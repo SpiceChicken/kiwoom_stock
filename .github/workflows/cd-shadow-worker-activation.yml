@@ -259,9 +259,14 @@ jobs:
                   )
                   for raw_line in content.splitlines():
                       line = raw_line.split("|", 1)[-1].strip()
-                      if not line.startswith(allowed_prefixes):
+                      positions = [
+                          line.find(prefix)
+                          for prefix in allowed_prefixes
+                          if line.find(prefix) >= 0
+                      ]
+                      if not positions:
                           continue
-                      message = line[:256]
+                      message = line[min(positions) :][:256]
                       if all(char.isprintable() or char == "\t" for char in message):
                           messages.append(message)
                   return messages[-3:]
