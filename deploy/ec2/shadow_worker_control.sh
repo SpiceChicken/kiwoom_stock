@@ -435,15 +435,19 @@ confirm_continuous_tick() {
     local image="$3"
     local activation_id="$4"
     local evidence running exit_code
-    evidence="$(validate_safe_evidence shadow-continuous cycle \
-        "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
-        || fail "continuous first safe tick is invalid"
+    if ! evidence="$(validate_safe_evidence shadow-continuous cycle \
+        "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")"; then
+        printf 'continuous first safe tick is invalid\n' >&2
+        return 1
+    fi
     validate_container_identity_safe "${source_sha}" "${image}" "${activation_id}" shadow-continuous \
         || return 1
     running="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.Running}}')"
     exit_code="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.ExitCode}}')"
-    [[ "${running}" == true && "${exit_code}" != 137 ]] \
-        || fail "continuous shadow is not running after its first tick"
+    if [[ "${running}" != true || "${exit_code}" == 137 ]]; then
+        printf 'continuous shadow is not running after its first tick\n' >&2
+        return 1
+    fi
     printf '%s\n' "${evidence}"
 }
 
