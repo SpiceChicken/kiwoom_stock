@@ -407,6 +407,28 @@ validate_container_identity() {
     [[ "${actual}" == "${expected_command}" ]] || fail "shadow container command tuple mismatch"
 }
 
+validate_container_identity_safe() {
+    local expected_source_sha="$1"
+    local expected_image="$2"
+    local expected_activation_id="$3"
+    local expected_mode="$4"
+    local actual expected_command
+    docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1 || return 1
+    actual="$(docker inspect "${CONTAINER_NAME}" --format '{{.Config.Image}}')" || return 1
+    [[ "${actual}" == "${expected_image}" ]] || return 1
+    actual="$(docker inspect "${CONTAINER_NAME}" --format '{{index .Config.Labels "io.kiwoom.shadow.source-sha"}}')" || return 1
+    [[ "${actual}" == "${expected_source_sha}" ]] || return 1
+    actual="$(docker inspect "${CONTAINER_NAME}" --format '{{index .Config.Labels "io.kiwoom.shadow.image-digest"}}')" || return 1
+    [[ "${actual}" == "${expected_image}" ]] || return 1
+    actual="$(docker inspect "${CONTAINER_NAME}" --format '{{index .Config.Labels "io.kiwoom.shadow.activation-id"}}')" || return 1
+    [[ "${actual}" == "${expected_activation_id}" ]] || return 1
+    actual="$(docker inspect "${CONTAINER_NAME}" --format '{{index .Config.Labels "io.kiwoom.shadow.mode"}}')" || return 1
+    [[ "${actual}" == "${expected_mode}" ]] || return 1
+    expected_command="[\"python\",\"-m\",\"kiwoom_stock\",\"shadow-worker\",\"--source-sha\",\"${expected_source_sha}\",\"--image-digest\",\"${expected_image}\",\"--activation-id\",\"${expected_activation_id}\"]"
+    actual="$(docker inspect "${CONTAINER_NAME}" --format '{{json .Config.Cmd}}')" || return 1
+    [[ "${actual}" == "${expected_command}" ]]
+}
+
 confirm_continuous_tick() {
     local logs="$1"
     local source_sha="$2"
@@ -416,7 +438,8 @@ confirm_continuous_tick() {
     evidence="$(validate_safe_evidence shadow-continuous cycle \
         "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
         || fail "continuous first safe tick is invalid"
-    validate_container_identity "${source_sha}" "${image}" "${activation_id}" shadow-continuous
+    validate_container_identity_safe "${source_sha}" "${image}" "${activation_id}" shadow-continuous \
+        || return 1
     running="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.Running}}')"
     exit_code="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.ExitCode}}')"
     [[ "${running}" == true && "${exit_code}" != 137 ]] \
