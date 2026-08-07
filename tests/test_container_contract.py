@@ -83,9 +83,10 @@ def test_docker_test_stage_has_complete_minimal_full_suite_manifest():
         (
             "COPY .github/workflows/ci.yml "
             ".github/workflows/cd-production-check.yml "
-            ".github/workflows/cd-production-promotion.yml "
-            ".github/workflows/cd-shadow-worker-activation.yml "
-            "./.github/workflows/"
+                ".github/workflows/cd-production-promotion.yml "
+                ".github/workflows/cd-shadow-worker-activation.yml "
+                ".github/workflows/cd-shadow-worker-rollout.yml "
+                "./.github/workflows/"
         ),
     ]
     assert test_block.count("ENV CONTAINER_TEST_STAGE=1") == 1
