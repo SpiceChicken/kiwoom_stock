@@ -393,6 +393,7 @@ def _history_item(*, age_seconds=7200, status="Success"):
         "DocumentName": shadow_rollout.SHADOW_DOCUMENT,
         "RequestedDateTime": requested,
         "Status": status,
+        "CommandPlugins": [],
     }
 
 

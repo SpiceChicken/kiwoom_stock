@@ -57,7 +57,8 @@ HISTORY_COMMAND_KEYS = {
 HISTORY_ITEM_KEYS = {
     "CommandId", "InstanceId", "InstanceName", "Comment", "DocumentName",
     "DocumentVersion", "RequestedDateTime", "Status", "StatusDetails",
-    "TraceOutput", "StandardOutputUrl", "StandardErrorUrl", "ServiceRole",
+    "TraceOutput", "StandardOutputUrl", "StandardErrorUrl", "CommandPlugins",
+    "ServiceRole",
     "NotificationConfig", "CloudWatchOutputConfig",
 }
 HOST_EVIDENCE_KEYS = {
