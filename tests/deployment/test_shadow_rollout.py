@@ -425,7 +425,7 @@ def test_legacy_history_quiet_pass_is_metadata_only_and_explicitly_paginated():
         {"Commands": [_history_command()], "NextToken": "commands-page-2"},
         {"Commands": []},
         {"CommandInvocations": [_history_item()], "NextToken": "page-2"},
-        {"CommandInvocations": []},
+        {},
         {"Commands": []}, {"CommandInvocations": []},
         {"Commands": []}, {"CommandInvocations": []},
     ])
