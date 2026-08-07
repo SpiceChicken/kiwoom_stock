@@ -34,6 +34,36 @@ fail() {
     exit 1
 }
 
+emit_runtime_failure_sentinel() {
+    local logs="$1"
+    local error_type
+    error_type="$(printf '%s\n' "${logs}" | python3 -c '
+import json
+import re
+import sys
+
+for raw in sys.stdin:
+    line = raw.split("|", 1)[-1].strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        item = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    value = item.get("error_type")
+    if (
+        item.get("status") == "FAILED"
+        and isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
+    ):
+        print(value)
+        break
+')"
+    if [[ -n "${error_type}" ]]; then
+        printf 'shadow worker failed: error_type=%s\n' "${error_type}"
+    fi
+}
+
 validate_image() {
     [[ "$1" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]] \
         || fail "image must be the exact public GHCR repository and sha256 digest"
@@ -425,7 +455,10 @@ run_shadow_once() {
         --project-name kiwoom-stock-shadow \
         --project-directory "${WORK_DIR}" \
         --file "${compose_file}" up --abort-on-container-exit --exit-code-from app \
-        || fail "shadow-once container failed or timed out"
+        || {
+            emit_runtime_failure_sentinel "$(docker logs "${CONTAINER_NAME}" 2>&1 || true)" || true
+            fail "shadow-once container failed or timed out"
+        }
     cleanup || fail "shadow container cleanup failed"
     trap - EXIT TERM
     printf 'shadow-once passed: source_sha=%s image=%s activation_id=%s side_effects=none\n' \
@@ -480,9 +513,13 @@ run_shadow_continuous() {
             return 0
         fi
         now="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.Running}}' 2>/dev/null || true)"
-        [[ "${now}" == true ]] || fail "continuous shadow exited before its first safe tick"
+        if [[ "${now}" != true ]]; then
+            emit_runtime_failure_sentinel "$(docker logs "${CONTAINER_NAME}" 2>&1 || true)" || true
+            fail "continuous shadow exited before its first safe tick"
+        fi
         sleep 2
     done
+    emit_runtime_failure_sentinel "$(docker logs "${CONTAINER_NAME}" 2>&1 || true)" || true
     fail "continuous shadow first safe tick timed out"
 }
 
