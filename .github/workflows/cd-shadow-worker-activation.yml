@@ -229,6 +229,10 @@ jobs:
                   "schema_version", "event", "status", "mode", "source_sha",
                   "image_digest", "activation_id", "cycles", "cycle_index",
                   "http_attempts", "resources_closed", "reason", "error_type",
+                  "cycle_start_elapsed_seconds", "observed_interval_seconds",
+                  "db_reopened", "db_reopens", "first_cycle_start_elapsed_seconds",
+                  "second_cycle_start_elapsed_seconds", "second_cycle_interval_seconds",
+                  "minimum_cycle_interval_seconds",
               }
 
               def safe_records(content):
@@ -311,7 +315,7 @@ jobs:
               local_counts = result.get("local_counts")
               expected_api = {"token": 1, "stock_basic": 1, "stock_chart_5m": 1, "proxy_chart_60m": 1, "stock_strength": 1, "stock_orderbook": 1}
               expected_local_keys = {"status", "paper_buy", "paper_sell", "error", "critical"}
-              integer_fields = (result.get("schema_version"), result.get("cycle_index"), result.get("cycles"), attempts)
+              integer_fields = (result.get("schema_version"), result.get("cycle_index"), result.get("cycles"), attempts, result.get("db_reopens"))
               local_valid = (
                   isinstance(local_counts, dict)
                   and set(local_counts) == expected_local_keys
@@ -325,7 +329,7 @@ jobs:
               )
               if (
                   any(type(value) is not int for value in integer_fields)
-                  or result.get("schema_version") != 1
+                  or result.get("schema_version") != 2
                   or result.get("event") != "cycle"
                   or result.get("status") != "PASS"
                   or result.get("cycle_index") != 1
@@ -338,6 +342,11 @@ jobs:
                   or api_counts != expected_api
                   or not local_valid
                   or result.get("interval_seconds") != 60.0
+                  or type(result.get("cycle_start_elapsed_seconds")) is not float
+                  or result.get("cycle_start_elapsed_seconds") < 0.0
+                  or result.get("observed_interval_seconds") is not None
+                  or result.get("db_reopened") is not False
+                  or result.get("db_reopens") != 0
               ):
                   raise SystemExit("continuous first tick evidence is invalid")
           elif desired_state == "stop":
@@ -345,12 +354,46 @@ jobs:
                   result.get("status"), result.get("reason")
               ) not in {("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline")}:
                   raise SystemExit("continuous stop evidence is invalid")
+              cycles = result.get("cycles")
+              db_reopens = result.get("db_reopens")
+              first_start = result.get("first_cycle_start_elapsed_seconds")
+              second_start = result.get("second_cycle_start_elapsed_seconds")
+              second_interval = result.get("second_cycle_interval_seconds")
+              minimum_interval = result.get("minimum_cycle_interval_seconds")
+              if (
+                  result.get("schema_version") != 2
+                  or type(cycles) is not int
+                  or cycles < 1
+                  or type(db_reopens) is not int
+                  or db_reopens != cycles - 1
+                  or type(first_start) is not float
+                  or first_start < 0.0
+              ):
+                  raise SystemExit("continuous terminal timing evidence is invalid")
+              if cycles == 1:
+                  if any(value is not None for value in (second_start, second_interval, minimum_interval)):
+                      raise SystemExit("single-cycle terminal timing evidence is invalid")
+              elif (
+                  type(second_start) is not float
+                  or second_start - first_start < 60.0
+                  or type(second_interval) is not float
+                  or second_interval < 60.0
+                  or abs((second_start - first_start) - second_interval) > 0.000001
+                  or type(minimum_interval) is not float
+                  or minimum_interval < 60.0
+              ):
+                  raise SystemExit("multi-cycle terminal timing evidence is invalid")
           elif result.get("status") not in ("PASS", "CLOSED"):
               raise SystemExit("shadow one-shot evidence is invalid")
           evidence = {
               "runtime_status": result.get("status"),
               "cycles": result.get("cycles"),
               "http_attempts": result.get("http_attempts"),
+              "first_cycle_start_elapsed_seconds": result.get("first_cycle_start_elapsed_seconds"),
+              "second_cycle_start_elapsed_seconds": result.get("second_cycle_start_elapsed_seconds"),
+              "second_cycle_interval_seconds": result.get("second_cycle_interval_seconds"),
+              "minimum_cycle_interval_seconds": result.get("minimum_cycle_interval_seconds"),
+              "db_reopens": result.get("db_reopens"),
               "database": bool(result.get("db_identity")),
               "side_effects": {
                   "orders": side_effects["broker_orders"],

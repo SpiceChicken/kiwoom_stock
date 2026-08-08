@@ -190,6 +190,17 @@ identity comparison, stop verifies either a clean signal transition
 (`DEADLINE`/`run-deadline`), requires a non-137 zero exit, removes that exact
 container, and preserves its named volume and image.
 
+Continuous evidence uses schema version `2` and records the elapsed start time
+of each cycle, the observed interval between cycle starts, whether the current
+cycle reopened the same database identity, and the cumulative reopen count.
+The first safe tick must have no prior interval and `db_reopened=false`; a
+terminal stop/deadline record must bind `db_reopens` to `cycles - 1` and, once
+two cycles exist, prove an observed interval of at least 60 seconds whose value
+matches the difference between the first two cycle start timestamps. A database
+identity change between cycles fails closed. This makes the bounded start/stop
+artifact carry direct evidence of the fresh-runtime and same-isolated-ledger
+contract rather than only the configured interval.
+
 Activation also requires the exact installed worker SHA-256 and deterministic
 canonical activation-document SHA-256 recorded by rollout evidence. The
 root-owned worker compares its own root:root `0750` bytes and the root-only
