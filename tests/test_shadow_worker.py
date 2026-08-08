@@ -159,6 +159,17 @@ def test_continuous_uses_fresh_one_shot_runtime_and_interruptible_sixty_second_g
     assert [item["cycle_index"] for item in evidence] == [1, 2]
     assert all(item["resources_closed"] is True for item in evidence)
     assert all(not any(item["side_effects"].values()) for item in evidence)
+    assert evidence[0]["cycle_start_elapsed_seconds"] == 0.0
+    assert evidence[0]["observed_interval_seconds"] is None
+    assert evidence[0]["db_reopened"] is False
+    assert evidence[1]["cycle_start_elapsed_seconds"] == 60.0
+    assert evidence[1]["observed_interval_seconds"] == 60.0
+    assert evidence[1]["db_reopened"] is True
+    assert result.first_cycle_start_elapsed_seconds == 0.0
+    assert result.second_cycle_start_elapsed_seconds == 60.0
+    assert result.second_cycle_interval_seconds == 60.0
+    assert result.minimum_cycle_interval_seconds == 60.0
+    assert result.db_reopens == 1
 
 
 def test_continuous_hard_deadline_stops_before_constructing_another_cycle(tmp_path):
@@ -181,6 +192,11 @@ def test_continuous_hard_deadline_stops_before_constructing_another_cycle(tmp_pa
     assert result.cycles == 15
     assert len(constructions) == 15
     assert now[0] == 900.0
+    assert result.first_cycle_start_elapsed_seconds == 0.0
+    assert result.second_cycle_start_elapsed_seconds == 60.0
+    assert result.second_cycle_interval_seconds == 60.0
+    assert result.minimum_cycle_interval_seconds == 60.0
+    assert result.db_reopens == 14
 
 
 def test_continuous_failure_is_redacted_and_never_starts_next_cycle(tmp_path):
@@ -206,6 +222,38 @@ def test_continuous_failure_is_redacted_and_never_starts_next_cycle(tmp_path):
     assert result.error_type == "RuntimeError"
     assert constructions == ["runtime"]
     assert "secret" not in json.dumps(result.to_safe_dict())
+
+
+def test_continuous_fails_closed_when_the_database_identity_changes(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now, stop_after_waits=2)
+    runtimes = []
+
+    def factory(*_args):
+        runtime = FakeRuntime()
+        if runtimes:
+            runtime.db_path = Path("/isolated/shadow/other-trades.db")
+        runtimes.append(runtime)
+        return runtime
+
+    evidence = []
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=evidence.append,
+        lock_path=(tmp_path / "identity.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.error_type == "ShadowDatabaseIdentityMismatch"
+    assert result.cycles == 1
+    assert len(evidence) == 1
+    assert result.db_reopens == 0
 
 
 def test_continuous_signal_cleanup_failure_is_failed_nonzero(tmp_path):

@@ -36,6 +36,9 @@ from kiwoom_stock.application.shadow_lifecycle import (
 
 _SEOUL = ZoneInfo("Asia/Seoul")
 SHADOW_EVIDENCE_SCHEMA_VERSION = 1
+# Continuous evidence adds timing and database-reopen attestations without
+# changing the established one-shot evidence contract.
+SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 2
 
 
 class ShadowWorkerError(RuntimeError):
@@ -211,6 +214,11 @@ class ShadowContinuousResult:
     activation_id: str
     cycles: int
     elapsed_seconds: float
+    first_cycle_start_elapsed_seconds: float | None
+    second_cycle_start_elapsed_seconds: float | None
+    second_cycle_interval_seconds: float | None
+    minimum_cycle_interval_seconds: float | None
+    db_reopens: int
     resources_closed: bool
     side_effects: Mapping[str, bool]
     reason: str
@@ -222,7 +230,7 @@ class ShadowContinuousResult:
 
     def to_safe_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "schema_version": SHADOW_EVIDENCE_SCHEMA_VERSION,
+            "schema_version": SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION,
             "event": "terminal",
             "status": self.status,
             "mode": self.mode,
@@ -231,6 +239,11 @@ class ShadowContinuousResult:
             "activation_id": self.activation_id,
             "cycles": self.cycles,
             "elapsed_seconds": round(self.elapsed_seconds, 6),
+            "first_cycle_start_elapsed_seconds": self.first_cycle_start_elapsed_seconds,
+            "second_cycle_start_elapsed_seconds": self.second_cycle_start_elapsed_seconds,
+            "second_cycle_interval_seconds": self.second_cycle_interval_seconds,
+            "minimum_cycle_interval_seconds": self.minimum_cycle_interval_seconds,
+            "db_reopens": self.db_reopens,
             "resources_closed": self.resources_closed,
             "side_effects": dict(self.side_effects),
             "reason": self.reason,
@@ -477,6 +490,13 @@ def run_shadow_continuous(
     activation = policy.activation
     cycles = 0
     last_closed = True
+    first_cycle_start_elapsed_seconds: float | None = None
+    second_cycle_start_elapsed_seconds: float | None = None
+    second_cycle_interval_seconds: float | None = None
+    minimum_cycle_interval_seconds: float | None = None
+    previous_cycle_started: float | None = None
+    previous_db_identity: str | None = None
+    db_reopens = 0
 
     def terminal(
         status: str,
@@ -491,6 +511,11 @@ def run_shadow_continuous(
             activation_id=activation.activation_id,
             cycles=cycles,
             elapsed_seconds=deadline.elapsed(clock=monotonic),
+            first_cycle_start_elapsed_seconds=first_cycle_start_elapsed_seconds,
+            second_cycle_start_elapsed_seconds=second_cycle_start_elapsed_seconds,
+            second_cycle_interval_seconds=second_cycle_interval_seconds,
+            minimum_cycle_interval_seconds=minimum_cycle_interval_seconds,
+            db_reopens=db_reopens,
             resources_closed=last_closed,
             side_effects=_zero_external_side_effects(),
             reason=reason.value,
@@ -510,6 +535,14 @@ def run_shadow_continuous(
                     except ShadowShutdownDeadlineExceeded:
                         return terminal("FAILED", ShadowTerminalReason.SHUTDOWN_DEADLINE)
                     cycle_started = monotonic()
+                    cycle_start_elapsed_seconds = round(
+                        max(0.0, cycle_started - deadline.started_at), 6
+                    )
+                    observed_interval_seconds = (
+                        None
+                        if previous_cycle_started is None
+                        else round(max(0.0, cycle_started - previous_cycle_started), 6)
+                    )
                     last_closed = False
                     try:
                         result = run_shadow_once(
@@ -546,16 +579,55 @@ def run_shadow_continuous(
                             "CLOSED",
                             ShadowTerminalReason.CALENDAR_CLOSED,
                         )
+                    if not isinstance(result.db_identity, str) or not result.db_identity:
+                        return terminal(
+                            "FAILED",
+                            ShadowTerminalReason.FAILURE,
+                            "ShadowDatabaseIdentityMissing",
+                        )
+                    db_reopened = (
+                        previous_db_identity is not None
+                        and result.db_identity == previous_db_identity
+                    )
+                    if previous_db_identity is not None and not db_reopened:
+                        return terminal(
+                            "FAILED",
+                            ShadowTerminalReason.FAILURE,
+                            "ShadowDatabaseIdentityMismatch",
+                        )
+                    if first_cycle_start_elapsed_seconds is None:
+                        first_cycle_start_elapsed_seconds = cycle_start_elapsed_seconds
+                    elif second_cycle_start_elapsed_seconds is None:
+                        second_cycle_start_elapsed_seconds = cycle_start_elapsed_seconds
+                        second_cycle_interval_seconds = observed_interval_seconds
+                    if observed_interval_seconds is not None:
+                        minimum_cycle_interval_seconds = (
+                            observed_interval_seconds
+                            if minimum_cycle_interval_seconds is None
+                            else min(
+                                minimum_cycle_interval_seconds,
+                                observed_interval_seconds,
+                            )
+                        )
+                    if db_reopened:
+                        db_reopens += 1
                     cycles += 1
+                    previous_cycle_started = cycle_started
+                    previous_db_identity = result.db_identity
                     cycle_evidence = result.to_safe_dict()
                     cycle_evidence.update(
                         {
+                            "schema_version": SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION,
                             "event": "cycle",
                             "cycle_index": cycles,
                             "elapsed_seconds": round(
                                 max(0.0, monotonic() - cycle_started), 6
                             ),
                             "interval_seconds": SHADOW_CONTINUOUS_INTERVAL_SECONDS,
+                            "cycle_start_elapsed_seconds": cycle_start_elapsed_seconds,
+                            "observed_interval_seconds": observed_interval_seconds,
+                            "db_reopened": db_reopened,
+                            "db_reopens": db_reopens,
                         }
                     )
                     emit(cycle_evidence)

@@ -19,7 +19,7 @@ ACTIVATION_ID = "continuous-test"
 
 def _cycle_evidence(**updates):
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "event": "cycle",
         "status": "PASS",
         "mode": "shadow-continuous",
@@ -46,6 +46,10 @@ def _cycle_evidence(**updates):
         },
         "db_identity": "/var/lib/kiwoom/shadow-trades.db",
         "interval_seconds": 60.0,
+        "cycle_start_elapsed_seconds": 0.0,
+        "observed_interval_seconds": None,
+        "db_reopened": False,
+        "db_reopens": 0,
         "resources_closed": True,
         "side_effects": {
             "broker_orders": False,
@@ -68,9 +72,17 @@ def _terminal_evidence(**updates):
         status="DEADLINE",
         reason="run-deadline",
         cycles=15,
+        first_cycle_start_elapsed_seconds=0.0,
+        second_cycle_start_elapsed_seconds=60.0,
+        second_cycle_interval_seconds=60.0,
+        minimum_cycle_interval_seconds=60.0,
+        db_reopens=14,
     )
     result.pop("cycle_index", None)
     result.pop("interval_seconds", None)
+    result.pop("cycle_start_elapsed_seconds", None)
+    result.pop("observed_interval_seconds", None)
+    result.pop("db_reopened", None)
     result.update(updates)
     return result
 
@@ -385,7 +397,7 @@ def test_host_and_workflow_accept_all_safe_local_cycle_outcomes(tmp_path):
 def test_host_and_workflow_reject_non_integer_or_invalid_cycle_schema(tmp_path):
     valid = _cycle_evidence()
     invalid = []
-    for field in ("schema_version", "cycle_index", "cycles", "http_attempts"):
+    for field in ("schema_version", "cycle_index", "cycles", "http_attempts", "db_reopens"):
         invalid.append(_cycle_evidence(**{field: True}))
         invalid.append(_cycle_evidence(**{field: 1.0}))
     invalid.extend(
@@ -403,6 +415,55 @@ def test_host_and_workflow_reject_non_integer_or_invalid_cycle_schema(tmp_path):
     for evidence in invalid:
         assert _run_host_cycle_parser(evidence, tmp_path).returncode != 0
         assert _run_workflow_cycle_parser(evidence).returncode != 0
+
+
+def test_host_and_workflow_validate_continuous_terminal_reopen_evidence(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(
+        item for item in workflow["jobs"]["activate"]["steps"]
+        if item.get("name") == "Execute bounded shadow action"
+    )
+    parser = step["run"].split("runtime_evidence=", 1)[1]
+    parser = parser.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    terminal = _terminal_evidence()
+    payload = tmp_path / "terminal-evidence.json"
+    payload.write_text(json.dumps(terminal), encoding="utf-8")
+    host = _run_sourced(
+        'validate_safe_evidence shadow-continuous terminal "$3" "$4" "$5" <"$2"',
+        str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID,
+    )
+    workflow_result = subprocess.run(
+        [
+            sys.executable, "-", json.dumps({"StandardOutputContent": json.dumps(terminal)}),
+            "stop", SOURCE_SHA, IMAGE, ACTIVATION_ID,
+        ],
+        input=parser, check=False, capture_output=True, text=True,
+    )
+    assert host.returncode == 0, host.stderr
+    assert workflow_result.returncode == 0, workflow_result.stderr
+
+    for updates in (
+        {"db_reopens": 13},
+        {"second_cycle_interval_seconds": 59.0},
+        {"minimum_cycle_interval_seconds": 59.0},
+        {"second_cycle_start_elapsed_seconds": 30.0},
+        {"schema_version": 1},
+    ):
+        malformed = {**terminal, **updates}
+        payload.write_text(json.dumps(malformed), encoding="utf-8")
+        assert _run_sourced(
+            'validate_safe_evidence shadow-continuous terminal "$3" "$4" "$5" <"$2"',
+            str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID,
+        ).returncode != 0
+        failed_workflow = subprocess.run(
+            [
+                sys.executable, "-", json.dumps({"StandardOutputContent": json.dumps(malformed)}),
+                "stop", SOURCE_SHA, IMAGE, ACTIVATION_ID,
+            ],
+            input=parser, check=False, capture_output=True, text=True,
+        )
+        assert failed_workflow.returncode != 0
 
 
 def test_host_stop_fails_when_container_is_absent():

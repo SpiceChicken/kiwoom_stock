@@ -24,6 +24,7 @@ readonly DOWNLOAD_TIMEOUT_SECONDS="${KIWOOM_SHADOW_DOWNLOAD_TIMEOUT_SECONDS:-45}
 readonly FIRST_TICK_TIMEOUT_SECONDS="${KIWOOM_SHADOW_FIRST_TICK_TIMEOUT_SECONDS:-240}"
 readonly CONTAINER_NAME="kiwoom-shadow-once"
 readonly SHADOW_EVIDENCE_SCHEMA_VERSION=1
+readonly SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION=2
 readonly ROLLOUT_BINDING_FILE="${KIWOOM_SHADOW_BINDING_FILE:-/var/lib/kiwoom-stock/shadow-rollout-current.json}"
 
 ACTIVE_CONTAINER_NAME=""
@@ -346,7 +347,7 @@ if event == "cycle":
     local_counts = item.get("local_counts")
     expected_api = {"token": 1, "stock_basic": 1, "stock_chart_5m": 1, "proxy_chart_60m": 1, "stock_strength": 1, "stock_orderbook": 1}
     expected_local_keys = {"status", "paper_buy", "paper_sell", "error", "critical"}
-    integer_fields = (item.get("schema_version"), item.get("cycle_index"), item.get("cycles"), attempts)
+    integer_fields = (item.get("schema_version"), item.get("cycle_index"), item.get("cycles"), attempts, item.get("db_reopens"))
     local_valid = (
         isinstance(local_counts, dict)
         and set(local_counts) == expected_local_keys
@@ -360,7 +361,7 @@ if event == "cycle":
     )
     if (
         any(type(value) is not int for value in integer_fields)
-        or item.get("schema_version") != 1
+        or item.get("schema_version") != 2
         or item.get("status") != "PASS"
         or item.get("cycle_index") != 1
         or item.get("cycles") != 1
@@ -372,6 +373,11 @@ if event == "cycle":
         or counts != expected_api
         or not local_valid
         or item.get("interval_seconds") != 60.0
+        or type(item.get("cycle_start_elapsed_seconds")) is not float
+        or item.get("cycle_start_elapsed_seconds") < 0.0
+        or item.get("observed_interval_seconds") is not None
+        or item.get("db_reopened") is not False
+        or item.get("db_reopens") != 0
     ):
         raise SystemExit("first continuous tick is invalid")
 elif event == "terminal":
@@ -380,6 +386,35 @@ elif event == "terminal":
         ("DEADLINE", "run-deadline"),
     }:
         raise SystemExit("continuous stop terminal evidence is invalid")
+    cycles = item.get("cycles")
+    db_reopens = item.get("db_reopens")
+    first_start = item.get("first_cycle_start_elapsed_seconds")
+    second_start = item.get("second_cycle_start_elapsed_seconds")
+    second_interval = item.get("second_cycle_interval_seconds")
+    minimum_interval = item.get("minimum_cycle_interval_seconds")
+    if (
+        item.get("schema_version") != 2
+        or type(cycles) is not int
+        or cycles < 1
+        or type(db_reopens) is not int
+        or db_reopens != cycles - 1
+        or type(first_start) is not float
+        or first_start < 0.0
+    ):
+        raise SystemExit("continuous terminal timing evidence is invalid")
+    if cycles == 1:
+        if any(value is not None for value in (second_start, second_interval, minimum_interval)):
+            raise SystemExit("single-cycle terminal timing evidence is invalid")
+    elif (
+        type(second_start) is not float
+        or second_start - first_start < 60.0
+        or type(second_interval) is not float
+        or second_interval < 60.0
+        or abs((second_start - first_start) - second_interval) > 0.000001
+        or type(minimum_interval) is not float
+        or minimum_interval < 60.0
+    ):
+        raise SystemExit("multi-cycle terminal timing evidence is invalid")
 print(json.dumps(item, sort_keys=True, separators=(",", ":")))
 ' "${expected_mode}" "${expected_event}" "${expected_source_sha}" "${expected_image}" "${expected_activation_id}"
 }
