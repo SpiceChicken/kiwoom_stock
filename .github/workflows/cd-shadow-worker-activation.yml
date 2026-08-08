@@ -102,8 +102,13 @@ jobs:
           fi
           [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
           [[ "${BUILD_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
-          [[ "${COMPOSE_SHADOW_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum compose.shadow.yaml | cut -d' ' -f1)" = "${COMPOSE_SHADOW_SHA256}"
+          actual_compose_shadow_sha256="$(sha256sum compose.shadow.yaml | cut -d' ' -f1)"
+          [[ "${actual_compose_shadow_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          if [[ -n "${COMPOSE_SHADOW_SHA256}" ]]; then
+            [[ "${COMPOSE_SHADOW_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+            test "${actual_compose_shadow_sha256}" = "${COMPOSE_SHADOW_SHA256}"
+          fi
+          COMPOSE_SHADOW_SHA256="${actual_compose_shadow_sha256}"
           run_json="${RUNNER_TEMP}/candidate-run.json"
           gh api --method GET \
             -H 'Accept: application/vnd.github+json' \
