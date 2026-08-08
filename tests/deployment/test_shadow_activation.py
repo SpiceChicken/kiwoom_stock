@@ -318,6 +318,8 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert '"orders": side_effects["broker_orders"]' in text
     assert '"database": bool(result.get("db_identity"))' in text
     assert 'if [[ "${DESIRED_STATE}" == stop ]]' in text
+    assert 'actual_compose_shadow_sha256="$(sha256sum compose.shadow.yaml' in text
+    assert 'COMPOSE_SHADOW_SHA256="${actual_compose_shadow_sha256}"' in text
     assert '[[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]' in text
     assert '"${document_version}" "${WORKER_SHA256}" "${SHADOW_DOCUMENT_SHA256}"' in text
     assert '"document_version": document_version' in text
