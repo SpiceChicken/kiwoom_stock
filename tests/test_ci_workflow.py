@@ -18,6 +18,9 @@ PROMOTION_WORKFLOW_PATH = Path(
 SHADOW_ROLLOUT_WORKFLOW_PATH = Path(
     ".github/workflows/cd-shadow-worker-rollout.yml"
 )
+SHADOW_ACTIVATION_WORKFLOW_PATH = Path(
+    ".github/workflows/cd-shadow-worker-activation.yml"
+)
 DEPLOYMENT_BOUNDARY_DOC = Path("docs/operations/deployment-boundary.md")
 CONTAINER_DEPLOYMENT_DOC = Path(
     "docs/operations/github-ec2-container-deployment.md"
@@ -76,6 +79,36 @@ def test_shadow_rollout_cd_has_exact_protected_source_only_wiring():
     assert "vars.KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN" in text
     assert "ref: ${{ inputs.source_sha }}" in text
     assert "github.ref == 'refs/heads/main'" in text
+    assert "validator_sha256=" in text
+    assert "compile(open(\"deploy/ec2/shadow_runtime_evidence.py\"" in text
+
+
+def test_shadow_activation_hashes_validator_before_oidc_and_uses_it_directly():
+    workflow = yaml.safe_load(
+        SHADOW_ACTIVATION_WORKFLOW_PATH.read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["activate"]["steps"]
+    names = [step["name"] for step in steps]
+    preflight = next(
+        step for step in steps
+        if step["name"] == "Validate immutable shadow tuple and candidate run"
+    )
+    execute = next(
+        step for step in steps if step["name"] == "Execute bounded shadow action"
+    )
+    assert names.index(preflight["name"]) < names.index(
+        "Configure exact shadow activation role with OIDC"
+    )
+    assert "sha256sum deploy/ec2/shadow_runtime_evidence.py" in preflight["run"]
+    assert '[[ "${actual_validator_sha256}" == "${VALIDATOR_SHA256}" ]]' in preflight["run"]
+    assert "ExpectedValidatorSha256=${VALIDATOR_SHA256}" in execute["run"]
+    assert "--input-format ssm-invocation" in execute["run"]
+    assert "def valid_continuity" not in execute["run"]
+    provenance = '"/repos/${GITHUB_REPOSITORY}/compare/${SOURCE_SHA}...${GITHUB_SHA}"'
+    assert provenance in preflight["run"]
+    assert preflight["run"].index(provenance) < preflight["run"].index(
+        "sha256sum deploy/ec2/shadow_runtime_evidence.py"
+    ) < preflight["run"].index("python3 -m py_compile")
 
 
 def _single_python_heredoc(step):
@@ -234,7 +267,42 @@ def test_ci_quality_job_uses_supported_python_matrix_and_pip_cache():
     run_blocks = "\n".join(step.get("run", "") for step in steps)
     assert 'python -m pip install -e ".[dev]"' in run_blocks
     assert "python -m mypy src/kiwoom_stock" in run_blocks
+    assert (
+        "python -m mypy src/kiwoom_stock "
+        "deploy/check_shadow_ssm_contract.py" in run_blocks
+    )
+    assert (
+        "python -m flake8 src tests deploy/check_shadow_ssm_contract.py"
+        in run_blocks
+    )
     assert "python -m pytest tests --junitxml=reports/pytest-${{ matrix.python-version }}.xml" in run_blocks
+
+
+def test_ci_runs_project_ssm_checker_before_all_quality_and_package_gates():
+    workflow = _workflow()
+    quality_steps = workflow["jobs"]["quality"]["steps"]
+    checker_steps = [
+        step for step in quality_steps
+        if "python deploy/check_shadow_ssm_contract.py" in step.get("run", "")
+    ]
+    assert len(checker_steps) == 1
+    checker_index = quality_steps.index(checker_steps[0])
+    quality_gate_indexes = [
+        index for index, step in enumerate(quality_steps)
+        if any(
+            command in step.get("run", "")
+            for command in ("flake8", "mypy", "pytest")
+        )
+    ]
+    assert quality_gate_indexes
+    assert checker_index < min(quality_gate_indexes)
+
+    package = workflow["jobs"]["package"]
+    assert package["needs"] == "quality"
+    assert any(
+        "python -m build" in step.get("run", "")
+        for step in package["steps"]
+    )
 
 
 def test_ci_package_job_builds_and_smokes_installed_wheel():

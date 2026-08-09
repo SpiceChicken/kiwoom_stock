@@ -1,6 +1,7 @@
 """Immutable trading-session termination outcomes."""
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -22,12 +23,30 @@ class CriticalNotificationOutcome(str, Enum):
 
 
 @dataclass(frozen=True)
+class CycleContext:
+    """One immutable KST instant and exact open XKRX session for a normal cycle."""
+
+    now: datetime
+    xkrx_session_date: date
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.now, datetime)
+            or self.now.tzinfo is None
+            or self.now.utcoffset() is None
+        ):
+            raise ValueError("cycle now must be an aware datetime")
+        if type(self.xkrx_session_date) is not date:
+            raise TypeError("cycle XKRX session label must be a date")
+
+
+@dataclass(frozen=True)
 class TradingSessionResult:
     """Terminal session result passed from the engine to the process root."""
 
     reason: SessionEndReason
-    total_pnl: Optional[float] = None
-    loss_limit: Optional[float] = None
+    cumulative_trade_return_score: Optional[float] = None
+    cumulative_trade_return_score_floor: Optional[float] = None
     unresolved_position_codes: Tuple[str, ...] = ()
     critical_notification_outcome: CriticalNotificationOutcome = (
         CriticalNotificationOutcome.NOT_APPLICABLE
@@ -56,18 +75,32 @@ class TradingSessionResult:
             self._validate_normal_result()
 
     def _validate_kill_switch_result(self) -> None:
-        if self.total_pnl is None or self.loss_limit is None:
-            raise ValueError("kill-switch result requires total PnL and loss limit")
+        if (
+            self.cumulative_trade_return_score is None
+            or self.cumulative_trade_return_score_floor is None
+        ):
+            raise ValueError("kill-switch result requires score and floor")
         for name, value in (
-            ("total_pnl", self.total_pnl),
-            ("loss_limit", self.loss_limit),
+            (
+                "cumulative_trade_return_score",
+                self.cumulative_trade_return_score,
+            ),
+            (
+                "cumulative_trade_return_score_floor",
+                self.cumulative_trade_return_score_floor,
+            ),
         ):
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"{name} must be a finite number")
             if value != value or abs(value) == float("inf"):
                 raise ValueError(f"{name} must be a finite number")
-        if not self.total_pnl <= self.loss_limit:
-            raise ValueError("kill-switch total PnL must be at or below the loss limit")
+        if self.cumulative_trade_return_score_floor > 0:
+            raise ValueError("kill-switch score floor must be at or below zero")
+        if not (
+            self.cumulative_trade_return_score
+            <= self.cumulative_trade_return_score_floor
+        ):
+            raise ValueError("kill-switch score must be at or below the floor")
         if self.critical_notification_outcome not in (
             CriticalNotificationOutcome.CALL_RETURNED,
             CriticalNotificationOutcome.CALL_RAISED,
@@ -83,8 +116,11 @@ class TradingSessionResult:
             raise ValueError("returned critical notification cannot have an error type")
 
     def _validate_normal_result(self) -> None:
-        if self.total_pnl is not None or self.loss_limit is not None:
-            raise ValueError("normal session result cannot contain kill-switch PnL metadata")
+        if (
+            self.cumulative_trade_return_score is not None
+            or self.cumulative_trade_return_score_floor is not None
+        ):
+            raise ValueError("normal session result cannot contain kill-switch score metadata")
         if self.unresolved_position_codes:
             raise ValueError("normal session result cannot contain unresolved positions")
         if (

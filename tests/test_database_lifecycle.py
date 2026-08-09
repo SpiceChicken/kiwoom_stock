@@ -13,6 +13,7 @@ from kiwoom_stock.core.database import (
     TradeLogger,
     TradeLoggerLifecycleError,
     _PhysicalStateTask,
+    _PhysicalStateTaskItem,
 )
 
 
@@ -109,6 +110,7 @@ def test_submit_captures_an_immutable_force_snapshot():
     logger._async_queue = queue.Queue()
     logger._state_lock = threading.Lock()
     logger._accepting_submissions = True
+    logger._worker_failure = None
     forces = {"current_velocity": 1.25, "nested": {"value": 7}}
 
     logger.submit_physical_state("005930", forces)
@@ -117,7 +119,7 @@ def test_submit_captures_an_immutable_force_snapshot():
 
     task = logger._async_queue.get_nowait()
     try:
-        assert dict(task.forces) == {
+        assert dict(task.items[0].forces) == {
             "current_velocity": 1.25,
             "nested": {"value": 7},
         }
@@ -143,6 +145,14 @@ def test_configured_path_is_shared_by_main_and_worker_without_cwd_fallback(
                 "buy_price": 50_000.0,
                 "buy_time": "2026-07-18 10:00:00",
                 "buy_regime": "STABLE_BULL",
+                **{
+                    key: value
+                    for key, value in _forces(
+                        velocity=0.0,
+                        net_force=0.0,
+                    ).items()
+                    if key != "current_velocity"
+                },
             }
         )
         logger.submit_physical_state("005930", _forces(velocity=1.25, net_force=1.1))
@@ -617,9 +627,13 @@ def test_dead_worker_never_discards_a_physical_task_mixed_after_sentinel(
     assert sentinel_enqueued.wait(timeout=5)
 
     orphan_physical_task = _PhysicalStateTask(
-        stock_code="ORPHAN",
-        forces=tuple(_forces(velocity=6.5, net_force=6.75).items()),
-        timestamp_str="2026-07-18 12:00:00.000000",
+        items=(
+            _PhysicalStateTaskItem(
+                stock_code="ORPHAN",
+                forces=tuple(_forces(velocity=6.5, net_force=6.75).items()),
+                timestamp_str="2026-07-18 12:00:00.000000",
+            ),
+        ),
     )
     logger._async_queue.put(orphan_physical_task)
     blocking_worker_connection.release_execute.set()

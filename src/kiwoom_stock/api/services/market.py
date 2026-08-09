@@ -1,27 +1,46 @@
 # src/kiwoom_stock/api/services/market.py
 import datetime
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Mapping, cast
+
+from kiwoom_stock.api.exceptions import KiwoomAPIError
+
+
+def _extract_required_rows(data: object, key: str) -> List[Dict[str, Any]]:
+    """Preserve missing/wrong list shape instead of erasing it as empty."""
+
+    if not isinstance(data, Mapping) or key not in data:
+        raise KiwoomAPIError(
+            "market response contract failed",
+            category="invalid_contract",
+        )
+    rows = data[key]
+    if not isinstance(rows, list):
+        raise KiwoomAPIError(
+            "market response contract failed",
+            category="invalid_contract",
+        )
+    return cast(List[Dict[str, Any]], rows)
 
 class MarketService:
     def __init__(self, base):
-        self.base = base
+        self._base = base
 
     # --- [기존 유지] 시장 탐색 및 차트 지표 ---
     def get_top_trading_value(self, market_tp: str = "001") -> List[Dict]:
         """거래대금 상위 종목 조회 (ka10032)"""
-        data = self.base.request("/api/dostk/rkinfo", "ka10032", {
+        data = self._base.request("/api/dostk/rkinfo", "ka10032", {
             "mrkt_tp": market_tp,
             "mang_stk_incls": "0",
             "stex_tp": "1"
         }, read_only=True)
-        return cast(List[Dict], data.get("trde_prica_upper", []))
+        return _extract_required_rows(data, "trde_prica_upper")
 
     def get_stock_basic_info(self, stock_code: str) -> Dict[str, Any]:
         """
         주식기본정보요청 (ka10001)
 
         """
-        data = self.base.request("/api/dostk/stkinfo", "ka10001", {
+        data = self._base.request("/api/dostk/stkinfo", "ka10001", {
             "stk_cd": stock_code
         }, read_only=True)
         return cast(Dict[str, Any], data)
@@ -31,13 +50,13 @@ class MarketService:
         주식 분봉 차트 조회 (ka10080)
 
         """
-        data = self.base.request("/api/dostk/chart", "ka10080", {
+        data = self._base.request("/api/dostk/chart", "ka10080", {
             "stk_cd": stock_code,    # 종목코드
             "tic_scope": tic,  # 틱범위
             "upd_stkpc_tp": "1"      # 수정주가구분 (1: 적용)
         }, read_only=True)
 
-        return cast(List[Dict], data.get('stk_min_pole_chart_qry', []))
+        return _extract_required_rows(data, "stk_min_pole_chart_qry")
 
     # --- [신규/개선] 실시간 수급 지표 (ka10063 대체) ---
 
@@ -46,10 +65,10 @@ class MarketService:
         주식 체결강도 추이 조회 (ka10046)
         매수세의 실시간 공격성을 측정하는 Base 지표입니다. (100% 기준)
         """
-        data = self.base.request("/api/dostk/mrkcond", "ka10046", {
+        data = self._base.request("/api/dostk/mrkcond", "ka10046", {
             "stk_cd": stock_code
         }, read_only=True)
-        return cast(List[Dict], data.get("cntr_str_tm", []))
+        return _extract_required_rows(data, "cntr_str_tm")
 
     def get_program_trade(self) -> List[Dict]:
         """
@@ -60,20 +79,20 @@ class MarketService:
         # 1. 오늘 날짜 가져오기
         today = datetime.date.today()
 
-        data = self.base.request("/api/dostk/stkinfo", "ka90004", {
+        data = self._base.request("/api/dostk/stkinfo", "ka90004", {
             "dt": today.strftime('%Y%m%d'),
             "mrkt_tp": "P00101",
             "stex_tp": "1"
         }, read_only=True)
 
-        return cast(List[Dict], data.get("stk_prm_trde_prst", []))
+        return _extract_required_rows(data, "stk_prm_trde_prst")
 
     def get_foreign_window_total(self, market_tp: str = "001") -> List[Dict]:
         """
         외국계 창구 매매 상위 조회 (ka10037)
         외국계 증권사 합계 순매수량을 반환하여 수급의 질을 판정합니다.
         """
-        data = self.base.request("/api/dostk/rkinfo", "ka10037", {
+        data = self._base.request("/api/dostk/rkinfo", "ka10037", {
             "mrkt_tp": market_tp,
             "dt": "0",
             "trde_tp": "1",
@@ -81,24 +100,24 @@ class MarketService:
             "stex_tp": "1",
         }, read_only=True)
 
-        return cast(List[Dict], data.get("frgn_wicket_trde_upper", []))
+        return _extract_required_rows(data, "frgn_wicket_trde_upper")
 
     def get_recent_ticks(self, stock_code: str) -> List[Dict]:
         """
         주식 체결 정보 조회 (ka10003) - 문서 p.20
         * 최근 체결 내역을 분석하여 '고래(Whale)'의 흔적을 찾음
         """
-        data = self.base.request("/api/dostk/stkinfo", "ka10003", {
+        data = self._base.request("/api/dostk/stkinfo", "ka10003", {
             "stk_cd": stock_code
         }, read_only=True)
 
-        return cast(List[Dict], data.get('cntr_infr', {}))
+        return _extract_required_rows(data, "cntr_infr")
 
     def get_order_book(self, stock_code: str) -> Dict[str, int]:
         """
         주식 호가 잔량 조회 (ka10004)
         """
-        data = self.base.request("/api/dostk/mrkcond", "ka10004", {
+        data = self._base.request("/api/dostk/mrkcond", "ka10004", {
             "stk_cd": stock_code
         }, read_only=True)
 

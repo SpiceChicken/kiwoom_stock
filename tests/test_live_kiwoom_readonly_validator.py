@@ -234,7 +234,7 @@ def test_market_only_pipeline_has_exact_calls_regime_state_and_safe_dto():
     assert result["verdict"] == {
         "status": "🛑수급 빈곤 (Thrust Low)",
         "is_buy_signal": False,
-        "regime": "STABLE_BULL",
+        "regime": "QUIET_BEAR",
     }
     assert result["verdict"]["regime"] == result["market_regime"]
     assert result["state_submissions"] == 1
@@ -247,9 +247,11 @@ def test_market_only_pipeline_has_exact_calls_regime_state_and_safe_dto():
         "reports": False,
         "notifications": False,
     }
+    assert result["metrics"]["trend_rsi"] >= 0.0
     assert all(
         value > 0 and isinstance(value, float)
-        for value in result["metrics"].values()
+        for key, value in result["metrics"].items()
+        if key != "trend_rsi"
     )
     rendered = json.dumps(result, sort_keys=True)
     for forbidden in (
@@ -421,7 +423,7 @@ def test_silent_analyzer_fallback_cannot_pass_with_unknown_regime():
 
     with pytest.raises(
         validator.ValidationError,
-        match="snapshot contract failed: proxy_chart|UNKNOWN",
+        match=r"market snapshot collection failed \(empty\)",
     ):
         validator.run_with_client(
             client,
@@ -439,9 +441,10 @@ def test_empty_or_missing_strength_fails_before_analyzer_fallback(
         missing_strength=not empty_strength,
     )
 
+    expected_kind = "empty" if empty_strength else "malformed"
     with pytest.raises(
         validator.ValidationError,
-        match="snapshot contract failed: strength",
+        match=rf"market snapshot collection failed \({expected_kind}\)",
     ) as caught:
         validator.run_with_client(
             _client(sender),
@@ -455,15 +458,21 @@ def test_empty_or_missing_strength_fails_before_analyzer_fallback(
 def test_non_mapping_strength_row_is_normalized_to_validation_error():
     snapshot = validator.MarketSnapshot(
         basic={
-            "cur_prc": "70000",
-            "trde_pre": "100",
-            "trde_qty": "1000",
-            "mac": "1000000",
+            "cur_prc": 70000.0,
+            "trde_pre": 100.0,
+            "trde_qty": 1000.0,
+            "mac": 1000000.0,
         },
-        stock_chart=_chart(),
-        proxy_chart=_chart(),
+        stock_chart=[
+            {key: float(value) for key, value in row.items()}
+            for row in _chart()
+        ],
+        proxy_chart=[
+            {key: float(value) for key, value in row.items()}
+            for row in _chart()
+        ],
         strength=["malformed"] * 5,
-        order_book={"tot_sel_req": "100", "tot_buy_req": "200"},
+        order_book={"tot_sel_req": 100.0, "tot_buy_req": 200.0},
     )
     with pytest.raises(validator.ValidationError, match="strength.row0") as caught:
         validator.validate_market_snapshot(snapshot)
@@ -479,7 +488,7 @@ def test_missing_orderbook_total_fails_before_analyzer_fallback(field_name):
 
     with pytest.raises(
         validator.ValidationError,
-        match="snapshot contract failed: orderbook",
+        match=r"market snapshot collection failed \(malformed\)",
     ):
         validator.run_with_client(
             _client(sender),
@@ -494,7 +503,7 @@ def test_missing_basic_volume_or_market_cap_fails_closed(field_name):
 
     with pytest.raises(
         validator.ValidationError,
-        match="snapshot contract failed: basic",
+        match=r"market snapshot collection failed \(malformed\)",
     ):
         validator.run_with_client(
             _client(sender),
@@ -514,7 +523,7 @@ def test_malformed_consumed_chart_field_fails_closed_without_raw_value(
 
     with pytest.raises(
         validator.ValidationError,
-        match="snapshot contract failed: stock_chart",
+        match=r"market snapshot collection failed \(parse\)",
     ) as caught:
         validator.run_with_client(
             _client(sender),

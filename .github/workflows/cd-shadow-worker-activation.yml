@@ -7,10 +7,7 @@ on:
         description: Exact bounded shadow action
         required: true
         type: choice
-        options:
-          - oneshot
-          - continuous
-          - stop
+        options: [oneshot, continuous, stop]
       source_sha:
         description: Full 40-character lowercase source SHA
         required: true
@@ -33,6 +30,10 @@ on:
         type: string
       worker_sha256:
         description: Exact installed shadow worker SHA256 from rollout evidence
+        required: true
+        type: string
+      validator_sha256:
+        description: Exact installed runtime evidence validator SHA256
         required: true
         type: string
       shadow_document_sha256:
@@ -65,11 +66,11 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout trusted activation executor
+      - name: Checkout exact trusted activation executor
         timeout-minutes: 1
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -84,18 +85,33 @@ jobs:
           ACTIVATION_ID: ${{ inputs.activation_id }}
           DESIRED_STATE: ${{ inputs.desired_state }}
           WORKER_SHA256: ${{ inputs.worker_sha256 }}
+          VALIDATOR_SHA256: ${{ inputs.validator_sha256 }}
           SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
-          PYTHONPATH: ${{ github.workspace }}/src
         shell: bash
         run: |
           set -euo pipefail
           [[ "${GITHUB_REF}" == refs/heads/main ]]
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          compare_result="$(gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/compare/${SOURCE_SHA}...${GITHUB_SHA}" \
+            --jq '[.status,.merge_base_commit.sha,.base_commit.sha] | @tsv')"
+          IFS=$'\t' read -r compare_status merge_base_sha base_sha <<<"${compare_result}"
+          [[ "${compare_status}" == ahead || "${compare_status}" == identical ]]
+          [[ "${merge_base_sha}" == "${SOURCE_SHA}" ]]
+          [[ "${base_sha}" == "${SOURCE_SHA}" ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
           [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
           [[ "${ACTIVATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
           [[ "${WORKER_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${VALIDATOR_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           [[ "${SHADOW_DOCUMENT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           [[ "${DESIRED_STATE}" == oneshot || "${DESIRED_STATE}" == continuous || "${DESIRED_STATE}" == stop ]]
+          actual_validator_sha256="$(sha256sum deploy/ec2/shadow_runtime_evidence.py | cut -d' ' -f1)"
+          [[ "${actual_validator_sha256}" == "${VALIDATOR_SHA256}" ]]
+          python3 -m py_compile deploy/ec2/shadow_runtime_evidence.py
           if [[ "${DESIRED_STATE}" == stop ]]; then
             [[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]
             exit 0
@@ -106,9 +122,8 @@ jobs:
           [[ "${actual_compose_shadow_sha256}" =~ ^[0-9a-f]{64}$ ]]
           if [[ -n "${COMPOSE_SHADOW_SHA256}" ]]; then
             [[ "${COMPOSE_SHADOW_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-            test "${actual_compose_shadow_sha256}" = "${COMPOSE_SHADOW_SHA256}"
+            [[ "${actual_compose_shadow_sha256}" == "${COMPOSE_SHADOW_SHA256}" ]]
           fi
-          COMPOSE_SHADOW_SHA256="${actual_compose_shadow_sha256}"
           run_json="${RUNNER_TEMP}/candidate-run.json"
           gh api --method GET \
             -H 'Accept: application/vnd.github+json' \
@@ -121,12 +136,9 @@ jobs:
           import sys
 
           run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          source_sha = sys.argv[2]
           required = {
-              "status": "completed",
-              "conclusion": "success",
-              "head_sha": source_sha,
-              "head_branch": "main",
+              "status": "completed", "conclusion": "success",
+              "head_sha": sys.argv[2], "head_branch": "main",
               "event": "workflow_dispatch",
               "path": ".github/workflows/cd-production-check.yml",
           }
@@ -134,12 +146,9 @@ jobs:
               raise SystemExit("candidate run provenance mismatch")
           PY
           docker pull "${IMAGE_DIGEST}"
-          revision="$(docker image inspect "${IMAGE_DIGEST}" \
-            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
-          test "${revision}" = "${SOURCE_SHA}"
-          test "$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Config.User}}')" = "10001:10001"
-          test "$(docker image inspect "${IMAGE_DIGEST}" --format '{{json .Config.Entrypoint}}')" = \
-            '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]'
+          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" == "${SOURCE_SHA}" ]]
+          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Config.User}}')" == "10001:10001" ]]
+          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{json .Config.Entrypoint}}')" == '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]' ]]
 
       - name: Configure exact shadow activation role with OIDC
         timeout-minutes: 1
@@ -166,284 +175,86 @@ jobs:
           ACTIVATION_ID: ${{ inputs.activation_id }}
           DESIRED_STATE: ${{ inputs.desired_state }}
           WORKER_SHA256: ${{ inputs.worker_sha256 }}
+          VALIDATOR_SHA256: ${{ inputs.validator_sha256 }}
           SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
           PYTHONPATH: ${{ github.workspace }}/src
         shell: bash
         run: |
           set -euo pipefail
+          # codex-cd-ssm-document: deploy/ssm/shadow-worker-document.yaml
+          [[ "$(sha256sum deploy/ec2/shadow_runtime_evidence.py | cut -d' ' -f1)" == "${VALIDATOR_SHA256}" ]]
           document_version="$(python3 -c 'import os; from kiwoom_stock.deployment.shadow_rollout import attest_activation_document; print(attest_activation_document(os.environ["SHADOW_DOCUMENT_SHA256"]))')"
           [[ "${document_version}" =~ ^[1-9][0-9]*$ ]]
-          ssm_compose_hash="${COMPOSE_SHADOW_SHA256}"
           if [[ "${DESIRED_STATE}" == stop ]]; then
             ssm_compose_hash="$(printf '0%.0s' {1..64})"
+            validator_mode=shadow-continuous
+            validator_event=terminal
+          else
+            ssm_compose_hash="$(sha256sum compose.shadow.yaml | cut -d' ' -f1)"
+            if [[ -n "${COMPOSE_SHADOW_SHA256}" ]]; then
+              [[ "${ssm_compose_hash}" == "${COMPOSE_SHADOW_SHA256}" ]]
+            fi
+            if [[ "${DESIRED_STATE}" == oneshot ]]; then
+              validator_mode=shadow-once
+              validator_event=oneshot
+            else
+              validator_mode=shadow-continuous
+              validator_event=cycle
+            fi
           fi
           command_id="$(aws ssm send-command \
             --document-name "${SHADOW_DOCUMENT_NAME}" \
             --document-version "${document_version}" \
             --instance-ids "${EC2_INSTANCE_ID}" \
             --parameters \
-              "DesiredState=${DESIRED_STATE},ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=${ssm_compose_hash},ExpectedWorkerSha256=${WORKER_SHA256},ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" \
+              "DesiredState=${DESIRED_STATE},ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=${ssm_compose_hash},ExpectedWorkerSha256=${WORKER_SHA256},ExpectedValidatorSha256=${VALIDATOR_SHA256},ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" \
             --comment "kiwoom shadow activation ${ACTIVATION_ID}" \
-            --timeout-seconds 1020 \
-            --max-concurrency 1 \
-            --max-errors 0 \
+            --timeout-seconds 1020 --max-concurrency 1 --max-errors 0 \
             --query 'Command.CommandId' --output text)"
           [[ "${command_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
-          status="Pending"
-          response_code="-1"
+          status=Pending
           for _ in $(seq 1 102); do
-            status="$(aws ssm get-command-invocation \
-              --command-id "${command_id}" \
-              --instance-id "${EC2_INSTANCE_ID}" \
-              --query 'Status' --output text 2>/dev/null || true)"
-            response_code="$(aws ssm get-command-invocation \
-              --command-id "${command_id}" \
-              --instance-id "${EC2_INSTANCE_ID}" \
-              --query 'ResponseCode' --output text 2>/dev/null || true)"
-            case "${status}" in
-              Success|Failed|Cancelled|TimedOut|Cancelling) break ;;
-            esac
+            status="$(aws ssm get-command-invocation --command-id "${command_id}" --instance-id "${EC2_INSTANCE_ID}" --query Status --output text 2>/dev/null || true)"
+            case "${status}" in Success|Failed|Cancelled|TimedOut) break ;; esac
             sleep 10
           done
-          invocation_json="$(aws ssm get-command-invocation \
-            --command-id "${command_id}" \
-            --instance-id "${EC2_INSTANCE_ID}" \
-            --output json)"
-          runtime_evidence="$(python3 - "${invocation_json}" "${DESIRED_STATE}" \
-            "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${ACTIVATION_ID}" <<'PY'
-          import json
-          import sys
-
-          invocation = json.loads(sys.argv[1])
-          desired_state = sys.argv[2]
-          source_sha, image_digest, activation_id = sys.argv[3:]
-          stdout = invocation.get("StandardOutputContent", "")
-          records = []
-          for raw_line in stdout.splitlines():
-              line = raw_line.split("|", 1)[-1].strip()
-              if not line.startswith("{"):
-                  continue
-              try:
-                  candidate = json.loads(line)
-              except json.JSONDecodeError:
-                  continue
-              if candidate.get("mode") in ("shadow-once", "shadow-continuous") and "side_effects" in candidate:
-                  records.append(candidate)
-          if not records:
-              safe_keys = {
-                  "schema_version", "event", "status", "mode", "source_sha",
-                  "image_digest", "activation_id", "cycles", "cycle_index",
-                  "http_attempts", "resources_closed", "reason", "error_type",
-                  "cycle_start_elapsed_seconds", "observed_interval_seconds",
-                  "db_reopened", "db_reopens", "first_cycle_start_elapsed_seconds",
-                  "second_cycle_start_elapsed_seconds", "second_cycle_interval_seconds",
-                  "minimum_cycle_interval_seconds",
-              }
-
-              def safe_records(content):
-                  summaries = []
-                  for raw_line in content.splitlines():
-                      line = raw_line.split("|", 1)[-1].strip()
-                      if not line.startswith("{"):
-                          continue
-                      try:
-                          candidate = json.loads(line)
-                      except json.JSONDecodeError:
-                          continue
-                      if isinstance(candidate, dict):
-                          summaries.append({
-                              key: candidate[key]
-                              for key in safe_keys
-                              if key in candidate
-                          })
-                  return summaries[-3:]
-
-              def safe_messages(content):
-                  messages = []
-                  allowed_prefixes = (
-                      "shadow worker failed: ",
-                      "shadow-once passed: ",
-                      "shadow continuous started: ",
-                      "shadow worker cleaned: ",
-                  )
-                  for raw_line in content.splitlines():
-                      line = raw_line.split("|", 1)[-1].strip()
-                      positions = [
-                          line.find(prefix)
-                          for prefix in allowed_prefixes
-                          if line.find(prefix) >= 0
-                      ]
-                      if not positions:
-                          continue
-                      message = line[min(positions) :][:256]
-                      if all(char.isprintable() or char == "\t" for char in message):
-                          messages.append(message)
-                  return messages[-3:]
-
-              stderr = invocation.get("StandardErrorContent", "")
-              diagnostic = {
-                  "status": invocation.get("Status"),
-                  "status_details": invocation.get("StatusDetails"),
-                  "response_code": invocation.get("ResponseCode"),
-                  "stdout_bytes": len(stdout.encode("utf-8")),
-                  "stderr_bytes": len(stderr.encode("utf-8")),
-                  "stdout_records": safe_records(stdout),
-                  "stderr_records": safe_records(stderr),
-                  "stdout_messages": safe_messages(stdout),
-                  "stderr_messages": safe_messages(stderr),
-              }
-              print(
-                  "shadow runtime safe result was not found; bounded diagnostic="
-                  + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")),
-                  file=sys.stderr,
-              )
-              raise SystemExit("shadow runtime safe result was not found")
-          result = records[-1]
-          if any((
-              result.get("source_sha") != source_sha,
-              result.get("image_digest") != image_digest,
-              result.get("activation_id") != activation_id,
-          )):
-              raise SystemExit("shadow runtime activation tuple mismatch")
-          side_effects = result.get("side_effects")
-          required = ("broker_orders", "account", "oauth_revoke", "slack", "gemini", "s3", "reports")
-          if not isinstance(side_effects, dict) or any(
-              side_effects.get(name) is not False for name in required
-          ):
-              raise SystemExit("shadow runtime side-effect evidence is unsafe")
-          expected_mode = "shadow-once" if desired_state == "oneshot" else "shadow-continuous"
-          if result.get("mode") != expected_mode or result.get("resources_closed") is not True:
-              raise SystemExit("shadow runtime mode or closure mismatch")
-          if desired_state == "continuous":
-              attempts = result.get("http_attempts")
-              api_counts = result.get("api_counts")
-              local_counts = result.get("local_counts")
-              expected_api = {"token": 1, "stock_basic": 1, "stock_chart_5m": 1, "proxy_chart_60m": 1, "stock_strength": 1, "stock_orderbook": 1}
-              expected_local_keys = {"status", "paper_buy", "paper_sell", "error", "critical"}
-              integer_fields = (result.get("schema_version"), result.get("cycle_index"), result.get("cycles"), attempts, result.get("db_reopens"))
-              local_valid = (
-                  isinstance(local_counts, dict)
-                  and set(local_counts) == expected_local_keys
-                  and all(type(value) is int for value in local_counts.values())
-                  and local_counts["status"] == 1
-                  and local_counts["error"] == 0
-                  and local_counts["critical"] == 0
-                  and local_counts["paper_buy"] in (0, 1)
-                  and local_counts["paper_sell"] in (0, 1)
-                  and local_counts["paper_buy"] + local_counts["paper_sell"] <= 1
-              )
-              if (
-                  any(type(value) is not int for value in integer_fields)
-                  or result.get("schema_version") != 2
-                  or result.get("event") != "cycle"
-                  or result.get("status") != "PASS"
-                  or result.get("cycle_index") != 1
-                  or result.get("cycles") != 1
-                  or attempts != 6
-                  or result.get("db_identity") != "/var/lib/kiwoom/shadow-trades.db"
-                  or not isinstance(api_counts, dict)
-                  or set(api_counts) != set(expected_api)
-                  or any(type(value) is not int for value in api_counts.values())
-                  or api_counts != expected_api
-                  or not local_valid
-                  or result.get("interval_seconds") != 60.0
-                  or type(result.get("cycle_start_elapsed_seconds")) is not float
-                  or result.get("cycle_start_elapsed_seconds") < 0.0
-                  or result.get("observed_interval_seconds") is not None
-                  or result.get("db_reopened") is not False
-                  or result.get("db_reopens") != 0
-              ):
-                  raise SystemExit("continuous first tick evidence is invalid")
-          elif desired_state == "stop":
-              if result.get("event") != "terminal" or (
-                  result.get("status"), result.get("reason")
-              ) not in {("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline")}:
-                  raise SystemExit("continuous stop evidence is invalid")
-              cycles = result.get("cycles")
-              db_reopens = result.get("db_reopens")
-              first_start = result.get("first_cycle_start_elapsed_seconds")
-              second_start = result.get("second_cycle_start_elapsed_seconds")
-              second_interval = result.get("second_cycle_interval_seconds")
-              minimum_interval = result.get("minimum_cycle_interval_seconds")
-              if (
-                  result.get("schema_version") != 2
-                  or type(cycles) is not int
-                  or cycles < 1
-                  or type(db_reopens) is not int
-                  or db_reopens != cycles - 1
-                  or type(first_start) is not float
-                  or first_start < 0.0
-              ):
-                  raise SystemExit("continuous terminal timing evidence is invalid")
-              if cycles == 1:
-                  if any(value is not None for value in (second_start, second_interval, minimum_interval)):
-                      raise SystemExit("single-cycle terminal timing evidence is invalid")
-              elif (
-                  type(second_start) is not float
-                  or second_start - first_start < 60.0
-                  or type(second_interval) is not float
-                  or second_interval < 60.0
-                  or abs((second_start - first_start) - second_interval) > 0.000001
-                  or type(minimum_interval) is not float
-                  or minimum_interval < 60.0
-              ):
-                  raise SystemExit("multi-cycle terminal timing evidence is invalid")
-          elif result.get("status") not in ("PASS", "CLOSED"):
-              raise SystemExit("shadow one-shot evidence is invalid")
-          evidence = {
-              "runtime_status": result.get("status"),
-              "cycles": result.get("cycles"),
-              "http_attempts": result.get("http_attempts"),
-              "first_cycle_start_elapsed_seconds": result.get("first_cycle_start_elapsed_seconds"),
-              "second_cycle_start_elapsed_seconds": result.get("second_cycle_start_elapsed_seconds"),
-              "second_cycle_interval_seconds": result.get("second_cycle_interval_seconds"),
-              "minimum_cycle_interval_seconds": result.get("minimum_cycle_interval_seconds"),
-              "db_reopens": result.get("db_reopens"),
-              "database": bool(result.get("db_identity")),
-              "side_effects": {
-                  "orders": side_effects["broker_orders"],
-                  "account": side_effects["account"],
-                  "revoke": side_effects["oauth_revoke"],
-                  "database": bool(result.get("db_identity")),
-                  "notifications": side_effects["slack"] or side_effects["gemini"],
-                  "reports": side_effects["reports"],
-                  "s3": side_effects["s3"],
-              },
-          }
-          print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
-          PY
-          )"
+          invocation_file="${RUNNER_TEMP}/shadow-invocation.json"
+          aws ssm get-command-invocation --command-id "${command_id}" \
+            --instance-id "${EC2_INSTANCE_ID}" --output json >"${invocation_file}"
+          runtime_evidence="$(python3 deploy/ec2/shadow_runtime_evidence.py \
+            --mode "${validator_mode}" --event "${validator_event}" \
+            --source-sha "${SOURCE_SHA}" --image-digest "${IMAGE_DIGEST}" \
+            --activation-id "${ACTIVATION_ID}" --input-format ssm-invocation \
+            --output activation-summary <"${invocation_file}")"
           python3 - "${SOURCE_SHA}" "${IMAGE_DIGEST}" "${BUILD_RUN_ID}" "${ACTIVATION_ID}" \
-            "${DESIRED_STATE}" "${command_id}" "${status}" "${response_code}" \
-            "${document_version}" "${WORKER_SHA256}" "${SHADOW_DOCUMENT_SHA256}" "${runtime_evidence}" \
-            >"${EVIDENCE_FILENAME}" <<'PY'
+            "${DESIRED_STATE}" "${command_id}" "${document_version}" \
+            "${WORKER_SHA256}" "${VALIDATOR_SHA256}" \
+            "${SHADOW_DOCUMENT_SHA256}" "${runtime_evidence}" >"${EVIDENCE_FILENAME}" <<'PY'
           import json
           import re
           import sys
 
-          source_sha, image_digest, build_run_id, activation_id, desired_state, command_id, status, response_code, document_version, worker_sha256, shadow_document_sha256, runtime = sys.argv[1:]
+          (source_sha, image_digest, build_run_id, activation_id, desired_state,
+           command_id, document_version, worker_sha256,
+           validator_sha256, shadow_document_sha256, runtime) = sys.argv[1:]
           if re.fullmatch(r"[1-9][0-9]*", document_version) is None:
               raise SystemExit("attested document version is invalid")
-          if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (worker_sha256, shadow_document_sha256)):
-              raise SystemExit("attested pair hash is invalid")
-          evidence = json.loads(runtime)
+          if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (
+              worker_sha256, validator_sha256, shadow_document_sha256,
+          )):
+              raise SystemExit("attested artifact-set hash is invalid")
           payload = {
-              "source_sha": source_sha,
-              "image_digest": image_digest,
-              "build_run_id": build_run_id,
-              "activation_id": activation_id,
-              "desired_state": desired_state,
-              "command_id": command_id,
-              "status": status,
-              "response_code": response_code,
+              "source_sha": source_sha, "image_digest": image_digest,
+              "build_run_id": build_run_id, "activation_id": activation_id,
+              "desired_state": desired_state, "command_id": command_id,
               "document_version": document_version,
               "worker_sha256": worker_sha256,
+              "validator_sha256": validator_sha256,
               "shadow_document_sha256": shadow_document_sha256,
-              **evidence,
+              **json.loads(runtime),
           }
           print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
           PY
-          [[ "${status}" == Success && "${response_code}" == 0 ]]
 
       - name: Clear OIDC credentials before evidence upload
         timeout-minutes: 1

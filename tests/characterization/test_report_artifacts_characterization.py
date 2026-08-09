@@ -95,7 +95,11 @@ def _run_minute_export(tmp_path, *, target_rows, rows_by_code):
 
     def client_factory(**credentials):
         clients.append(credentials)
-        return SimpleNamespace(market=object(), close=lambda: None)
+        return SimpleNamespace(
+            market=object(),
+            ensure_auth_ready=lambda: None,
+            close=lambda: None,
+        )
 
     saved = _extract_and_save_1min_chart(
         TARGET_DATE,

@@ -18,8 +18,17 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 from kiwoom_stock.api.exceptions import KiwoomAPIError
 from kiwoom_stock.application.credentials import CredentialProviderError
+from kiwoom_stock.application.ports import MarketDataCollectionError
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.domain.models import MarketRegime
+from kiwoom_stock.domain.state import (
+    PhysicalStateBatchCommitReceipt,
+    PhysicalStateCommitReceipt,
+    PhysicalStateHydrationSource,
+    PhysicalStateLoadResult,
+    PhysicalStateWrite,
+    PhysicalTrackerState,
+)
 from kiwoom_stock.infrastructure.kiwoom_credentials import (
     APP_KEY_FILE,
     MATERIALIZED_APP_KEY_FILE,
@@ -75,22 +84,56 @@ _DEPENDENCY_LOGGERS = (
 
 @dataclass
 class MemoryStateRepository:
-    latest: dict[str, Mapping[str, Any]] = field(default_factory=dict)
+    latest: dict[str, PhysicalTrackerState] = field(default_factory=dict)
     submissions: list[str] = field(default_factory=list)
 
-    def get_last_physical_state(
-        self,
-        stock_code: str,
-    ) -> Mapping[str, Any] | None:
-        return self.latest.get(stock_code)
+    def load_physical_state(self, stock_code: str) -> PhysicalStateLoadResult:
+        state = self.latest.get(stock_code)
+        return PhysicalStateLoadResult(
+            (
+                PhysicalStateHydrationSource.PERSISTED
+                if state is not None
+                else PhysicalStateHydrationSource.INITIAL
+            ),
+            state,
+        )
 
-    def submit_physical_state(
+    def persist_physical_state(
         self,
-        stock_code: str,
+        state: PhysicalTrackerState,
         forces: Mapping[str, Any],
-    ) -> None:
-        self.latest[stock_code] = dict(forces)
-        self.submissions.append(stock_code)
+    ) -> PhysicalStateCommitReceipt:
+        write = PhysicalStateWrite(state, tuple(dict(forces).items()))
+        return self.persist_physical_state_batch((write,)).items[0]
+
+    def persist_physical_state_batch(
+        self,
+        writes: Sequence[PhysicalStateWrite],
+    ) -> PhysicalStateBatchCommitReceipt:
+        immutable_writes = tuple(writes)
+        if not immutable_writes:
+            raise ValueError("physical-state batch is empty")
+        generation = immutable_writes[0].state.last_observed_at
+        assert generation is not None
+        committed_at = immutable_writes[0].state.updated_at
+        receipts = tuple(
+            PhysicalStateCommitReceipt(
+                write.state.stock_code,
+                generation.isoformat(),
+                committed_at,
+            )
+            for write in immutable_writes
+        )
+        next_latest = dict(self.latest)
+        for write in immutable_writes:
+            next_latest[write.state.stock_code] = write.state
+        self.latest = next_latest
+        self.submissions.extend(write.state.stock_code for write in immutable_writes)
+        return PhysicalStateBatchCommitReceipt(
+            generation.isoformat(),
+            receipts,
+            committed_at,
+        )
 
     def close(self) -> None:
         self.latest.clear()
@@ -140,9 +183,16 @@ def _fetch_snapshot(
     Mapping[str, Any],
     tuple[str, ...],
 ]:
-    snapshot = fetch_market_snapshot(
-        client, stock_code=stock_code, proxy_code=proxy_code
-    )
+    try:
+        snapshot = fetch_market_snapshot(
+            client, stock_code=stock_code, proxy_code=proxy_code
+        )
+    except MarketDataCollectionError as error:
+        if isinstance(error.__cause__, ReadOnlyBoundaryError):
+            raise ValidationError(str(error.__cause__)) from error
+        raise ValidationError(
+            f"market snapshot collection failed ({error.kind.value})"
+        ) from error
     return (
         snapshot.basic,
         snapshot.stock_chart,
@@ -159,6 +209,15 @@ def _positive_finite(value: Any, name: str) -> float:
     normalized = float(value)
     if not math.isfinite(normalized) or normalized <= 0.0:
         raise ValidationError(f"{name} must be positive and finite")
+    return normalized
+
+
+def _nonnegative_finite(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError(f"{name} is not numeric")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0.0:
+        raise ValidationError(f"{name} must be nonnegative and finite")
     return normalized
 
 
@@ -275,7 +334,7 @@ def run_with_client(
             ),
             "vwap": _positive_finite(metrics.vwap, "vwap"),
             "strength": _positive_finite(metrics.strength, "strength"),
-            "trend_rsi": _positive_finite(metrics.trend_rsi, "trend_rsi"),
+            "trend_rsi": _nonnegative_finite(metrics.trend_rsi, "trend_rsi"),
             "atr_percent": _positive_finite(
                 metrics.atr_percent,
                 "atr_percent",

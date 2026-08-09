@@ -6,14 +6,24 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from kiwoom_stock.core import state_manager as state_manager_module
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.core.types import MarketRegime
+from kiwoom_stock.domain.state import (
+    PhysicalStateBatchCommitReceipt,
+    PhysicalStateCommitReceipt,
+    PhysicalStateHydrationSource,
+    PhysicalStateLoadResult,
+    PhysicalStateWrite,
+)
 from kiwoom_stock.monitoring import analyzer as analyzer_module
 from kiwoom_stock.monitoring import engine as engine_module
 from kiwoom_stock.monitoring.analyzer import MarketAnalyzer
-from kiwoom_stock.monitoring.collector import MarketDataCollector
+from kiwoom_stock.monitoring.collector import (
+    MarketDataCollectionError,
+    MarketDataCollector,
+    MarketDataFailureKind,
+)
 from kiwoom_stock.monitoring.engine import TradingEngine
 from kiwoom_stock.monitoring.manager import Position, StockManager
 
@@ -53,7 +63,17 @@ def test_fast_and_slow_polling_boundaries_use_position_or_strength(monkeypatch):
     )
     monkeypatch.setattr(engine_module.time_mod, "time", lambda: 100.0)
 
-    assert engine._get_due_targets() == ["HELD_DUE", "STRONG_DUE", "SLOW_DUE"]
+    due_targets = engine._get_due_targets()
+    assert due_targets == ["HELD_DUE", "STRONG_DUE", "SLOW_DUE"]
+    assert engine._last_check_time == {
+        "HELD_DUE": 90.0,
+        "HELD_WAIT": 90.0001,
+        "STRONG_DUE": 90.0,
+        "SLOW_DUE": 40.0,
+        "SLOW_WAIT": 40.0001,
+    }
+
+    engine._ack_due_targets(due_targets, 100.0)
     assert engine._last_check_time == {
         "HELD_DUE": 100.0,
         "HELD_WAIT": 90.0001,
@@ -80,22 +100,34 @@ def test_global_regime_and_target_refresh_boundary(monkeypatch, now, expected_ev
             events.append("regime")
 
     class Strategy:
+        def is_monitoring_time(self, _now):
+            return True
+
         def update_context(self, regime):
             assert regime is MarketRegime.STABLE_BULL
             events.append("context")
 
     class Manager:
+        active_positions = {}
+
+        def reconcile_overnight_positions(self, _context):
+            return 0
+
         def update_target_stocks(self):
             events.append("targets")
 
     engine = TradingEngine.__new__(TradingEngine)
     engine.fast_interval = 10
     engine.slow_interval = 60
+    engine._terminal_result = None
     engine._last_global_update = 100.0
+    engine._assert_open_for_work = Mock()
+    engine._create_cycle_context = Mock(
+        return_value=SimpleNamespace(now=datetime.now().astimezone())
+    )
     engine.analyzer = Analyzer()
     engine.strategy = Strategy()
     engine.stock_mgr = Manager()
-    engine._check_system_status = Mock(return_value=True)
     engine._get_due_targets = Mock(return_value=[])
     monkeypatch.setattr(engine_module.time_mod, "time", lambda: now)
     monkeypatch.setattr(engine_module.time_mod, "sleep", Mock(side_effect=KeyboardInterrupt))
@@ -115,7 +147,7 @@ def test_target_selection_excludes_etfs_caps_ranked_list_and_keeps_active_positi
         {"stk_cd": "C", "stk_nm": "Gamma"},
     ]
     market = SimpleNamespace(get_top_trading_value=Mock(return_value=upper))
-    database = SimpleNamespace(load_open_positions=lambda: {})
+    database = SimpleNamespace(load_active_positions=lambda: {})
     manager = StockManager(
         market,
         database,
@@ -155,8 +187,8 @@ def test_market_regime_rsi_boundaries_and_default_proxy(monkeypatch, rsi, prior_
     assert analyzer.market_proxy_code == "069500"
     analyzer.market_atr_history.extend(prior_atr)
     analyzer.supply_cache["069500"].chart_data = [
-        {"cur_prc": "100", "high_pric": "120", "low_pric": "80"},
-        {"cur_prc": "100", "high_pric": "120", "low_pric": "80"},
+        {"cur_prc": "100", "high_pric": "120", "low_pric": "80"}
+        for _ in range(15)
     ]
     monkeypatch.setattr(analyzer, "_update_chart_data", lambda _code, _tic: None)
     monkeypatch.setattr(analyzer_module.ind, "calculate_rsi", lambda _closes, period: rsi)
@@ -175,32 +207,57 @@ class _FailingMarket:
 
 
 @pytest.mark.parametrize(
-    ("operation", "expected"),
+    "operation",
     [
-        (lambda collector: collector.fetch_stock_basic("A"), {}),
-        (lambda collector: collector.fetch_tick_strength("A"), []),
-        (lambda collector: collector.fetch_minute_chart("A"), []),
-        (lambda collector: collector.fetch_program_trade(), {}),
-        (lambda collector: collector.fetch_foreign_window_trade(), {}),
-        (lambda collector: collector.fetch_order_book("A"), {}),
-        (lambda collector: collector.fetch_recent_ticks("A"), []),
+        lambda collector: collector.fetch_stock_basic("A"),
+        lambda collector: collector.fetch_tick_strength("A"),
+        lambda collector: collector.fetch_minute_chart("A"),
+        lambda collector: collector.fetch_program_trade(),
+        lambda collector: collector.fetch_foreign_window_trade(),
+        lambda collector: collector.fetch_order_book("A"),
+        lambda collector: collector.fetch_recent_ticks("A"),
     ],
 )
-def test_collector_current_error_to_empty_contract_is_explicit(operation, expected):
+def test_collector_upstream_failure_is_typed_and_not_converted_to_empty(operation):
     collector = MarketDataCollector(_FailingMarket())
 
-    assert operation(collector) == expected
+    with pytest.raises(MarketDataCollectionError) as raised:
+        operation(collector)
+
+    assert raised.value.kind is MarketDataFailureKind.FETCH
 
 
 class _NoDatabase:
     def __init__(self):
         self.submissions = []
 
-    def get_last_physical_state(self, _stock_code):
-        return None
+    def load_physical_state(self, _stock_code):
+        return PhysicalStateLoadResult(PhysicalStateHydrationSource.INITIAL, None)
 
-    def submit_physical_state(self, stock_code, forces):
-        self.submissions.append((stock_code, dict(forces)))
+    def persist_physical_state(self, state, forces):
+        return self.persist_physical_state_batch(
+            (PhysicalStateWrite(state, tuple(dict(forces).items())),)
+        ).items[0]
+
+    def persist_physical_state_batch(self, writes):
+        writes = tuple(writes)
+        receipts = tuple(
+            PhysicalStateCommitReceipt(
+                write.state.stock_code,
+                write.state.last_observed_at.isoformat(),
+                write.state.updated_at,
+            )
+            for write in writes
+        )
+        self.submissions.extend(
+            (write.state.stock_code, dict(write.forces)) for write in writes
+        )
+        return PhysicalStateBatchCommitReceipt(
+            receipts[0].generation, receipts, receipts[0].committed_at
+        )
+
+    def close(self):
+        pass
 
 
 class _FakeMarketGateway:
@@ -234,13 +291,16 @@ class _FakeMarketGateway:
 
 
 def test_shallow_market_pipeline_runs_collector_indicators_state_and_physics(monkeypatch):
-    now = datetime(2026, 7, 17, 10, 0, 0)
+    from zoneinfo import ZoneInfo
+
+    now = datetime(2026, 7, 17, 10, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     monkeypatch.setattr(analyzer_module, "datetime", _frozen_datetime(now))
-    monkeypatch.setattr(state_manager_module, "datetime", _frozen_datetime(now))
     repository = _NoDatabase()
-    state_tracker = PhysicalStateTracker(repository)
+    state_tracker = PhysicalStateTracker(repository, clock=lambda: now)
     gateway = _FakeMarketGateway()
-    analyzer = MarketAnalyzer(gateway, {"proxy_code": "069500"}, state_tracker)
+    analyzer = MarketAnalyzer(
+        gateway, {"proxy_code": "069500"}, state_tracker, clock=lambda: now
+    )
 
     analyzer.update_priority_supply(["005930"])
 

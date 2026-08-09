@@ -1,9 +1,21 @@
 import logging
+import math
 from datetime import datetime, time, timedelta
+from numbers import Real
 from typing import Any, Callable, Dict, Optional, cast
 
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.core.types import MarketRegime
+from kiwoom_stock.domain.models import (
+    PositionDecision,
+    PositionDecisionResult,
+    PositionStatus,
+)
+from kiwoom_stock.domain.strategy import (
+    StrategySemanticsValidationError,
+    TargetStopPolicy,
+    calculate_position_return_percentage_points,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +32,36 @@ class TradingStrategy:
     - 특징: 물리 엔진이 산출한 가속도(모멘텀)와 속도(스코어)를 활용하여 가장 순수한 동역학 기반 판단을 내립니다.
     """
     
-    def __init__(self, strategy_config: Dict, clock: Optional[Clock] = None):
+    def __init__(
+        self,
+        strategy_config: Dict,
+        clock: Optional[Clock] = None,
+        *,
+        target_stop_policy: Optional[TargetStopPolicy] = None,
+    ):
+        if "total_loss_limit" in strategy_config:
+            raise StrategySemanticsValidationError(
+                "total_loss_limit dict input is unsupported; use "
+                "cumulative_trade_return_score_floor"
+            )
+        target_stop_keys = {
+            "target_profit_rate",
+            "stop_loss_rate",
+            "target_stop_unit_version",
+            "target_profit_percentage_points",
+            "stop_loss_percentage_points",
+        }
+        ambiguous = sorted(set(strategy_config).intersection(target_stop_keys))
+        if ambiguous:
+            raise StrategySemanticsValidationError(
+                "target/stop dict keys are unsupported; pass TargetStopPolicy: "
+                + ", ".join(ambiguous)
+            )
+        if target_stop_policy is not None and not isinstance(
+            target_stop_policy,
+            TargetStopPolicy,
+        ):
+            raise TypeError("target_stop_policy must be a TargetStopPolicy")
         self.settings = strategy_config
         self.debug_mode = strategy_config.get("debug_mode", False)
         self._clock = clock or _system_now
@@ -33,10 +74,23 @@ class TradingStrategy:
         self._current_regime: Any = MarketRegime.UNKNOWN
         self._cached_config: Dict[str, Any] = {}
 
-        self.target_profit_rate = strategy_config.get("target_profit_rate", 0.03)
-        self.stop_loss_rate = strategy_config.get("stop_loss_rate", -0.03)
+        self.target_stop_policy = target_stop_policy or TargetStopPolicy()
 
-        self.total_loss_limit: float = float(strategy_config.get("total_loss_limit", -5))
+        raw_score_floor = strategy_config.get(
+            "cumulative_trade_return_score_floor",
+            -5.0,
+        )
+        if (
+            isinstance(raw_score_floor, bool)
+            or not isinstance(raw_score_floor, Real)
+            or not math.isfinite(float(raw_score_floor))
+            or float(raw_score_floor) > 0.0
+        ):
+            raise StrategySemanticsValidationError(
+                "cumulative_trade_return_score_floor must be a finite "
+                "non-boolean number at or below zero"
+            )
+        self.cumulative_trade_return_score_floor = float(raw_score_floor)
         deadline_time_str = strategy_config.get("entry_deadline", "15:00")
         self.deadline_time = time.fromisoformat(deadline_time_str)
 
@@ -45,6 +99,18 @@ class TradingStrategy:
 
     def _resolve_now(self, now: Optional[datetime] = None) -> datetime:
         return now if now is not None else self._clock()
+
+    @property
+    def target_stop_unit_version(self) -> str:
+        return self.target_stop_policy.unit_version
+
+    @property
+    def target_profit_percentage_points(self) -> float:
+        return self.target_stop_policy.target_profit_percentage_points
+
+    @property
+    def stop_loss_percentage_points(self) -> float:
+        return self.target_stop_policy.stop_loss_percentage_points
 
     def update_context(self, regime: MarketRegime):
         """[Context Update] 시장 레짐에 따라 임계값 동적 조정"""
@@ -75,8 +141,20 @@ class TradingStrategy:
         current = self._resolve_now(now)
         return time(9, 0) <= current.time() < self.deadline_time
 
-    def is_kill_switch_activated(self, total_pnl: float) -> bool:
-        return total_pnl <= self.total_loss_limit
+    def is_kill_switch_activated(self, cumulative_trade_return_score: float) -> bool:
+        if (
+            isinstance(cumulative_trade_return_score, bool)
+            or not isinstance(cumulative_trade_return_score, Real)
+            or not math.isfinite(float(cumulative_trade_return_score))
+        ):
+            raise StrategySemanticsValidationError(
+                "cumulative_trade_return_score must be a finite "
+                "non-boolean number"
+            )
+        return (
+            float(cumulative_trade_return_score)
+            <= self.cumulative_trade_return_score_floor
+        )
 
     def get_exit_reason(
         self,
@@ -95,16 +173,32 @@ class TradingStrategy:
         
         now_time = self._resolve_now(now).time()
         stock_code = pos.stock_code
-        
-        if pos.status == "OVERNIGHT":
+        buy_price = getattr(pos, "buy_price", None)
+        profit_rate = calculate_position_return_percentage_points(
+            buy_price,
+            current_price,
+        )
+        buy_price = cast(float, buy_price)
+
+        if pos.status == PositionStatus.OVERNIGHT:
             return None
 
         # -------------------------------------------------------------------
         # 0. 전략 내부 상태(Kinetic State) 초기화 및 갱신
         # -------------------------------------------------------------------
-        buy_price = getattr(pos, 'buy_price', current_price)
-        if buy_price <= 0: buy_price = current_price
-        
+        if profit_rate >= self.target_profit_percentage_points:
+            return (
+                "Fixed Target "
+                f"({self.target_profit_percentage_points:g} %p; "
+                f"{self.target_stop_unit_version})"
+            )
+        if profit_rate <= -self.stop_loss_percentage_points:
+            return (
+                "Fixed Stop "
+                f"(-{self.stop_loss_percentage_points:g} %p; "
+                f"{self.target_stop_unit_version})"
+            )
+
         state = self._kinetic_state.get(stock_code, {})
         if state.get('buy_price') != buy_price:
             state = {
@@ -127,8 +221,7 @@ class TradingStrategy:
         # -------------------------------------------------------------------
         if now_time >= time(15, 20):
             if current_velocity >= 3.0 and thrust > 2.0 and magnetic > 0:
-                pos.status = "OVERNIGHT" 
-                return None 
+                return None
 
         if not getattr(self, 'debug_mode', False) and now_time >= getattr(self, 'forced_exit_time', time(15, 27)):
             return "Day Trade Close"
@@ -140,8 +233,7 @@ class TradingStrategy:
         current_down_atr = getattr(pos, 'down_atr_percent', 0.5)
         max_price = state.get('max_price', buy_price)
         
-        profit_rate = (current_price / buy_price - 1) * 100            
-        max_profit_rate = (max_price / buy_price - 1) * 100            
+        max_profit_rate = (max_price / buy_price - 1) * 100
         drawdown_from_max = (current_price / max_price - 1) * 100      
 
         up_atr = max(0.1, current_atr - current_down_atr)
@@ -182,6 +274,30 @@ class TradingStrategy:
                     return f"Stop Loss (Universal: {drawdown_from_max:.2f}%)"
 
         return None
+
+    def decide_position(
+        self,
+        pos,
+        current_price: float,
+        forces: Dict,
+        now: Optional[datetime] = None,
+    ) -> PositionDecisionResult:
+        """Return typed intent without mutating the position."""
+
+        reason = self.get_exit_reason(pos, current_price, forces, now)
+        if reason is not None:
+            return PositionDecisionResult(PositionDecision.SELL, reason)
+        resolved_now = self._resolve_now(now)
+        if (
+            current_price > 0.0
+            and pos.status == PositionStatus.OPEN
+            and resolved_now.time() >= time(15, 20)
+            and forces.get("current_velocity", 0.0) >= 3.0
+            and forces.get("thrust", 0.0) > 2.0
+            and forces.get("magnetic", 0.0) > 0.0
+        ):
+            return PositionDecisionResult(PositionDecision.MARK_OVERNIGHT)
+        return PositionDecisionResult(PositionDecision.HOLD)
 
     def evaluate(self, metrics: SupplyData) -> Dict:
         """[진입 판단] 동적 탈출 속도 기반 순수 물리 진입 (V2.5 Thrust Lock)"""

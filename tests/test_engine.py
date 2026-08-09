@@ -1,60 +1,78 @@
 from types import SimpleNamespace
+import inspect
 import threading
 from unittest.mock import MagicMock
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from kiwoom_stock.application.session import (
     CriticalNotificationOutcome,
+    CycleContext,
     SessionEndReason,
     TradingSessionResult,
 )
 from kiwoom_stock.monitoring import engine as engine_module
+from kiwoom_stock.monitoring.analyzer import MarketAnalyzer
 from kiwoom_stock.monitoring.engine import (
     TradingEngine,
     TradingEngineLifecycleError,
 )
 from kiwoom_stock.monitoring.manager import Position
+from kiwoom_stock.core.types import MarketRegime
+from kiwoom_stock.domain.models import (
+    PhysicalContinuityEvidence,
+    PositionDecision,
+    PositionDecisionResult,
+    PositionStatus,
+)
+from kiwoom_stock.domain.state import PhysicalStateValidationError
 
 
 class _RiskStrategy:
-    def __init__(self, *, monitoring=True, loss_limit=-5.0):
+    def __init__(self, *, monitoring=True, score_floor=-5.0):
         self.monitoring = monitoring
-        self.total_loss_limit = loss_limit
+        self.cumulative_trade_return_score_floor = score_floor
         self.monitoring_checks = 0
         self.kill_checks = []
 
-    def is_monitoring_time(self):
+    def is_monitoring_time(self, now=None):
         self.monitoring_checks += 1
         return self.monitoring
 
-    def is_kill_switch_activated(self, total_pnl):
-        self.kill_checks.append(total_pnl)
-        return total_pnl <= self.total_loss_limit
+    def is_kill_switch_activated(self, cumulative_trade_return_score):
+        self.kill_checks.append(cumulative_trade_return_score)
+        return (
+            cumulative_trade_return_score
+            <= self.cumulative_trade_return_score_floor
+        )
 
 
 class _RiskDatabase:
-    def __init__(self, realized_pnl=-2.0):
-        self.realized_pnl = realized_pnl
+    def __init__(self, realized_score=-2.0):
+        self.realized_score = realized_score
         self.reads = 0
+        self.session_dates = []
 
-    def get_today_realized_pnl(self):
+    def get_cumulative_realized_trade_return_score(self, session_date):
         self.reads += 1
-        return self.realized_pnl
+        self.session_dates.append(session_date)
+        return self.realized_score
 
     def __getattr__(self, name):
         raise AssertionError(f"unexpected DB access: {name}")
 
 
 class _RiskManager:
-    def __init__(self, *, total_pnl, active_positions):
-        self.total_pnl = total_pnl
+    def __init__(self, *, cumulative_score, active_positions):
+        self.cumulative_score = cumulative_score
         self.active_positions = active_positions
         self.realized_inputs = []
 
-    def get_total_pnl_status(self, realized_pnl):
-        self.realized_inputs.append(realized_pnl)
-        return self.total_pnl
+    def calculate_fresh_cumulative_trade_return_score(self, realized_score, fresh_marks):
+        self.realized_inputs.append(realized_score)
+        return self.cumulative_score
 
     def __getattr__(self, name):
         raise AssertionError(f"unexpected manager/order access: {name}")
@@ -187,10 +205,11 @@ def _patch_constructor_dependencies(monkeypatch, events, expected_ledger, expect
         events.append("analyzer")
         return object()
 
-    def manager_factory(candidate_market, candidate_ledger, filters):
+    def manager_factory(candidate_market, candidate_ledger, filters, **kwargs):
         assert candidate_market is market
         assert candidate_ledger is expected_ledger
         assert filters == {"max_stocks": 50}
+        assert kwargs == {"clock": engine_module.seoul_now}
         events.append("manager")
         return manager
 
@@ -199,7 +218,8 @@ def _patch_constructor_dependencies(monkeypatch, events, expected_ledger, expect
     monkeypatch.setattr(
         engine_module,
         "TradingStrategy",
-        lambda config: events.append(("strategy", config)) or object(),
+        lambda config, **kwargs: events.append(("strategy", config, kwargs))
+        or object(),
     )
     monkeypatch.setattr(engine_module, "StockManager", manager_factory)
     monkeypatch.setattr(
@@ -238,6 +258,7 @@ def test_engine_uses_exact_injected_ledger_and_physical_repository(monkeypatch):
         config,
         ledger=ledger,
         physical_state_repository=physical_repository,
+        market_gateway=client.market,
     )
 
     assert engine.db is ledger
@@ -246,106 +267,156 @@ def test_engine_uses_exact_injected_ledger_and_physical_repository(monkeypatch):
     assert events == [
         "state_tracker",
         "analyzer",
-        ("strategy", {"debug_mode": False}),
+        (
+            "strategy",
+            {"debug_mode": False},
+            {"clock": engine_module.seoul_now},
+        ),
         "manager",
         ("notifier", {}, config),
         ("executor", {"max_workers": 3}),
     ]
 
 
-def test_engine_legacy_constructor_builds_one_ledger_and_wrapper_with_warning(
-    monkeypatch,
-):
-    events = []
-    ledger = _CloseRecorder("ledger", events)
-    physical_repository = _CloseRecorder("physical", events)
-    ledger_factory = MagicMock(return_value=ledger)
-
-    def physical_factory(candidate):
-        assert candidate is ledger
-        events.append("physical.construct")
-        return physical_repository
-
-    monkeypatch.setattr(engine_module, "TradeLogger", ledger_factory)
-    monkeypatch.setattr(engine_module, "AsyncPhysicalStateRepository", physical_factory)
-    client, _ = _patch_constructor_dependencies(
-        monkeypatch,
-        events,
-        ledger,
-        physical_repository,
-    )
-    config = {
-        "market": {"proxy_code": "069500"},
-        "strategy": {},
-        "filters": {"max_stocks": 50},
-    }
-
-    with pytest.warns(DeprecationWarning, match="persistence fallback is deprecated"):
-        engine = TradingEngine(client, config)
-
-    assert engine.db is ledger
-    assert engine.physical_state_repository is physical_repository
-    ledger_factory.assert_called_once_with()
-    assert events.count("physical.construct") == 1
-
-
-def test_engine_legacy_constructor_failure_preserves_primary_and_closes_fallback(
-    monkeypatch,
-):
-    events = []
-    ledger = _CloseRecorder(
-        "ledger",
-        events,
-        error=KeyboardInterrupt("ledger cleanup interrupted"),
-    )
-    physical_repository = _CloseRecorder(
-        "physical",
-        events,
-        error=SystemExit(9),
-    )
-    primary_error = RuntimeError("state tracker unavailable")
-    monkeypatch.setattr(engine_module, "TradeLogger", MagicMock(return_value=ledger))
-    monkeypatch.setattr(
-        engine_module,
-        "AsyncPhysicalStateRepository",
-        MagicMock(return_value=physical_repository),
-    )
-    monkeypatch.setattr(
-        engine_module,
-        "PhysicalStateTracker",
-        MagicMock(side_effect=primary_error),
-    )
-
-    with pytest.warns(DeprecationWarning), pytest.raises(RuntimeError) as caught:
-        TradingEngine(SimpleNamespace(market=object()), {})
-
-    assert caught.value is primary_error
-    assert events == ["physical.close", "ledger.close"]
-
-
 @pytest.mark.parametrize(
-    ("ledger", "physical_repository"),
-    [(object(), None), (None, object())],
+    "omitted",
+    ["ledger", "physical_state_repository", "market_gateway"],
 )
-def test_engine_rejects_partial_persistence_injection(ledger, physical_repository):
-    with pytest.raises(ValueError, match="must be injected together"):
-        TradingEngine(
-            SimpleNamespace(market=object()),
-            {},
-            ledger=ledger,
-            physical_state_repository=physical_repository,
+def test_engine_requires_all_composition_root_dependencies(omitted):
+    dependencies = {
+        "ledger": object(),
+        "physical_state_repository": object(),
+        "market_gateway": object(),
+    }
+    dependencies.pop(omitted)
+
+    with pytest.raises(TypeError, match=omitted):
+        TradingEngine(SimpleNamespace(market=object()), {}, **dependencies)
+
+
+def test_shadow_validation_failure_skips_evaluation_and_all_decisions():
+    engine = TradingEngine.__new__(TradingEngine)
+    engine._paper_only = True
+    engine._shadow_cycle_lock = threading.Lock()
+    engine._shadow_cycle_state = "not-started"
+    engine.analyzer = SimpleNamespace(
+        update_regime=MagicMock(),
+        market_regime=MarketRegime.NEUTRAL,
+        update_priority_supply=MagicMock(
+            side_effect=PhysicalStateValidationError("invalid observation")
+        ),
+        supply_cache={},
+    )
+    engine.strategy = SimpleNamespace(update_context=MagicMock())
+    engine.stock_mgr = SimpleNamespace(stocks=[], stock_names={})
+    engine.state_tracker = SimpleNamespace(load_or_initialize=MagicMock())
+    engine.notifier = SimpleNamespace(start_status_session=MagicMock())
+    engine._evaluate_stocks = MagicMock()
+    engine._process_decisions = MagicMock()
+    engine._execute_paper_transition = MagicMock()
+    engine._execute_order = MagicMock()
+
+    with pytest.raises(PhysicalStateValidationError, match="invalid observation"):
+        engine.run_shadow_cycle("005930")
+
+    engine._evaluate_stocks.assert_not_called()
+    engine._process_decisions.assert_not_called()
+    engine._execute_paper_transition.assert_not_called()
+    engine._execute_order.assert_not_called()
+
+
+def test_real_analyzer_missing_chart_key_is_terminal_before_all_decisions():
+    code = "005930"
+    tracker = MagicMock()
+    analyzer = MarketAnalyzer(
+        MagicMock(),
+        {"proxy_code": "069500"},
+        tracker,
+    )
+    analyzer.collector = MagicMock()
+    analyzer.collector.fetch_indicator_chart.side_effect = (
+        lambda *args, **kwargs: analyzer.collector.fetch_minute_chart(
+            *args, **kwargs
         )
+    )
+    valid_row = {
+        "cur_prc": "80000", "open_pric": "80000",
+        "high_pric": "80000", "low_pric": "80000", "trde_qty": "10",
+    }
+    analyzer.collector.fetch_minute_chart.return_value = [
+        valid_row.copy() for _ in range(15)
+    ]
+    analyzer.collector.fetch_stock_basic.return_value = {
+        "trde_pre": "2", "trde_qty": "5000", "cur_prc": "80500", "mac": "1000",
+    }
+    analyzer.collector.fetch_tick_strength.return_value = [
+        {"cntr_str": "100"}
+    ] * 5
+    analyzer.collector.fetch_order_book.return_value = {
+        "tot_sel_req": 1, "tot_buy_req": 1,
+    }
+    analyzer.state_tracker.process_observations.return_value = {
+        code: {
+            "forces": {"current_velocity": 1.0},
+            "continuity": PhysicalContinuityEvidence(1, "initial", None, 0),
+        }
+    }
+    analyzer.update_priority_supply([code])
+    stale = analyzer.supply_cache[code]
+    assert stale.forces == {"current_velocity": 1.0}
+    tracker_calls = analyzer.state_tracker.process_observations.call_count
+
+    analyzer.collector.fetch_minute_chart.return_value = [
+        {key: value for key, value in valid_row.items() if key != "cur_prc"}
+        for _ in range(15)
+    ]
+    analyzer.update_regime = MagicMock()
+    analyzer.market_regime = MarketRegime.NEUTRAL
+    engine = TradingEngine.__new__(TradingEngine)
+    engine._paper_only = True
+    engine._shadow_cycle_lock = threading.Lock()
+    engine._shadow_cycle_state = "not-started"
+    engine.analyzer = analyzer
+    engine.strategy = SimpleNamespace(update_context=MagicMock())
+    engine.stock_mgr = SimpleNamespace(stocks=[], stock_names={})
+    engine.state_tracker = tracker
+    engine.notifier = SimpleNamespace(start_status_session=MagicMock())
+    engine._evaluate_stocks = MagicMock()
+    engine._process_decisions = MagicMock()
+    engine._execute_paper_transition = MagicMock()
+    engine._execute_order = MagicMock()
+
+    with pytest.raises(PhysicalStateValidationError, match="KeyError"):
+        engine.run_shadow_cycle(code)
+
+    assert stale.forces == {}
+    assert stale.continuity is None
+    assert analyzer.state_tracker.process_observations.call_count == tracker_calls
+    assert engine._shadow_cycle_state == "terminal"
+    engine._evaluate_stocks.assert_not_called()
+    engine._process_decisions.assert_not_called()
+    engine._execute_paper_transition.assert_not_called()
+    engine._execute_order.assert_not_called()
 
 
-def _risk_engine(*, total_pnl=-5.0, active_positions=None, critical_error=None, monitoring=True):
+def _risk_engine(
+    *,
+    cumulative_score=-5.0,
+    active_positions=None,
+    critical_error=None,
+    monitoring=True,
+):
     engine = TradingEngine.__new__(TradingEngine)
     engine.fast_interval = 10
     engine.slow_interval = 60
     engine._terminal_result = None
+    engine._wall_clock = lambda: datetime(
+        2026, 8, 3, 10, 0, tzinfo=ZoneInfo("Asia/Seoul")
+    )
     engine.strategy = _RiskStrategy(monitoring=monitoring)
     engine.db = _RiskDatabase()
     engine.stock_mgr = _RiskManager(
-        total_pnl=total_pnl,
+        cumulative_score=cumulative_score,
         active_positions={} if active_positions is None else active_positions,
     )
     engine.notifier = _RiskNotifier(critical_error=critical_error)
@@ -358,6 +429,13 @@ def _risk_engine(*, total_pnl=-5.0, active_positions=None, critical_error=None, 
     engine._evaluate_stocks = _unexpected_boundary
     engine._process_decisions = _unexpected_boundary
     return engine
+
+
+def _cycle_context():
+    return CycleContext(
+        now=datetime(2026, 8, 3, 10, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+        xkrx_session_date=datetime(2026, 8, 3).date(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -375,8 +453,8 @@ def test_normal_session_result_contract(reason):
 def test_kill_session_result_contract_allows_exact_threshold_and_zero_positions():
     result = TradingSessionResult(
         reason=SessionEndReason.KILL_SWITCH,
-        total_pnl=-5.0,
-        loss_limit=-5.0,
+        cumulative_trade_return_score=-5.0,
+        cumulative_trade_return_score_floor=-5.0,
         critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
     )
 
@@ -389,8 +467,8 @@ def test_kill_session_result_contract_allows_exact_threshold_and_zero_positions(
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"total_pnl": None},
-        {"total_pnl": -4.9999},
+        {"cumulative_trade_return_score": None},
+        {"cumulative_trade_return_score": -4.9999},
         {"critical_notification_outcome": CriticalNotificationOutcome.NOT_APPLICABLE},
         {
             "critical_notification_outcome": CriticalNotificationOutcome.CALL_RAISED,
@@ -413,8 +491,8 @@ def test_kill_session_result_contract_allows_exact_threshold_and_zero_positions(
 def test_kill_session_result_rejects_invalid_state_combinations(overrides):
     values = {
         "reason": SessionEndReason.KILL_SWITCH,
-        "total_pnl": -5.0,
-        "loss_limit": -5.0,
+        "cumulative_trade_return_score": -5.0,
+        "cumulative_trade_return_score_floor": -5.0,
         "critical_notification_outcome": CriticalNotificationOutcome.CALL_RETURNED,
     }
     values.update(overrides)
@@ -426,21 +504,21 @@ def test_kill_session_result_rejects_invalid_state_combinations(overrides):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("total_pnl", float("nan")),
-        ("total_pnl", float("inf")),
-        ("total_pnl", float("-inf")),
-        ("total_pnl", True),
-        ("loss_limit", float("nan")),
-        ("loss_limit", float("inf")),
-        ("loss_limit", float("-inf")),
-        ("loss_limit", False),
+        ("cumulative_trade_return_score", float("nan")),
+        ("cumulative_trade_return_score", float("inf")),
+        ("cumulative_trade_return_score", float("-inf")),
+        ("cumulative_trade_return_score", True),
+        ("cumulative_trade_return_score_floor", float("nan")),
+        ("cumulative_trade_return_score_floor", float("inf")),
+        ("cumulative_trade_return_score_floor", float("-inf")),
+        ("cumulative_trade_return_score_floor", False),
     ],
 )
-def test_kill_session_result_rejects_non_finite_or_boolean_pnl(field, value):
+def test_kill_session_result_rejects_non_finite_or_boolean_score(field, value):
     values = {
         "reason": SessionEndReason.KILL_SWITCH,
-        "total_pnl": -5.0,
-        "loss_limit": -5.0,
+        "cumulative_trade_return_score": -5.0,
+        "cumulative_trade_return_score_floor": -5.0,
         "critical_notification_outcome": CriticalNotificationOutcome.CALL_RETURNED,
     }
     values[field] = value
@@ -449,11 +527,30 @@ def test_kill_session_result_rejects_non_finite_or_boolean_pnl(field, value):
         TradingSessionResult(**values)
 
 
+def test_kill_session_result_rejects_positive_floor_and_old_keyword_names():
+    with pytest.raises(ValueError, match="floor"):
+        TradingSessionResult(
+            reason=SessionEndReason.KILL_SWITCH,
+            cumulative_trade_return_score=-5.0,
+            cumulative_trade_return_score_floor=0.1,
+            critical_notification_outcome=(
+                CriticalNotificationOutcome.CALL_RETURNED
+            ),
+        )
+
+    with pytest.raises(TypeError):
+        TradingSessionResult(
+            reason=SessionEndReason.KILL_SWITCH,
+            total_pnl=-5.0,
+            loss_limit=-5.0,
+        )
+
+
 def test_normal_session_result_rejects_kill_metadata():
     with pytest.raises(ValueError):
         TradingSessionResult(
             reason=SessionEndReason.MARKET_CLOSED,
-            total_pnl=-5.0,
+            cumulative_trade_return_score=-5.0,
         )
 
 
@@ -678,8 +775,8 @@ def test_closed_engine_keeps_latched_kill_result_read_only():
     engine, events = _lifecycle_engine()
     terminal_result = TradingSessionResult(
         reason=SessionEndReason.KILL_SWITCH,
-        total_pnl=-5.0,
-        loss_limit=-5.0,
+        cumulative_trade_return_score=-5.0,
+        cumulative_trade_return_score_floor=-5.0,
         critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
     )
     engine._terminal_result = terminal_result
@@ -694,38 +791,59 @@ def test_kill_switch_latches_once_without_tick_order_or_ledger_mutation(monkeypa
     first_position = object()
     second_position = object()
     active_positions = {"B": second_position, "A": first_position}
-    engine = _risk_engine(total_pnl=-5.0, active_positions=active_positions)
+    engine = _risk_engine(cumulative_score=-5.0, active_positions=active_positions)
     before_mapping = dict(active_positions)
+    first_result = engine._check_terminal_status(
+        _cycle_context(), {"A": 1.0, "B": 1.0}
+    )
     _forbid_engine_clock(monkeypatch)
-
-    first_result = engine.run()
     second_result = engine.run()
 
     assert first_result is second_result
     assert first_result.reason is SessionEndReason.KILL_SWITCH
-    assert first_result.total_pnl == -5.0
-    assert first_result.loss_limit == -5.0
+    assert first_result.cumulative_trade_return_score == -5.0
+    assert first_result.cumulative_trade_return_score_floor == -5.0
     assert first_result.unresolved_position_codes == ("A", "B")
     assert first_result.critical_notification_outcome is CriticalNotificationOutcome.CALL_RETURNED
     assert active_positions == before_mapping
     assert active_positions["A"] is first_position
     assert active_positions["B"] is second_position
-    assert engine.strategy.monitoring_checks == 1
+    assert engine.strategy.monitoring_checks == 0
     assert engine.strategy.kill_checks == [-5.0]
     assert engine.db.reads == 1
+    assert engine.db.session_dates == [datetime(2026, 8, 3).date()]
     assert engine.stock_mgr.realized_inputs == [-2.0]
     assert engine.notifier.error_messages == []
     assert engine.notifier.critical_messages == [
-        "🚨 KILL-SWITCH ACTIVATED (PnL: -5.0%, Limit: -5.0%) | "
-        "자동 청산을 실행하지 않았습니다. 미해결 활성 포지션: 2개"
+        "🚨 KILL-SWITCH ACTIVATED — Cumulative trade return score: -5.0 "
+        "percentage-points; floor: -5.0 percentage-points. "
+        "No automatic liquidation was attempted. Unresolved active positions: 2."
     ]
 
 
-def test_kill_switch_with_no_active_positions_is_still_terminal(monkeypatch):
-    engine = _risk_engine(total_pnl=-6.0)
-    _forbid_engine_clock(monkeypatch)
+def test_canonical_kill_switch_source_uses_only_score_semantics():
+    canonical_source = "\n".join(
+        (
+            inspect.getsource(TradingEngine._check_terminal_status),
+            inspect.getsource(TradingEngine._create_kill_switch_result),
+            inspect.getsource(TradingSessionResult),
+        )
+    ).lower()
 
-    result = engine.run()
+    for forbidden in (
+        "pnl",
+        "portfolio",
+        "profit/loss",
+        "profit-loss",
+        "total_loss_limit",
+        "손익",
+        "손실",
+    ):
+        assert forbidden not in canonical_source
+
+def test_kill_switch_with_no_active_positions_is_still_terminal(monkeypatch):
+    engine = _risk_engine(cumulative_score=-6.0)
+    result = engine._check_terminal_status(_cycle_context(), {})
 
     assert result.reason is SessionEndReason.KILL_SWITCH
     assert result.unresolved_position_codes == ()
@@ -734,9 +852,9 @@ def test_kill_switch_with_no_active_positions_is_still_terminal(monkeypatch):
 
 
 def test_loss_just_above_limit_keeps_monitoring_without_latching():
-    engine = _risk_engine(total_pnl=-4.9999)
+    engine = _risk_engine(cumulative_score=-4.9999)
 
-    assert engine._check_system_status() is True
+    assert engine._check_terminal_status(_cycle_context(), {}) is None
     assert engine._terminal_result is None
     assert engine.strategy.kill_checks == [-4.9999]
     assert engine.notifier.critical_messages == []
@@ -749,10 +867,9 @@ def test_loss_just_above_limit_keeps_monitoring_without_latching():
 def test_critical_notifier_failure_stays_terminal_without_generic_retry(
     monkeypatch, error, expected_type
 ):
-    engine = _risk_engine(total_pnl=-5.0, critical_error=error)
+    engine = _risk_engine(cumulative_score=-5.0, critical_error=error)
+    first_result = engine._check_terminal_status(_cycle_context(), {})
     _forbid_engine_clock(monkeypatch)
-
-    first_result = engine.run()
     second_result = engine.run()
 
     assert first_result is second_result
@@ -765,11 +882,10 @@ def test_critical_notifier_failure_stays_terminal_without_generic_retry(
 
 
 def test_critical_notifier_system_exit_is_not_swallowed(monkeypatch):
-    engine = _risk_engine(total_pnl=-5.0, critical_error=SystemExit(7))
-    _forbid_engine_clock(monkeypatch)
+    engine = _risk_engine(cumulative_score=-5.0, critical_error=SystemExit(7))
 
     with pytest.raises(SystemExit) as caught:
-        engine.run()
+        engine._check_terminal_status(_cycle_context(), {})
 
     assert caught.value.code == 7
     assert engine._terminal_result is None
@@ -779,12 +895,10 @@ def test_critical_notifier_system_exit_is_not_swallowed(monkeypatch):
 
 def test_market_close_returns_normal_typed_result_without_pnl_or_time_access(monkeypatch):
     engine = _risk_engine(monitoring=False)
-    _forbid_engine_clock(monkeypatch)
+    result = engine._check_monitoring_status(_cycle_context())
 
-    result = engine.run()
-
-    assert result == TradingSessionResult(reason=SessionEndReason.MARKET_CLOSED)
-    assert engine.strategy.monitoring_checks == 2
+    assert result is False
+    assert engine.strategy.monitoring_checks == 1
     assert engine.strategy.kill_checks == []
     assert engine.db.reads == 0
     assert engine.notifier.critical_messages == []
@@ -799,7 +913,7 @@ def test_engine_caught_keyboard_interrupt_returns_normal_typed_result():
     def interrupted_check():
         raise KeyboardInterrupt
 
-    engine._check_system_status = interrupted_check
+    engine._create_cycle_context = interrupted_check
 
     assert engine.run() == TradingSessionResult(reason=SessionEndReason.USER_INTERRUPT)
 
@@ -813,14 +927,14 @@ def test_pre_threshold_exception_retains_error_notification_and_retry(monkeypatc
     calls = 0
     sleeps = []
 
-    def status_check():
+    def context_check():
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("risk data unavailable")
         raise KeyboardInterrupt
 
-    engine._check_system_status = status_check
+    engine._create_cycle_context = context_check
     monkeypatch.setattr(engine_module.time_mod, "sleep", sleeps.append)
 
     result = engine.run()
@@ -846,14 +960,18 @@ def test_process_decisions_pipeline():
     engine.notifier = mock_notifier
     
     mock_updated_pos = MagicMock(spec=Position)
+    mock_updated_pos.status = PositionStatus.OPEN
     mock_manager.active_positions = {"005930": mock_updated_pos}
     mock_manager.update_position_data.return_value = mock_updated_pos
     
     # 언패킹 폭발 방지
-    mock_manager.process_sell_order.return_value = (True, mock_updated_pos)
-    mock_manager.process_buy_order.return_value = (True, mock_updated_pos)
+    mock_manager.apply_paper_sell.return_value = (True, mock_updated_pos)
+    mock_manager.apply_paper_buy.return_value = (True, mock_updated_pos)
     
-    mock_strategy.get_exit_reason.return_value = "Kinetic Exit (Velocity Drop)"
+    mock_strategy.decide_position.return_value = PositionDecisionResult(
+        PositionDecision.SELL,
+        "Kinetic Exit (Velocity Drop)",
+    )
     
     verdict = {
         "stock_code": "005930", 
@@ -868,12 +986,17 @@ def test_process_decisions_pipeline():
     mock_manager.update_position_data.assert_called_once_with(verdict)
     
     # Assert 2: Strategy 청산 판단
-    mock_strategy.get_exit_reason.assert_called_once_with(
-        mock_updated_pos, 80000, {"net_force": -3.5, "current_velocity": 7.0}
+    mock_manager.reconcile_overnight_positions.assert_called_once_with()
+    mock_strategy.decide_position.assert_called_once_with(
+        mock_updated_pos,
+        80000,
+        {"net_force": -3.5, "current_velocity": 7.0},
     )
     
     # Assert 3: Manager 매도 집행
-    mock_manager.process_sell_order.assert_called_once_with(verdict, "Kinetic Exit (Velocity Drop)")
+    mock_manager.apply_paper_sell.assert_called_once_with(
+        verdict, "Kinetic Exit (Velocity Drop)", None
+    )
     
     # Assert 4: 💥 Notifier에 알림 발송이 정상적으로 지시되었는지까지 검증 (파이프라인의 종착지)
     mock_notifier.notify_sell.assert_called_once_with(mock_updated_pos)

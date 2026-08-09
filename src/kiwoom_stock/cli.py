@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from pathlib import Path
 import sys
 from typing import Optional, Sequence
 
@@ -34,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_worker.add_argument("--source-sha", required=True)
     shadow_worker.add_argument("--image-digest", required=True)
     shadow_worker.add_argument("--activation-id", required=True)
+    downgrade_preflight = subparsers.add_parser(
+        "downgrade-preflight",
+        help="read-only check that no OVERNIGHT rows block a binary downgrade",
+    )
+    downgrade_preflight.add_argument("--database-path", required=True)
     return parser
 
 
@@ -72,6 +78,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("warning: %s" % warning, file=sys.stderr)
         print("Configuration OK")
         return 0
+    if args.command == "downgrade-preflight":
+        from kiwoom_stock.core.database import (
+            OvernightDowngradePreflightEvidence,
+            TradeLogger,
+        )
+
+        try:
+            evidence = TradeLogger.inspect_overnight_downgrade(
+                Path(args.database_path)
+            )
+        except Exception:
+            evidence = OvernightDowngradePreflightEvidence(
+                "FAILED",
+                None,
+                None,
+                "INTERNAL_ERROR",
+            )
+        print(
+            json.dumps(
+                evidence.to_safe_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return evidence.exit_code
     if args.command in ("shadow-once", "shadow-worker"):
         from kiwoom_stock.application.execution import (
             ActivationTuple,

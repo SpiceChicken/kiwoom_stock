@@ -213,7 +213,8 @@ AWS가 현재 신뢰하는 CA로 GitHub OIDC TLS chain을 검증할 수 있으�
 
 ## Shadow rollout role 1회 bootstrap
 
-shadow host worker와 activation document를 갱신하는 role은 activation role과 합치지
+shadow host worker, standalone evidence validator, activation document를 하나의
+artifact set으로 갱신하는 role은 activation role과 합치지
 않는다. trust는 audience `sts.amazonaws.com`과 subject
 `repo:SpiceChicken/kiwoom_stock:environment:production-shadow`의 exact equality다.
 템플릿은 `deploy/iam/github-shadow-rollout-{trust,policy}.json.example`, 고정 document
@@ -251,9 +252,10 @@ exact trust/policy/document를 모두 다시 읽은 뒤에만 출력한다.
 
 Rollout policy의 legacy transition read는 AWS IAM resource-level 특성 때문에 별도
 `Resource: "*"` Sid 두 개로만 허용한다. `ssm:ListCommands`는 exact instance와
-document filter의 acceptance/aggregate history, `ssm:ListCommandInvocations`는 exact
-instance/document의 node execution history 교차검증 전용이다. 두 action은 mutation이나
-command output read 권한을 포함하지 않는다.
+document filter의 acceptance/aggregate history 및 response-loss rollout attempt의
+exact comment/parameter 식별, `ssm:ListCommandInvocations`는 exact instance/document/
+command의 node execution history 교차검증 전용이다. 두 action은 mutation이나
+command output read 권한을 포함하지 않으며 `send-command` 재시도 권한을 만들지 않는다.
 
 이 script는 GitHub token을 받지 않고 GitHub API나 `gh`를 호출하지 않는다. GitHub
 Environment write는 AWS partial rollback과 원자적으로 묶을 수 없으므로 fail-closed
@@ -263,9 +265,18 @@ ARN을 등록한 다음 API/화면에서 byte-for-byte read-back한다. Kiwoom s
 AWS key는 등록하지 않는다. 이 read-back 전에는 rollout을 실행하지 않는다.
 
 일상 순서는 protected exact-main rollout → 14일 audit 검토 → 별도 protected activation
-승인이다. 실패 또는 `skew=true`면 activation을 중지하고 previous default 복원 뒤
-attempt backup host pair를 확인한다. generic `AWS-RunShellScript`, direct local
+승인이다. rollout audit에서 worker/validator/document SHA와 host validator의
+root:root `0750`, regular/non-symlink, link count 1 read-back을 모두 확인한다. 실패 또는
+`skew=true`면 activation을 중지하고 previous default 복원 뒤 attempt backup artifact
+set을 확인한다. generic `AWS-RunShellScript`, direct local
 `send-command`, arbitrary URL/path/command로 우회하지 않는다.
+
+fixed `kiwoom-shadow-once` container가 어떤 lifecycle 상태로든 존재하면 host rollout
+lock 아래 guard가 backup/download/publish 전에 rollout을 거부해야 한다. Docker inventory
+오류도 fail-closed한다. 먼저 기존 exact tuple로 stop/cleanup하고 container 부재를
+확인한 뒤 새 rollout을 dispatch한다. activation의 stop source는 임의 SHA가 아니라 OIDC
+전 authenticated GitHub compare에서 현재 workflow main SHA와 동일하거나 ancestor인
+commit만 허용한다.
 
 ## 롤백
 

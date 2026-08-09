@@ -4,6 +4,7 @@ import ast
 from datetime import datetime, timedelta
 import math
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
 from kiwoom_stock.domain.state import (
@@ -14,6 +15,8 @@ from kiwoom_stock.domain.state import (
     calculate_volume_interval,
     calculate_volume_window,
     decay_velocity,
+    PhysicalStateHydrationSource,
+    PhysicalStateLoadResult,
 )
 
 
@@ -22,12 +25,20 @@ class _RecoveryDatabase:
         self.timestamp = timestamp
         self.asserted_code = None
 
-    def get_last_physical_state(self, stock_code):
+    def load_physical_state(self, stock_code):
         self.asserted_code = stock_code
-        return {"velocity": 10.0, "timestamp": self.timestamp}
+        return PhysicalStateLoadResult(
+            PhysicalStateHydrationSource.LEGACY_COLD_START, None
+        )
 
-    def submit_physical_state(self, stock_code, forces):
+    def persist_physical_state(self, state, forces):
         raise AssertionError("recovery tests must not submit physical state")
+
+    def persist_physical_state_batch(self, writes):
+        raise AssertionError("recovery tests must not submit physical state")
+
+    def close(self):
+        pass
 
 
 def test_initial_velocity_reference_mass_and_recovery_decay_match_legacy_rules():
@@ -95,14 +106,16 @@ def test_volume_window_preserves_120_tick_limit_and_drop_ratio():
 
 
 def test_physical_state_tracker_accepts_injected_clock_for_crash_recovery():
-    now = datetime(2026, 7, 17, 12, 0, 0)
+    now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     database = _RecoveryDatabase(timestamp=now - timedelta(hours=2))
     tracker = PhysicalStateTracker(database, clock=lambda: now)
 
     tracker.recover_state_from_crash("005930", decay_constant=0.5)
 
     assert database.asserted_code == "005930"
-    assert tracker._l1_cache["005930"] == calculate_recovered_velocity(10.0, database.timestamp, now, 0.5)
+    # Unversioned velocity-only rows are explicit legacy cold starts; velocity
+    # is never mixed into a partial v1 state.
+    assert tracker._l1_cache["005930"] == 0.0
 
 
 def test_domain_state_does_not_import_external_io_or_call_system_time():

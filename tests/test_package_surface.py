@@ -1,8 +1,11 @@
 import os
+import ast
 import subprocess
 import sys
 from dataclasses import asdict, fields
 from pathlib import Path
+
+import pytest
 
 from kiwoom_stock.domain import (
     ForeignData,
@@ -10,6 +13,8 @@ from kiwoom_stock.domain import (
     PgmData,
     Position,
     SupplyData,
+    TargetStopPolicy,
+    calculate_position_return_percentage_points,
 )
 
 
@@ -49,6 +54,8 @@ def test_position_field_contract_and_profit_calculation_are_preserved():
         "sell_reason",
         "atr_percent",
         "down_atr_percent",
+        "owning_session_date",
+        "state_changed_at",
     ]
     assert [field.name for field in fields(Position)] == expected_fields
 
@@ -64,7 +71,36 @@ def test_position_field_contract_and_profit_calculation_are_preserved():
     assert position.calc_profit_rate == 0.0
 
     position.sell_price = 112.345
-    assert position.calc_profit_rate == 12.35
+    assert position.calc_profit_rate == 12.345
+
+
+def test_strategy_domain_surface_exports_policy_and_return_ssot():
+    policy = TargetStopPolicy()
+
+    assert policy.target_profit_percentage_points == 3.0
+    assert calculate_position_return_percentage_points(100.0, 102.555) == pytest.approx(
+        2.555
+    )
+
+
+def test_strategy_policy_dependency_direction_has_no_settings_or_pydantic_import():
+    root = Path(__file__).resolve().parents[1] / "src" / "kiwoom_stock"
+    forbidden = {
+        "kiwoom_stock.settings",
+        "pydantic",
+        "pydantic_settings",
+    }
+
+    for path in (root / "domain" / "strategy.py", root / "monitoring" / "strategy.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module)
+
+        assert imports.isdisjoint(forbidden)
 
 
 def test_supply_data_defaults_and_serialized_shape_are_preserved():

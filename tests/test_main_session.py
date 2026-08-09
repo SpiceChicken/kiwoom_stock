@@ -57,9 +57,10 @@ def _configured_main(
             "aws_s3_bucket_name": "archive-bucket",
         },
         monitor=monitor,
-        client=client,
         output_dir_str="/isolated/output/20260718",
     )
+    runtime.shutdown_engine = MagicMock(side_effect=monitor.close)
+    runtime.close = MagicMock(side_effect=client.close)
     lifecycle_started = MagicMock(side_effect=lambda *args, **kwargs: events.append("started"))
     lifecycle_crashed = MagicMock(side_effect=lambda *args, **kwargs: events.append("crashed"))
     post_market = MagicMock(side_effect=lambda **kwargs: events.append("post_market") or object())
@@ -109,8 +110,8 @@ def test_main_kill_switch_skips_post_market_and_exits_one(
 ):
     result = TradingSessionResult(
         reason=SessionEndReason.KILL_SWITCH,
-        total_pnl=-5.0,
-        loss_limit=-5.0,
+        cumulative_trade_return_score=-5.0,
+        cumulative_trade_return_score_floor=-5.0,
         unresolved_position_codes=unresolved_codes,
         critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
     )
@@ -313,8 +314,8 @@ def test_main_kill_close_failure_exits_one_without_duplicate_crash_notice(
         monkeypatch,
         TradingSessionResult(
             reason=SessionEndReason.KILL_SWITCH,
-            total_pnl=-5.0,
-            loss_limit=-5.0,
+            cumulative_trade_return_score=-5.0,
+            cumulative_trade_return_score_floor=-5.0,
             critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
         ),
         close_error=close_error,
@@ -435,8 +436,8 @@ def test_main_kill_close_process_control_is_not_converted_to_exit_one(
         monkeypatch,
         TradingSessionResult(
             reason=SessionEndReason.KILL_SWITCH,
-            total_pnl=-5.0,
-            loss_limit=-5.0,
+            cumulative_trade_return_score=-5.0,
+            cumulative_trade_return_score_floor=-5.0,
             critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
         ),
         close_error=close_error,
@@ -491,7 +492,7 @@ def test_main_client_close_failure_preserves_active_system_exit(monkeypatch):
 
     assert caught.value is run_exit
     assert any(
-        "Kiwoom client close also failed with RuntimeError" in note
+        "Runtime close also failed with RuntimeError" in note
         for note in run_exit.__notes__
     )
     context.client.close.assert_called_once_with()

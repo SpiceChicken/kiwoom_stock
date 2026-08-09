@@ -24,6 +24,7 @@ ROLLOUT_DOCUMENT = "KiwoomStock-ShadowWorkerRollout"
 SHADOW_DOCUMENT = "KiwoomStock-ShadowWorker"
 ROLLOUT_ROLE_NAME = "kiwoom-stock-github-shadow-rollout"
 WORKER_PATH = Path("deploy/ec2/shadow_worker_control.sh")
+VALIDATOR_PATH = Path("deploy/ec2/shadow_runtime_evidence.py")
 SHADOW_DOCUMENT_PATH = Path("deploy/ssm/shadow-worker-document.yaml")
 ROLLOUT_DOCUMENT_PATH = Path("deploy/ssm/shadow-worker-rollout-document.yaml")
 SOURCE_RE = re.compile(r"[0-9a-f]{40}")
@@ -32,19 +33,21 @@ ID_RE = re.compile(r"[1-9][0-9]{0,19}")
 COMMAND_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
-TERMINAL = {"Success", "Failed", "Cancelled", "TimedOut", "Cancelling"}
+TERMINAL_STATUSES = frozenset({"Success", "Failed", "Cancelled", "TimedOut"})
+NONTERMINAL_STATUSES = frozenset({
+    "Pending", "InProgress", "Delayed", "Cancelling",
+})
+ALL_STATUSES = TERMINAL_STATUSES | NONTERMINAL_STATUSES
 LEGACY_QUIET_WINDOW_SECONDS = 3600
 LEGACY_SETTLING_SECONDS = 60
 LEGACY_SCAN_OFFSETS = (0, 30, 60)
 LEGACY_HISTORY_MAX_PAGES = 20
 LEGACY_HISTORY_PAGE_SIZE = 50
-LEGACY_TERMINAL_STATUSES = {"Success", "Failed", "Cancelled", "TimedOut"}
-LEGACY_ALL_STATUSES = LEGACY_TERMINAL_STATUSES | {
-    "Pending", "InProgress", "Delayed", "Cancelling",
-}
-LEGACY_COMMAND_STATUSES = LEGACY_TERMINAL_STATUSES | {
-    "Pending", "InProgress", "Cancelling",
-}
+ACCEPTANCE_RECONCILIATION_SCANS = 8
+ACCEPTANCE_HISTORY_MAX_PAGES = 20
+ACCEPTANCE_HISTORY_PAGE_SIZE = 50
+ACCEPTANCE_HISTORY_COMMAND_CAP = 500
+ACCEPTANCE_HISTORY_TOKEN_MAX_LENGTH = 4096
 HISTORY_COMMAND_KEYS = {
     "CommandId", "DocumentName", "DocumentVersion", "Comment",
     "ExpiresAfter", "Parameters", "InstanceIds", "Targets",
@@ -62,15 +65,18 @@ HISTORY_ITEM_KEYS = {
     "NotificationConfig", "CloudWatchOutputConfig",
 }
 HOST_EVIDENCE_KEYS = {
-    "action", "source_sha", "worker_sha256", "shadow_document_sha256",
-    "rollout_attempt_id", "observed_worker_sha256", "worker_present",
+    "action", "source_sha", "worker_sha256", "validator_sha256",
+    "shadow_document_sha256", "rollout_attempt_id", "observed_worker_sha256",
+    "observed_validator_sha256", "worker_present", "validator_present",
     "worker_owner", "worker_mode", "worker_links", "worker_regular",
-    "worker_metadata_valid", "binding_present", "binding_owner",
+    "worker_metadata_valid", "validator_owner", "validator_mode",
+    "validator_links", "validator_regular", "validator_metadata_valid",
+    "binding_present", "binding_owner",
     "binding_mode", "binding_links", "binding_regular",
     "binding_metadata_valid",
 }
 ROLLOUT_YAML_PREFIX = b'''schemaVersion: "2.2"
-description: Install, read back, or roll back the exact shadow worker pair
+description: Install, read back, or roll back the exact shadow artifact set
 parameters:
   Action:
     type: String
@@ -81,6 +87,10 @@ parameters:
     allowedPattern: '^[0-9a-f]{40}$'
     interpolationType: ENV_VAR
   WorkerSha256:
+    type: String
+    allowedPattern: '^[0-9a-f]{64}$'
+    interpolationType: ENV_VAR
+  ValidatorSha256:
     type: String
     allowedPattern: '^[0-9a-f]{64}$'
     interpolationType: ENV_VAR
@@ -102,7 +112,7 @@ parameters:
     interpolationType: ENV_VAR
 mainSteps:
   - action: aws:runShellScript
-    name: exactShadowPairRollout
+    name: exactShadowArtifactSetRollout
     precondition:
       StringEquals: [platformType, Linux]
     inputs:
@@ -117,6 +127,29 @@ class RolloutError(RuntimeError):
     def __init__(self, category: str) -> None:
         super().__init__(category)
         self.category = category
+
+
+def _rollout_comment(action: str, rollout: RolloutTuple) -> str:
+    run_attempt = os.getenv("GITHUB_RUN_ATTEMPT", "")
+    if re.fullmatch(r"[1-9][0-9]{0,5}", run_attempt) is None:
+        run_attempt = "local"
+    return (
+        f"kiwoom-shadow-rollout/{rollout.rollout_attempt_id}/"
+        f"{run_attempt}/{action}"
+    )
+
+
+def _rollout_parameters(action: str, rollout: RolloutTuple) -> dict[str, list[str]]:
+    return {
+        "Action": [action],
+        "SourceSha": [rollout.source_sha],
+        "WorkerSha256": [rollout.worker_sha256],
+        "ValidatorSha256": [rollout.validator_sha256],
+        "ShadowDocumentSha256": [rollout.shadow_document_sha256],
+        "RolloutAttemptId": [rollout.rollout_attempt_id],
+        "ExpectedInstanceId": [INSTANCE_ID],
+        "Region": [REGION],
+    }
 
 
 def _no_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -178,6 +211,7 @@ def expected_rollout_document(source: bytes | None = None) -> dict[str, object]:
     patterns = {
         "SourceSha": "^[0-9a-f]{40}$",
         "WorkerSha256": "^[0-9a-f]{64}$",
+        "ValidatorSha256": "^[0-9a-f]{64}$",
         "ShadowDocumentSha256": "^[0-9a-f]{64}$",
         "RolloutAttemptId": "^[1-9][0-9]{0,19}$",
         "ExpectedInstanceId": "^i-02cb0a404794bd43a$",
@@ -199,11 +233,11 @@ def expected_rollout_document(source: bytes | None = None) -> dict[str, object]:
     })
     return {
         "schemaVersion": "2.2",
-        "description": "Install, read back, or roll back the exact shadow worker pair",
+        "description": "Install, read back, or roll back the exact shadow artifact set",
         "parameters": parameters,
         "mainSteps": [{
             "action": "aws:runShellScript",
-            "name": "exactShadowPairRollout",
+            "name": "exactShadowArtifactSetRollout",
             "precondition": {"StringEquals": ["platformType", "Linux"]},
             "inputs": {"timeoutSeconds": "300", "runCommand": [_rollout_script(raw)]},
         }],
@@ -216,6 +250,7 @@ class RolloutTuple:
 
     source_sha: str
     worker_sha256: str
+    validator_sha256: str
     shadow_document_sha256: str
     shadow_document_raw_sha256: str
     rollout_document_sha256: str
@@ -226,6 +261,7 @@ class RolloutTuple:
             raise RolloutError("source_sha_invalid")
         for value in (
             self.worker_sha256,
+            self.validator_sha256,
             self.shadow_document_sha256,
             self.shadow_document_raw_sha256,
             self.rollout_document_sha256,
@@ -234,6 +270,160 @@ class RolloutTuple:
                 raise RolloutError("hash_invalid")
         if ID_RE.fullmatch(self.rollout_attempt_id) is None:
             raise RolloutError("rollout_attempt_id_invalid")
+
+
+def _with_optional_next_token(
+    command: tuple[str, ...], base: tuple[str, ...]
+) -> bool:
+    if command == base:
+        return True
+    return (
+        len(command) == len(base) + 2
+        and command[:len(base)] == base
+        and command[-2] == "--next-token"
+        and 0 < len(command[-1]) <= ACCEPTANCE_HISTORY_TOKEN_MAX_LENGTH
+    )
+
+
+def _valid_rollout_send(command: tuple[str, ...]) -> bool:
+    if (
+        len(command) != 18
+        or command[:3] != ("ssm", "send-command", "--document-name")
+        or command[3:9] != (
+            ROLLOUT_DOCUMENT, "--document-version", "1",
+            "--instance-ids", INSTANCE_ID, "--comment",
+        )
+        or command[10] != "--parameters"
+        or command[12:] != (
+            "--timeout-seconds", "300", "--max-concurrency", "1",
+            "--max-errors", "0",
+        )
+    ):
+        return False
+    try:
+        parameters = strict_json(command[11].encode("utf-8"))
+    except (RolloutError, UnicodeError):
+        return False
+    if not isinstance(parameters, dict) or set(parameters) != {
+        "Action", "SourceSha", "WorkerSha256", "ValidatorSha256",
+        "ShadowDocumentSha256", "RolloutAttemptId", "ExpectedInstanceId",
+        "Region",
+    }:
+        return False
+    values: dict[str, str] = {}
+    for key, value in parameters.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(value, list)
+            or len(value) != 1
+            or not isinstance(value[0], str)
+        ):
+            return False
+        values[key] = value[0]
+    action = values["Action"]
+    attempt = values["RolloutAttemptId"]
+    return (
+        action in {"install", "readback", "rollback"}
+        and SOURCE_RE.fullmatch(values["SourceSha"]) is not None
+        and all(HASH_RE.fullmatch(values[name]) is not None for name in (
+            "WorkerSha256", "ValidatorSha256", "ShadowDocumentSha256",
+        ))
+        and ID_RE.fullmatch(attempt) is not None
+        and values["ExpectedInstanceId"] == INSTANCE_ID
+        and values["Region"] == REGION
+        and re.fullmatch(
+            rf"kiwoom-shadow-rollout/{attempt}/(?:local|[1-9][0-9]{{0,5}})/{action}",
+            command[9],
+        ) is not None
+    )
+
+
+def _classify_aws_command(args: Sequence[str]) -> bool:
+    """Return whether an exact allowed AWS command is a write."""
+
+    if not isinstance(args, (list, tuple)) or any(type(item) is not str for item in args):
+        raise RolloutError("aws_command_not_allowed")
+    command = tuple(args)
+    if _valid_rollout_send(command):
+        return True
+    if (
+        len(command) == 6
+        and command[:4] == (
+            "ssm", "update-document-default-version", "--name", SHADOW_DOCUMENT,
+        )
+        and command[4] == "--document-version"
+        and re.fullmatch(r"[1-9][0-9]*", command[5]) is not None
+    ):
+        return True
+    if (
+        len(command) == 10
+        and command[:4] == ("ssm", "update-document", "--name", SHADOW_DOCUMENT)
+        and command[4:9] == (
+            "--document-version", "$LATEST", "--document-format", "JSON",
+            "--content",
+        )
+    ):
+        try:
+            content = strict_json(command[9].encode("utf-8"))
+        except (RolloutError, UnicodeError):
+            return False
+        return isinstance(content, dict)
+
+    if len(command) == 4 and command[:3] == ("ssm", "describe-document", "--name"):
+        if command[3] in {SHADOW_DOCUMENT, ROLLOUT_DOCUMENT}:
+            return False
+    if (
+        len(command) == 8
+        and command[:3] == ("ssm", "get-document", "--name")
+        and command[3] in {SHADOW_DOCUMENT, ROLLOUT_DOCUMENT}
+        and command[4] == "--document-version"
+        and re.fullmatch(r"[1-9][0-9]*", command[5]) is not None
+        and command[6:] == ("--document-format", "JSON")
+    ):
+        return False
+    if command == (
+        "ssm", "list-document-versions", "--name", SHADOW_DOCUMENT,
+    ):
+        return False
+    if (
+        len(command) == 6
+        and command[:3] == ("ssm", "get-command-invocation", "--command-id")
+        and COMMAND_RE.fullmatch(command[3]) is not None
+        and command[4:] == ("--instance-id", INSTANCE_ID)
+    ):
+        return False
+    if command[:2] == ("ssm", "list-commands"):
+        for document in (ROLLOUT_DOCUMENT, SHADOW_DOCUMENT):
+            base: tuple[str, ...] = (
+                "ssm", "list-commands", "--instance-id", INSTANCE_ID,
+                "--filters", f"key=DocumentName,value={document}",
+                "--max-results", str(ACCEPTANCE_HISTORY_PAGE_SIZE),
+                "--no-paginate",
+            )
+            if _with_optional_next_token(command, base):
+                return False
+    if command[:2] == ("ssm", "list-command-invocations"):
+        if (
+            len(command) == 10
+            and command[:3] == (
+                "ssm", "list-command-invocations", "--command-id",
+            )
+            and COMMAND_RE.fullmatch(command[3]) is not None
+            and command[4:] == (
+                "--instance-id", INSTANCE_ID, "--details", "--max-results",
+                str(LEGACY_HISTORY_PAGE_SIZE), "--no-paginate",
+            )
+        ):
+            return False
+        base = (
+            "ssm", "list-command-invocations", "--instance-id", INSTANCE_ID,
+            "--filters", f"key=DocumentName,value={SHADOW_DOCUMENT}",
+            "--no-details", "--max-results", str(LEGACY_HISTORY_PAGE_SIZE),
+            "--no-paginate",
+        )
+        if _with_optional_next_token(command, base):
+            return False
+    raise RolloutError("aws_command_not_allowed")
 
 
 class AwsCli:
@@ -247,6 +437,9 @@ class AwsCli:
         self.commands: list[dict[str, object]] = []
 
     def call(self, args: Sequence[str], *, write: bool = False) -> object:
+        classified_write = _classify_aws_command(args)
+        if type(write) is not bool or write is not classified_write:
+            raise RolloutError("aws_command_write_mismatch")
         remaining = self.deadline - self.clock()
         if remaining <= 0:
             raise RolloutError("execution_deadline_exhausted")
@@ -284,9 +477,11 @@ class AwsCli:
     def send(
         self, action: str, rollout: RolloutTuple, *, expect_tuple: bool = False
     ) -> dict[str, object]:
+        comment = _rollout_comment(action, rollout)
+        parameters = _rollout_parameters(action, rollout)
         record: dict[str, object] = {
             "action": action, "command_id": None, "accepted": "uncertain",
-            "status": "unknown", "response_code": None,
+            "status": "unknown", "response_code": None, "comment": comment,
         }
         self.commands.append(record)
         response = self.call([
@@ -294,15 +489,8 @@ class AwsCli:
                 "--document-name", ROLLOUT_DOCUMENT,
                 "--document-version", "1",
                 "--instance-ids", INSTANCE_ID,
-                "--parameters", json.dumps({
-                    "Action": [action],
-                    "SourceSha": [rollout.source_sha],
-                    "WorkerSha256": [rollout.worker_sha256],
-                    "ShadowDocumentSha256": [rollout.shadow_document_sha256],
-                    "RolloutAttemptId": [rollout.rollout_attempt_id],
-                    "ExpectedInstanceId": [INSTANCE_ID],
-                    "Region": [REGION],
-                }, separators=(",", ":")),
+                "--comment", comment,
+                "--parameters", json.dumps(parameters, separators=(",", ":")),
                 "--timeout-seconds", "300",
                 "--max-concurrency", "1",
                 "--max-errors", "0",
@@ -315,10 +503,30 @@ class AwsCli:
             raise RolloutError("command_id_invalid")
         self.command_ids.append(command_id)
         record["command_id"] = command_id
+        return self._finish_command(
+            action, rollout, record, command_id, expect_tuple=expect_tuple
+        )
+
+    def _finish_command(
+        self,
+        action: str,
+        rollout: RolloutTuple,
+        record: dict[str, object],
+        command_id: str,
+        *,
+        expect_tuple: bool,
+    ) -> dict[str, object]:
         invocation = self.poll(command_id)
-        record["status"] = invocation.get("Status", "unknown")
-        record["response_code"] = invocation.get("ResponseCode")
-        if invocation.get("Status") != "Success" or invocation.get("ResponseCode") != 0:
+        status = invocation.get("Status")
+        response_code = invocation.get("ResponseCode")
+        record["status"] = status if type(status) is str else "unknown"
+        record["response_code"] = response_code
+        if (
+            type(status) is not str
+            or status != "Success"
+            or type(response_code) is not int
+            or response_code != 0
+        ):
             raise RolloutError("host_action_failed")
         evidence = self._host_evidence(invocation)
         self.host_evidence.append(evidence)
@@ -327,16 +535,179 @@ class AwsCli:
         if expect_tuple and any((
             evidence.get("source_sha") != rollout.source_sha,
             evidence.get("worker_sha256") != rollout.worker_sha256,
+            evidence.get("validator_sha256") != rollout.validator_sha256,
             evidence.get("shadow_document_sha256") != rollout.shadow_document_sha256,
             evidence.get("rollout_attempt_id") != rollout.rollout_attempt_id,
             evidence.get("observed_worker_sha256") != rollout.worker_sha256,
+            evidence.get("observed_validator_sha256") != rollout.validator_sha256,
             evidence.get("worker_present") is not True,
             evidence.get("worker_metadata_valid") is not True,
+            evidence.get("validator_present") is not True,
+            evidence.get("validator_metadata_valid") is not True,
             evidence.get("binding_present") is not True,
             evidence.get("binding_metadata_valid") is not True,
         )):
             raise RolloutError("host_evidence_tuple_mismatch")
         return evidence
+
+    def reconcile_acceptance(
+        self,
+        action: str,
+        rollout: RolloutTuple,
+        *,
+        expect_tuple: bool = False,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> dict[str, object]:
+        """Identify one response-lost command exactly, then await its terminal result."""
+
+        comment = _rollout_comment(action, rollout)
+        parameters = _rollout_parameters(action, rollout)
+        record = next(
+            (
+                item for item in reversed(self.commands)
+                if item.get("action") == action
+                and item.get("comment") == comment
+                and (
+                    item.get("accepted") == "uncertain"
+                    or item.get("status") == "unknown"
+                )
+            ),
+            None,
+        )
+        if record is None:
+            raise RolloutError("acceptance_record_missing")
+        for scan in range(ACCEPTANCE_RECONCILIATION_SCANS):
+            matches = self._acceptance_commands(comment, parameters)
+            if len(matches) > 1:
+                raise RolloutError("acceptance_history_ambiguous")
+            if matches:
+                command_id = matches[0]
+                if not self._acceptance_invocation_exists(command_id, comment):
+                    if scan + 1 < ACCEPTANCE_RECONCILIATION_SCANS:
+                        sleeper(1)
+                        continue
+                    raise RolloutError("acceptance_history_unresolved")
+                record["accepted"] = "reconciled"
+                record["command_id"] = command_id
+                if command_id not in self.command_ids:
+                    self.command_ids.append(command_id)
+                return self._finish_command(
+                    action, rollout, record, command_id, expect_tuple=expect_tuple
+                )
+            if scan + 1 < ACCEPTANCE_RECONCILIATION_SCANS:
+                sleeper(1)
+        raise RolloutError("acceptance_history_unresolved")
+
+    def _acceptance_commands(
+        self, comment: str, parameters: Mapping[str, list[str]]
+    ) -> list[str]:
+        matches: list[str] = []
+        seen_commands: set[str] = set()
+        seen_tokens: set[str] = set()
+        next_token: str | None = None
+        command_count = 0
+        for _page in range(ACCEPTANCE_HISTORY_MAX_PAGES):
+            args = [
+                "ssm", "list-commands", "--instance-id", INSTANCE_ID,
+                "--filters", f"key=DocumentName,value={ROLLOUT_DOCUMENT}",
+                "--max-results", str(ACCEPTANCE_HISTORY_PAGE_SIZE),
+                "--no-paginate",
+            ]
+            if next_token is not None:
+                args.extend(["--next-token", next_token])
+            response = self.call(args)
+            if (
+                not isinstance(response, dict)
+                or set(response) not in (
+                    {"Commands"}, {"Commands", "NextToken"},
+                )
+                or not isinstance(response["Commands"], list)
+            ):
+                raise RolloutError("acceptance_history_shape_invalid")
+            commands = response["Commands"]
+            if len(commands) > ACCEPTANCE_HISTORY_PAGE_SIZE:
+                raise RolloutError("acceptance_history_page_oversized")
+            if command_count + len(commands) > ACCEPTANCE_HISTORY_COMMAND_CAP:
+                raise RolloutError("acceptance_history_command_cap")
+            command_count += len(commands)
+            for command in commands:
+                if (
+                    not isinstance(command, dict)
+                    or not set(command).issubset(HISTORY_COMMAND_KEYS)
+                    or not {
+                        "CommandId", "DocumentName", "DocumentVersion", "Comment",
+                        "Parameters", "InstanceIds", "RequestedDateTime", "Status",
+                    }.issubset(command)
+                ):
+                    raise RolloutError("acceptance_history_shape_invalid")
+                command_id = command["CommandId"]
+                status = command["Status"]
+                if (
+                    type(command_id) is not str
+                    or COMMAND_RE.fullmatch(command_id) is None
+                    or command_id in seen_commands
+                    or command["DocumentName"] != ROLLOUT_DOCUMENT
+                    or command["InstanceIds"] != [INSTANCE_ID]
+                    or command.get("Targets", []) != []
+                    or command["DocumentVersion"] != "1"
+                    or type(status) is not str
+                    or status not in ALL_STATUSES
+                ):
+                    raise RolloutError("acceptance_history_item_invalid")
+                seen_commands.add(command_id)
+                _utc_timestamp(command["RequestedDateTime"])
+                if command["Comment"] == comment:
+                    if command["Parameters"] != parameters:
+                        raise RolloutError("acceptance_history_tuple_mismatch")
+                    matches.append(command_id)
+            token = response.get("NextToken")
+            if token is None or token == "":
+                return matches
+            if (
+                type(token) is not str
+                or len(token) > ACCEPTANCE_HISTORY_TOKEN_MAX_LENGTH
+                or token in seen_tokens
+            ):
+                raise RolloutError("acceptance_history_next_token_invalid")
+            seen_tokens.add(token)
+            next_token = token
+        raise RolloutError("acceptance_history_page_limit")
+
+    def _acceptance_invocation_exists(self, command_id: str, comment: str) -> bool:
+        response = self.call([
+            "ssm", "list-command-invocations", "--command-id", command_id,
+            "--instance-id", INSTANCE_ID, "--details",
+            "--max-results", str(LEGACY_HISTORY_PAGE_SIZE), "--no-paginate",
+        ])
+        if (
+            not isinstance(response, dict)
+            or not set(response).issubset({"CommandInvocations", "NextToken"})
+            or not isinstance(response.get("CommandInvocations"), list)
+            or response.get("NextToken") not in (None, "")
+            or len(response["CommandInvocations"]) > 1
+        ):
+            raise RolloutError("acceptance_invocation_shape_invalid")
+        invocations = response["CommandInvocations"]
+        if not invocations:
+            return False
+        invocation = invocations[0]
+        if (
+            not isinstance(invocation, dict)
+            or not set(invocation).issubset(HISTORY_ITEM_KEYS)
+            or not {
+                "CommandId", "InstanceId", "Comment", "DocumentName",
+                "RequestedDateTime", "Status",
+            }.issubset(invocation)
+            or invocation["CommandId"] != command_id
+            or invocation["InstanceId"] != INSTANCE_ID
+            or invocation["Comment"] != comment
+            or invocation["DocumentName"] != ROLLOUT_DOCUMENT
+            or type(invocation["Status"]) is not str
+            or invocation["Status"] not in ALL_STATUSES
+        ):
+            raise RolloutError("acceptance_invocation_item_invalid")
+        _utc_timestamp(invocation["RequestedDateTime"])
+        return True
 
     @staticmethod
     def _host_evidence(invocation: Mapping[str, object]) -> dict[str, object]:
@@ -372,7 +743,9 @@ class AwsCli:
             if not isinstance(response, dict):
                 raise RolloutError("invocation_invalid")
             status = response.get("Status")
-            if status in TERMINAL:
+            if type(status) is not str or status not in ALL_STATUSES:
+                raise RolloutError("invocation_invalid")
+            if status in TERMINAL_STATUSES:
                 return response
             time.sleep(5)
         raise RolloutError("host_action_timeout")
@@ -499,7 +872,7 @@ def _scan_legacy_commands(
                     or command["InstanceIds"] != [INSTANCE_ID]
                     or command.get("Targets", []) != []
                     or not isinstance(status, str)
-                    or status not in LEGACY_COMMAND_STATUSES
+                    or status not in ALL_STATUSES
                 ):
                     raise RolloutError("legacy_commands_item_invalid")
                 seen_commands.add(command_id)
@@ -507,7 +880,7 @@ def _scan_legacy_commands(
                 count += 1
                 if requested >= cutoff:
                     recent_count += 1
-                if status not in LEGACY_TERMINAL_STATUSES:
+                if status not in TERMINAL_STATUSES:
                     nonterminal_count += 1
                 plane.update({
                     "count": count, "recent_count": recent_count,
@@ -589,7 +962,7 @@ def _scan_legacy_invocations(
                     or invocation["InstanceId"] != INSTANCE_ID
                     or invocation["DocumentName"] != SHADOW_DOCUMENT
                     or not isinstance(status, str)
-                    or status not in LEGACY_ALL_STATUSES
+                    or status not in ALL_STATUSES
                 ):
                     raise RolloutError("legacy_history_item_invalid")
                 seen_commands.add(command_id)
@@ -597,7 +970,7 @@ def _scan_legacy_invocations(
                 count += 1
                 if requested >= cutoff:
                     recent_count += 1
-                if status not in LEGACY_TERMINAL_STATUSES:
+                if status not in TERMINAL_STATUSES:
                     nonterminal_count += 1
                 plane.update({
                     "count": count, "recent_count": recent_count,
@@ -733,6 +1106,56 @@ def _host_identity(evidence: Mapping[str, object]) -> tuple[object, ...]:
     )
 
 
+def classify_host_prestate(evidence: Mapping[str, object]) -> str:
+    """Classify only coherent legacy/current host artifact states."""
+
+    worker = evidence.get("worker_present") is True
+    validator = evidence.get("validator_present") is True
+    binding = evidence.get("binding_present") is True
+    if not worker and not validator and not binding:
+        return "all-absent"
+    metadata_valid = all(
+        evidence.get(name) is True for name in (
+            "worker_metadata_valid", "validator_metadata_valid",
+            "binding_metadata_valid",
+        )
+    )
+    binding_identity_valid = (
+        isinstance(evidence.get("source_sha"), str)
+        and SOURCE_RE.fullmatch(str(evidence.get("source_sha"))) is not None
+        and isinstance(evidence.get("shadow_document_sha256"), str)
+        and HASH_RE.fullmatch(str(evidence.get("shadow_document_sha256"))) is not None
+        and isinstance(evidence.get("rollout_attempt_id"), str)
+        and ID_RE.fullmatch(str(evidence.get("rollout_attempt_id"))) is not None
+    )
+    worker_coherent = (
+        worker
+        and evidence.get("observed_worker_sha256")
+        == evidence.get("worker_sha256")
+        and isinstance(evidence.get("worker_sha256"), str)
+        and HASH_RE.fullmatch(str(evidence.get("worker_sha256"))) is not None
+    )
+    if (
+        worker_coherent and not validator and binding and metadata_valid
+        and binding_identity_valid
+    ):
+        if evidence.get("validator_sha256") == "":
+            return "legacy-worker-binding"
+    validator_coherent = (
+        validator
+        and evidence.get("observed_validator_sha256")
+        == evidence.get("validator_sha256")
+        and isinstance(evidence.get("validator_sha256"), str)
+        and HASH_RE.fullmatch(str(evidence.get("validator_sha256"))) is not None
+    )
+    if (
+        worker_coherent and validator_coherent and binding and metadata_valid
+        and binding_identity_valid
+    ):
+        return "current-artifact-set"
+    return "incoherent"
+
+
 def _write_audit(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -761,12 +1184,14 @@ def execute(
     *,
     drain_sleeper: Callable[[float], None] = time.sleep,
     drain_monotonic: Callable[[], float] = time.monotonic,
+    acceptance_sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
-    """Install the host pair, update/default/read back, or roll both back."""
+    """Install the host artifact set, update/default/read back, or roll back."""
 
     if SOURCE_RE.fullmatch(source_sha) is None or source_sha != os.getenv("GITHUB_SHA"):
         raise RolloutError("source_sha_mismatch")
     worker = WORKER_PATH.read_bytes()
+    validator = VALIDATOR_PATH.read_bytes()
     shadow_raw = SHADOW_DOCUMENT_PATH.read_bytes()
     shadow_object, shadow_canonical = canonical_json(shadow_raw)
     rollout_source = ROLLOUT_DOCUMENT_PATH.read_bytes()
@@ -774,6 +1199,7 @@ def execute(
     rollout = RolloutTuple(
         source_sha=source_sha,
         worker_sha256=sha256(worker),
+        validator_sha256=sha256(validator),
         shadow_document_sha256=sha256(shadow_canonical),
         shadow_document_raw_sha256=sha256(shadow_raw),
         rollout_document_sha256=sha256(rollout_source),
@@ -792,6 +1218,7 @@ def execute(
         "role_name": ROLLOUT_ROLE_NAME, "rollout_document": ROLLOUT_DOCUMENT,
         "shadow_document": SHADOW_DOCUMENT,
         "worker_sha256": rollout.worker_sha256,
+        "validator_sha256": rollout.validator_sha256,
         "shadow_document_raw_sha256": rollout.shadow_document_raw_sha256,
         "shadow_document_sha256": rollout.shadow_document_sha256,
         "rollout_document_sha256": rollout.rollout_document_sha256,
@@ -800,6 +1227,11 @@ def execute(
         "default_transitions": [], "rollback": False,
         "rollback_failure_category": None, "skew": False,
         "legacy_transition": None,
+        "host_prestate_classification": None, "preexisting_skew": False,
+        "host_observed_after_send_error": None,
+        "send_error_readback_category": None,
+        "host_observed_after_uncertain": None,
+        "host_rollback_observed": None,
     }
     previous_default = ""
     pre_host: dict[str, object] | None = None
@@ -847,6 +1279,12 @@ def execute(
             )
         pre_host = aws.send("readback", rollout)
         audit["host_before"] = pre_host
+        prestate_classification = classify_host_prestate(pre_host)
+        audit["host_prestate_classification"] = prestate_classification
+        if prestate_classification == "incoherent":
+            audit["preexisting_skew"] = True
+            audit["skew"] = True
+            raise RolloutError("host_prestate_incoherent")
         audit["phase"] = "host_applying"
         install_started = True
         try:
@@ -861,7 +1299,34 @@ def execute(
                 or install_record.get("accepted") == "uncertain"
                 or install_record.get("status") == "unknown"
             )
-            raise
+            if not install_acceptance_uncertain:
+                raise
+            try:
+                audit["host_observed_after_send_error"] = aws.send(
+                    "readback", rollout
+                )
+            except RolloutError as readback_error:
+                audit["send_error_readback_category"] = readback_error.category
+            try:
+                new_host = aws.reconcile_acceptance(
+                    "install", rollout, expect_tuple=True,
+                    sleeper=acceptance_sleeper,
+                )
+            except RolloutError:
+                install_record = next(
+                    (
+                        item for item in reversed(aws.commands)
+                        if item.get("action") == "install"
+                    ),
+                    None,
+                )
+                install_acceptance_uncertain = (
+                    not isinstance(install_record, dict)
+                    or install_record.get("accepted") == "uncertain"
+                    or install_record.get("status") == "unknown"
+                )
+                raise
+            install_acceptance_uncertain = False
         audit["host_new"] = new_host
         audit["phase"] = "host_applied"
         audit["phase"] = "document_applying"
@@ -941,6 +1406,14 @@ def execute(
                 audit["host_reconciled_after_failure"] = reconciled
                 if pre_host is None:
                     raise RolloutError("host_prestate_missing")
+                if install_acceptance_uncertain:
+                    audit["host_observed_after_uncertain"] = reconciled
+                    if _host_identity(reconciled) != _host_identity(pre_host):
+                        restored = aws.send("rollback", rollout)
+                        audit["host_rollback_observed"] = restored
+                        if _host_identity(restored) != _host_identity(pre_host):
+                            raise RolloutError("host_rollback_mismatch")
+                    raise RolloutError("install_acceptance_unresolved")
                 if _host_identity(reconciled) != _host_identity(pre_host):
                     restored = aws.send("rollback", rollout)
                     audit["host_final"] = restored
@@ -948,8 +1421,6 @@ def execute(
                         raise RolloutError("host_rollback_mismatch")
                 else:
                     audit["host_final"] = reconciled
-                if install_acceptance_uncertain:
-                    raise RolloutError("install_acceptance_uncertain")
                 audit["phase"] = "rolled_back"
             except RolloutError as rollback_error:
                 audit["rollback_failure_category"] = rollback_error.category

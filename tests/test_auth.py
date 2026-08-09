@@ -336,8 +336,11 @@ def test_client_construction_is_network_lazy_and_explicit_readiness_uses_shared_
     )
 
     session.post.assert_not_called()
-    assert client.base._session is session
-    assert client.auth._session is session
+    assert not hasattr(client, "base")
+    assert not hasattr(client, "auth")
+    assert not hasattr(client, "account")
+    assert client._base._session is session
+    assert client._auth._session is session
 
     client.ensure_auth_ready()
 
