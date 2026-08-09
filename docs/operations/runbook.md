@@ -1,5 +1,41 @@
 # Operations runbook
 
+## Shadow evidence validator skew
+
+Shadow activation and stop require the rollout evidence tuple's worker,
+validator, and canonical activation-document SHA-256 values. A missing
+`/usr/local/libexec/kiwoom-shadow-runtime-evidence.py`, metadata other than
+root:root `0750` regular/non-symlink/link-count-1, a hash mismatch, or a binding
+marker mismatch is a fail-closed supply-chain event. Do not copy one file by
+hand or bypass the marker. Keep activation paused, inspect the bounded rollout
+audit, restore the complete attempt backup artifact set if rollback was not
+confirmed, and perform a protected exact-source rollout before retrying.
+
+The validator accepts only bounded JSON-lines or SSM invocation JSON and emits
+stable safe categories; raw stdout, stderr, logs, and credentials are not copied
+into failure evidence. Local validator tests are not AWS/EC2 path validation.
+Unknown/missing top-level or side-effect fields, duplicate/non-finite JSON,
+noncanonical KST dates, and non-finite timing evidence are schema failures and
+must not be bypassed.
+
+Do not roll out a new shadow artifact set while the fixed
+`kiwoom-shadow-once` container exists, including exited/deadline-completed or
+unexpected-label states. The host guard must accept only a successful empty
+exact-name Docker inventory and reject daemon/permission failures before backup,
+download, or publish so the old tuple remains available for stop. Stop and remove
+the exact old container, verify absence, then retry rollout. `preexisting_skew=true` means binding hashes
+did not match observed worker/validator bytes; preserve the audit and recover the
+coherent prior set rather than treating exact restoration of incoherent bytes as
+success.
+
+If `send-command` returns an error, do not dispatch another install. The rollout
+uses its exact attempt/action comment and full parameter tuple to reconcile at
+most one accepted command through bounded `ListCommands` and
+`ListCommandInvocations`, then waits for terminal evidence. If audit
+`rollback_failure_category` is `install_acceptance_unresolved`, `host_final` is
+intentionally absent and `skew=true`; keep activation paused because a late
+install has not been temporally closed.
+
 ## Kill-switch terminal stop
 
 A process exit code of `1` accompanied by `kill_switch` is an abnormal safety stop. It does **not** mean that positions
@@ -67,3 +103,32 @@ If persistence shutdown fails:
 The relative default `trades.db` exists only for legacy direct callers. Managed runs must use an explicit safe path. A
 permission or missing-parent error at `/var/lib/kiwoom/trades.db` is a startup failure, not permission to create a
 fallback DB elsewhere.
+
+## Overnight-safe binary downgrade preflight
+
+An older binary reads only `OPEN` rows, so a downgrade is blocked unless the exact preserved SQLite database has zero
+`OVERNIGHT` rows. This check does not perform rollback or repair data.
+
+1. Stop the current worker normally and verify the exact container is absent and its SQLite connections are closed.
+2. Mount the preserved target volume read-only into the current r1 image or an equivalent installed r1 package.
+3. Run only the following command with the absolute in-container path of that database:
+
+   ```bash
+   python -m kiwoom_stock downgrade-preflight \
+     --database-path /absolute/path/to/shadow-trades.db
+   ```
+
+4. Preserve the one-line JSON evidence. Downgrade may be considered only when exit code is `0`, `status` is `PASS`,
+   `active_overnight_count` is exactly `0`, `read_only` is `true`, `database_writes` is `0`, and
+   `database_identity` equals the inspected mounted path.
+5. Exit code `2`/`BLOCKED` means one or more OVERNIGHT rows remain. Exit code `1`/`FAILED`, stale evidence, relative or
+   different paths, and the unrelated ephemeral `--rollback-check` are not downgrade approval.
+
+The command never opens the source with SQLite. On Linux it reads source main/WAL/SHM/journal inventory through raw
+`O_NOFOLLOW | O_NOATIME` read-only handles, copies only main and WAL into an isolated temporary directory, and opens
+SQLite only on that temporary copy. Source SHM is attested but not copied. Any source rollback journal blocks approval
+with `SOURCE_BUSY`; a source-family change during inspection fails with `SOURCE_CHANGED`. If no-atime access cannot be
+guaranteed, `NOATIME_UNAVAILABLE` fails closed rather than retrying without that protection. Run the command as the
+database owner (or with the narrowly administered filesystem capability required for `O_NOATIME`) while the worker is
+stopped. A blocked database must remain on the current binary until normal next-session reconciliation, or until a
+separately approved backup and administrative data-reconciliation procedure exists.

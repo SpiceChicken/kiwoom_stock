@@ -54,6 +54,7 @@ jobs:
           [[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
           bash -n deploy/ec2/shadow_worker_control.sh
+          python3 -c 'compile(open("deploy/ec2/shadow_runtime_evidence.py", encoding="utf-8").read(), "deploy/ec2/shadow_runtime_evidence.py", "exec")'
           python3 - <<'PY'
           import hashlib
           import json
@@ -68,11 +69,13 @@ jobs:
               return result
 
           worker = Path("deploy/ec2/shadow_worker_control.sh").read_bytes()
+          validator = Path("deploy/ec2/shadow_runtime_evidence.py").read_bytes()
           raw = Path("deploy/ssm/shadow-worker-document.yaml").read_bytes()
           value = json.loads(raw, object_pairs_hook=reject)
           canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
           rollout = Path("deploy/ssm/shadow-worker-rollout-document.yaml").read_bytes()
           print("worker_sha256=" + hashlib.sha256(worker).hexdigest())
+          print("validator_sha256=" + hashlib.sha256(validator).hexdigest())
           print("shadow_document_raw_sha256=" + hashlib.sha256(raw).hexdigest())
           print("shadow_document_sha256=" + hashlib.sha256(canonical).hexdigest())
           print("rollout_document_sha256=" + hashlib.sha256(rollout).hexdigest())

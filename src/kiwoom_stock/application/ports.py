@@ -1,7 +1,7 @@
 """Application ports that isolate core logic from infrastructure."""
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 from typing import (
@@ -13,9 +13,10 @@ from typing import (
     Sequence,
     Tuple,
     TYPE_CHECKING,
+    runtime_checkable,
 )
 
-from kiwoom_stock.domain.models import Position
+from kiwoom_stock.domain.models import Position, PositionStatus
 
 if TYPE_CHECKING:
     from kiwoom_stock.application.reporting import (
@@ -23,6 +24,13 @@ if TYPE_CHECKING:
         DailyReportStats,
         NarrationResult,
         ReportArtifact,
+    )
+    from kiwoom_stock.domain.state import (
+        PhysicalStateBatchCommitReceipt,
+        PhysicalStateCommitReceipt,
+        PhysicalStateLoadResult,
+        PhysicalStateWrite,
+        PhysicalTrackerState,
     )
 
 
@@ -322,6 +330,33 @@ def _validate_iso_date(value: str) -> None:
         raise ValueError("target_date must use YYYY-MM-DD")
 
 
+class MarketDataFailureKind(str, Enum):
+    """Provider-neutral failure taxonomy for one market-data operation."""
+
+    EMPTY = "empty"
+    FETCH = "fetch"
+    TIMEOUT = "timeout"
+    PARSE = "parse"
+    MALFORMED = "malformed"
+
+
+class MarketDataCollectionError(RuntimeError):
+    """A market input could not be safely fetched or interpreted."""
+
+    def __init__(self, kind: MarketDataFailureKind, operation: str) -> None:
+        self.kind = kind
+        self.operation = operation
+        super().__init__(f"market data {operation} failed ({kind.value})")
+
+
+class PhysicalStatePersistenceError(RuntimeError):
+    """A physical-state write failed before durable acknowledgement."""
+
+
+class PhysicalStateCommitUnknownError(PhysicalStatePersistenceError):
+    """A commit acknowledgement timed out and durability is unknown."""
+
+
 class MarketDataGateway(Protocol):
     """Market-data boundary used by monitoring and analysis orchestration."""
 
@@ -350,20 +385,79 @@ class MarketDataGateway(Protocol):
         """Return raw recent-tick rows."""
 
 
+class PaperTradePersistenceError(RuntimeError):
+    """A paper-position read or transition failed closed."""
+
+
+@dataclass(frozen=True)
+class PositionTransitionReceipt:
+    """Committed identity and metadata for one durable status transition."""
+
+    position_id: int
+    stock_code: str
+    previous_status: PositionStatus
+    status: PositionStatus
+    owning_session_date: date
+    state_changed_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.position_id) is not int or self.position_id <= 0:
+            raise ValueError("position transition id must be positive")
+        if not isinstance(self.stock_code, str) or not self.stock_code:
+            raise ValueError("position transition stock code is required")
+        if not isinstance(self.previous_status, PositionStatus):
+            raise TypeError("previous status must be PositionStatus")
+        if not isinstance(self.status, PositionStatus):
+            raise TypeError("status must be PositionStatus")
+        if not isinstance(self.owning_session_date, date):
+            raise TypeError("owning session date must be a date")
+        if (
+            not isinstance(self.state_changed_at, datetime)
+            or self.state_changed_at.tzinfo is None
+            or self.state_changed_at.utcoffset() is None
+        ):
+            raise ValueError("state_changed_at must be aware")
+
+
 class PaperTradeLedger(Protocol):
     """Paper-trade persistence used by the engine and stock manager."""
 
-    def load_open_positions(self) -> Dict[str, Dict[str, Any]]:
-        """Return the exact ``OPEN`` rows keyed by stock code."""
+    def load_active_positions(self) -> Dict[str, Dict[str, Any]]:
+        """Return strict ``OPEN`` and ``OVERNIGHT`` rows keyed by stock code."""
 
     def record_buy(self, data: Dict[str, Any]) -> int:
         """Persist one paper buy and return its ledger identifier."""
 
-    def record_sell(self, position: Position) -> None:
-        """Close the paper-trade row represented by ``position``."""
+    def record_sell(
+        self,
+        position: Position,
+        *,
+        state_changed_at: Optional[datetime] = None,
+    ) -> PositionTransitionReceipt:
+        """Conditionally close one ``OPEN`` paper-trade row."""
 
-    def get_today_realized_pnl(self) -> float:
-        """Return today's realized percentage PnL using the existing formula."""
+    def mark_position_overnight(
+        self,
+        position: Position,
+        *,
+        state_changed_at: datetime,
+    ) -> PositionTransitionReceipt:
+        """Commit one conditional ``OPEN -> OVERNIGHT`` transition."""
+
+    def reopen_position(
+        self,
+        position: Position,
+        *,
+        owning_session_date: date,
+        state_changed_at: datetime,
+    ) -> PositionTransitionReceipt:
+        """Commit one conditional ``OVERNIGHT -> OPEN`` transition."""
+
+    def get_cumulative_realized_trade_return_score(
+        self,
+        session_date: date,
+    ) -> float:
+        """Return the simple sum of closed per-trade returns for one XKRX session."""
 
     def flush(self) -> None:
         """Wait for every accepted physical-state task to finish."""
@@ -372,14 +466,25 @@ class PaperTradeLedger(Protocol):
         """Drain accepted work and release owned persistence resources."""
 
 
+@runtime_checkable
 class PhysicalStateRepository(Protocol):
     """Persistence boundary for physics-state recovery and snapshots."""
 
-    def get_last_physical_state(self, stock_code: str) -> Optional[Mapping[str, Any]]:
-        """Return the last persisted physics state for ``stock_code`` if available."""
+    def load_physical_state(self, stock_code: str) -> "PhysicalStateLoadResult":
+        """Return a validated current snapshot or an explicit cold-start result."""
 
-    def submit_physical_state(self, stock_code: str, forces: Mapping[str, Any]) -> None:
-        """Submit a physics-state snapshot without blocking tick processing."""
+    def persist_physical_state(
+        self,
+        state: "PhysicalTrackerState",
+        forces: Mapping[str, Any],
+    ) -> "PhysicalStateCommitReceipt":
+        """Return only after one complete tracker/force snapshot commits."""
+
+    def persist_physical_state_batch(
+        self,
+        writes: Sequence["PhysicalStateWrite"],
+    ) -> "PhysicalStateBatchCommitReceipt":
+        """Atomically commit a non-empty ordered physical-state batch."""
 
     def close(self) -> None:
         """Reject new snapshots while the owning ledger drains accepted work."""

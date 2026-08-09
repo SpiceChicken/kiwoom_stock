@@ -67,9 +67,7 @@ def mock_strategy_config():
     return {
         "debug_mode": True,
         "score_decay_rate": 0.25,
-        "target_profit_rate": 0.03,
-        "stop_loss_rate": -0.03,
-        "total_loss_limit": -50.0,
+        "cumulative_trade_return_score_floor": -50.0,
         "entry_deadline": "15:00",
         "day_trade_exit_time": "15:30",
         "momentum_threshold": 10.0,

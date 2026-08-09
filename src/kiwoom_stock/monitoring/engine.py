@@ -8,13 +8,18 @@ import logging
 import threading
 import time as time_mod
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
-import warnings
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union, cast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from kiwoom_stock.application.ports import PaperTradeLedger, PhysicalStateRepository
+from kiwoom_stock.application.ports import (
+    MarketDataGateway,
+    PaperTradeLedger,
+    PaperTradePersistenceError,
+    PhysicalStateRepository,
+)
 from kiwoom_stock.application.session import (
     CriticalNotificationOutcome,
+    CycleContext,
     SessionEndReason,
     TradingSessionResult,
 )
@@ -22,9 +27,19 @@ from .analyzer import MarketAnalyzer
 from .strategy import TradingStrategy
 from .manager import StockManager
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
-from kiwoom_stock.core.database import TradeLogger
-from kiwoom_stock.infrastructure.physical_state_repository import AsyncPhysicalStateRepository
 from kiwoom_stock.monitoring.manager import Position
+from kiwoom_stock.domain.models import (
+    PhysicalContinuityEvidence,
+    PositionDecision,
+    PositionStatus,
+)
+from kiwoom_stock.domain.strategy import TargetStopPolicy
+from kiwoom_stock.utils.market_cal import (
+    KrxCalendarError,
+    current_krx_session,
+    require_aware_kst,
+    seoul_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +60,13 @@ class TradingEngine:
         client,
         config: Dict,
         *,
-        ledger: Optional[PaperTradeLedger] = None,
-        physical_state_repository: Optional[PhysicalStateRepository] = None,
+        ledger: PaperTradeLedger,
+        physical_state_repository: PhysicalStateRepository,
+        market_gateway: MarketDataGateway,
+        target_stop_policy: Optional[TargetStopPolicy] = None,
         notifier: Optional[Any] = None,
         paper_transition_guard: Optional[Callable[[], None]] = None,
-        wall_clock: Callable[[], datetime] = datetime.now,
+        wall_clock: Callable[[], datetime] = seoul_now,
         stop_event: Optional[threading.Event] = None,
         deadline_remaining: Optional[Callable[[], float]] = None,
     ):
@@ -76,36 +93,13 @@ class TradingEngine:
         self._last_check_time: Dict[str, float] = {}
         self._last_global_update = 0.0  # 시황/조건검색 업데이트용 타이머
         self._terminal_result: Optional[TradingSessionResult] = None
+        self._wall_clock = wall_clock
         self._paper_only = paper_transition_guard is not None
         self._stop_event = stop_event
         self._deadline_remaining = deadline_remaining
         self._shadow_cycle_lock = threading.Lock()
         self._shadow_cycle_state = "not-started"
 
-        if (ledger is None) != (physical_state_repository is None):
-            raise ValueError(
-                "ledger and physical_state_repository must be injected together"
-            )
-
-        fallback_owned = ledger is None
-        if fallback_owned:
-            warning_message = (
-                "TradingEngine(client, config) persistence fallback is deprecated; "
-                "inject the configured ledger and physical-state repository"
-            )
-            warnings.warn(warning_message, DeprecationWarning, stacklevel=2)
-            logger.warning(warning_message)
-            fallback_ledger = TradeLogger()
-            try:
-                fallback_repository = AsyncPhysicalStateRepository(fallback_ledger)
-            except BaseException:
-                self._close_constructor_fallback(None, fallback_ledger)
-                raise
-            ledger = fallback_ledger
-            physical_state_repository = fallback_repository
-
-        assert ledger is not None
-        assert physical_state_repository is not None
         self.db = ledger
         self.physical_state_repository = physical_state_repository
 
@@ -116,23 +110,28 @@ class TradingEngine:
                 if self._paper_only
                 else PhysicalStateTracker(self.physical_state_repository)
             )
+            analyzer_kwargs: Dict[str, Any] = {}
+            if self._paper_only:
+                analyzer_kwargs["clock"] = wall_clock
             self.analyzer = MarketAnalyzer(
-                client.market,
+                market_gateway,
                 config.get("market", {}),
                 self.state_tracker,
+                **analyzer_kwargs,
             )
-            self.strategy = (
-                TradingStrategy(config.get("strategy", {}), clock=wall_clock)
-                if self._paper_only
-                else TradingStrategy(config.get("strategy", {}))
+            strategy_kwargs: Dict[str, Any] = {"clock": wall_clock}
+            if target_stop_policy is not None:
+                strategy_kwargs["target_stop_policy"] = target_stop_policy
+            self.strategy = TradingStrategy(
+                config.get("strategy", {}),
+                **strategy_kwargs,
             )
-            manager_kwargs: Dict[str, Any] = {}
+            manager_kwargs: Dict[str, Any] = {"clock": wall_clock}
             if paper_transition_guard is not None:
                 manager_kwargs["paper_transition_guard"] = paper_transition_guard
-                manager_kwargs["clock"] = wall_clock
                 manager_kwargs["strict_paper_errors"] = True
             self.stock_mgr = StockManager(
-                client.market, self.db, config.get("filters", {}), **manager_kwargs
+                market_gateway, self.db, config.get("filters", {}), **manager_kwargs
             )
             if notifier is not None:
                 self.notifier = notifier
@@ -143,11 +142,6 @@ class TradingEngine:
                 self.notifier = notifier_factory(self.stock_mgr.stock_names, config)
             self.executor = ThreadPoolExecutor(max_workers=config.get("max_workers", 8))
         except BaseException:
-            if fallback_owned:
-                self._close_constructor_fallback(
-                    self.physical_state_repository,
-                    self.db,
-                )
             raise
         logger.info("Trading Engine Initialized with Dynamic Polling.")
 
@@ -184,6 +178,8 @@ class TradingEngine:
             }
             if metrics.cur_prc <= 0.0 or set(getattr(metrics, "forces", {})) != required_forces:
                 raise RuntimeError("shadow market calculation contract failed")
+            if not isinstance(metrics.continuity, PhysicalContinuityEvidence):
+                raise RuntimeError("shadow continuity evidence is unavailable")
             verdicts = self._evaluate_stocks([stock_code])
             self._checkpoint_shadow_lifecycle()
             if len(verdicts) != 1:
@@ -197,6 +193,7 @@ class TradingEngine:
                 "target_count": 1,
                 "verdict_count": len(verdicts),
                 "market_regime": self.analyzer.market_regime.value,
+                "continuity": metrics.continuity,
             }
         finally:
             with self._shadow_cycle_lock:
@@ -233,45 +230,13 @@ class TradingEngine:
         
         while True:
             try:
-                # 1. 운영 시간 및 리스크 점검
-                if not self._check_system_status():
-                    terminal_result = cast(
-                        Optional[TradingSessionResult],
-                        getattr(self, "_terminal_result", None),
-                    )
-                    if terminal_result is not None:
-                        return terminal_result
-                    if not self.strategy.is_monitoring_time():
-                        return TradingSessionResult(reason=SessionEndReason.MARKET_CLOSED)
-                    time_mod.sleep(60)
-                    continue
-
+                context = self._create_cycle_context()
+                if context is None:
+                    return TradingSessionResult(reason=SessionEndReason.MARKET_CLOSED)
                 now = time_mod.time()
-
-                # 2. [글로벌 업데이트] API 부하가 큰 시황/조건검색은 60초에 한 번만 갱신
-                if now - getattr(self, '_last_global_update', 0) >= 60.0:
-                    self.analyzer.update_regime()
-                    self.strategy.update_context(self.analyzer.market_regime)
-                    self.stock_mgr.update_target_stocks()
-                    self._last_global_update = now
-
-                # 3. [동적 폴링] 이번 틱(Tick)에 검사해야 할 타겟만 영리하게 추출
-                due_targets = self._get_due_targets()
-
-                if not due_targets:
-                    # 검사할 종목이 없으면 엔진은 1초만 대기하고 바로 다음 루프 회전
-                    time_mod.sleep(1)
-                    continue
-
-                # 4. 사이클 준비 및 평가 (추출된 타겟만 API 호출)
-                self._prepare_cycle(due_targets)
-                verdicts = self._evaluate_stocks(due_targets)
-
-                # 5. 매매 의사 결정 및 집행
-                self._process_decisions(verdicts)
-
-                # 6. 주기적 리포팅
-                self.notifier.flush_status(self.analyzer.market_regime.value)
+                terminal_result = self._run_normal_cycle(context, now)
+                if terminal_result is not None:
+                    return terminal_result
                 
                 # 메인 루프는 1초마다 초고속으로 회전함 (종목별 간격 조절은 _get_due_targets가 담당)
                 time_mod.sleep(1)
@@ -284,25 +249,81 @@ class TradingEngine:
                 self.notifier.notify_error(str(e))
                 time_mod.sleep(10)
 
-    @staticmethod
-    def _close_constructor_fallback(
-        physical_state_repository: Optional[PhysicalStateRepository],
-        ledger: PaperTradeLedger,
-    ) -> None:
-        """Release direct-constructor fallback resources without masking its error."""
-        for label, resource in (
-            ("physical-state repository", physical_state_repository),
-            ("paper ledger", ledger),
-        ):
-            if resource is None:
-                continue
-            try:
-                resource.close()
-            except BaseException:
-                logger.exception(
-                    "Failed to close fallback %s after engine construction error.",
-                    label,
-                )
+    def _create_cycle_context(self) -> Optional[CycleContext]:
+        """Read the normal-cycle wall clock exactly once and resolve its session."""
+
+        try:
+            now = require_aware_kst(self._wall_clock(), "normal cycle clock")
+            session_date = current_krx_session(now)
+        except KrxCalendarError:
+            raise
+        except Exception as error:
+            raise KrxCalendarError("normal cycle context is unavailable") from error
+        if session_date is None:
+            return None
+        return CycleContext(now=now, xkrx_session_date=session_date)
+
+    def _run_normal_cycle(
+        self,
+        context: CycleContext,
+        selected_at: float,
+    ) -> Optional[TradingSessionResult]:
+        """Run one fail-closed normal cycle in the authoritative safety order."""
+
+        terminal = cast(
+            Optional[TradingSessionResult], getattr(self, "_terminal_result", None)
+        )
+        if terminal is not None:
+            return terminal
+        if not self._check_monitoring_status(context):
+            return TradingSessionResult(reason=SessionEndReason.MARKET_CLOSED)
+
+        self.stock_mgr.reconcile_overnight_positions(context)
+
+        if selected_at - getattr(self, '_last_global_update', 0) >= 60.0:
+            self.analyzer.update_regime()
+            self.strategy.update_context(self.analyzer.market_regime)
+            self.stock_mgr.update_target_stocks()
+            self._last_global_update = selected_at
+
+        due_targets = self._get_due_targets()
+        if not due_targets:
+            return None
+
+        batch_targets = self._complete_cycle_targets(due_targets)
+        self._prepare_cycle(batch_targets)
+        fresh_marks = self._fresh_active_marks(batch_targets)
+        terminal = self._check_terminal_status(context, fresh_marks)
+        if terminal is not None:
+            return terminal
+
+        self._ack_due_targets(due_targets, selected_at)
+        verdicts = self._evaluate_stocks(batch_targets)
+        self._process_decisions(verdicts, context)
+        self.notifier.flush_status(self.analyzer.market_regime.value)
+        return None
+
+    def _complete_cycle_targets(self, due_targets: List[str]) -> List[str]:
+        """Include every active code in one deterministic fresh batch generation."""
+
+        if not due_targets or len(due_targets) != len(set(due_targets)):
+            raise ValueError("due targets must be a non-empty unique batch")
+        return sorted(set(due_targets).union(self.stock_mgr.active_positions))
+
+    def _fresh_active_marks(self, batch_targets: List[str]) -> Mapping[str, float]:
+        """Extract exact marks only from the just-published complete batch."""
+
+        batch_codes = set(batch_targets)
+        active_codes = set(self.stock_mgr.active_positions)
+        if not active_codes.issubset(batch_codes):
+            raise RuntimeError("fresh batch omitted an active position")
+        marks: Dict[str, float] = {}
+        for code in sorted(active_codes):
+            metrics = self.analyzer.supply_cache.get(code)
+            if metrics is None:
+                raise RuntimeError(f"fresh active mark is unavailable: {code}")
+            marks[code] = metrics.cur_prc
+        return marks
 
     def _assert_open_for_work(self) -> None:
         if (
@@ -441,40 +462,71 @@ class TradingEngine:
                 target_interval = self.fast_interval
             else:
                 target_interval = self.slow_interval
-                
+
             # 시간이 도래한 종목만 스캔 리스트에 추가
             if now - last_checked >= target_interval:
                 due_stocks.append(code)
-                self._last_check_time[code] = now
-                
+
         return due_stocks
 
-    def _check_system_status(self) -> bool:
-        """[Check 1] 장 운영 시간 및 킬스위치 점검"""
+    def _ack_due_targets(self, targets: List[str], selected_at: float) -> None:
+        """Advance polling timestamps only after one successful batch publish."""
+
+        if not targets or len(targets) != len(set(targets)):
+            raise ValueError("polling acknowledgement targets must be unique")
+        if any(code not in self.stock_mgr.stocks for code in targets):
+            raise ValueError("polling acknowledgement target is not selected")
+        if isinstance(selected_at, bool) or not isinstance(selected_at, (int, float)):
+            raise TypeError("polling acknowledgement timestamp must be numeric")
+        next_check_time = dict(self._last_check_time)
+        next_check_time.update({code: float(selected_at) for code in targets})
+        self._last_check_time = next_check_time
+
+    def _check_monitoring_status(self, context: CycleContext) -> bool:
+        """Check only terminal/session monitoring admission for this context."""
+
         if getattr(self, "_terminal_result", None) is not None:
             return False
-
-        # 1. 시간 체크
-        if not self.strategy.is_monitoring_time():
+        if not self.strategy.is_monitoring_time(context.now):
             logger.info("Outside of trading hours.")
             return False
-
-        # 2. 킬스위치(누적 손실) 체크
-        total_pnl = self.stock_mgr.get_total_pnl_status(self.db.get_today_realized_pnl())
-        if self.strategy.is_kill_switch_activated(total_pnl):
-            self._terminal_result = self._create_kill_switch_result(total_pnl)
-            return False
-            
         return True
 
-    def _create_kill_switch_result(self, total_pnl: float) -> TradingSessionResult:
+    def _check_terminal_status(
+        self,
+        context: CycleContext,
+        fresh_active_marks: Mapping[str, float],
+    ) -> Optional[TradingSessionResult]:
+        """Purely score current fresh marks, then latch a terminal result if due."""
+
+        realized_score = self.db.get_cumulative_realized_trade_return_score(
+            context.xkrx_session_date
+        )
+        cumulative_score = (
+            self.stock_mgr.calculate_fresh_cumulative_trade_return_score(
+                realized_score,
+                fresh_active_marks,
+            )
+        )
+        if self.strategy.is_kill_switch_activated(cumulative_score):
+            self._terminal_result = self._create_kill_switch_result(cumulative_score)
+            return self._terminal_result
+        return None
+
+    def _create_kill_switch_result(
+        self,
+        cumulative_trade_return_score: float,
+    ) -> TradingSessionResult:
         """Latch a terminal stop without creating orders or mutating the ledger."""
-        loss_limit = self.strategy.total_loss_limit
+        score_floor = self.strategy.cumulative_trade_return_score_floor
         unresolved_codes = tuple(sorted(self.stock_mgr.active_positions))
         message = (
-            f"🚨 KILL-SWITCH ACTIVATED (PnL: {total_pnl:.1f}%, "
-            f"Limit: {loss_limit:.1f}%) | 자동 청산을 실행하지 않았습니다. "
-            f"미해결 활성 포지션: {len(unresolved_codes)}개"
+            "🚨 KILL-SWITCH ACTIVATED — "
+            f"Cumulative trade return score: {cumulative_trade_return_score:.1f} "
+            "percentage-points; "
+            f"floor: {score_floor:.1f} percentage-points. "
+            "No automatic liquidation was attempted. "
+            f"Unresolved active positions: {len(unresolved_codes)}."
         )
         logger.critical(message)
 
@@ -484,8 +536,8 @@ class TradingEngine:
             logger.exception("Critical notifier callable raised during kill-switch stop.")
             return TradingSessionResult(
                 reason=SessionEndReason.KILL_SWITCH,
-                total_pnl=total_pnl,
-                loss_limit=loss_limit,
+                cumulative_trade_return_score=cumulative_trade_return_score,
+                cumulative_trade_return_score_floor=score_floor,
                 unresolved_position_codes=unresolved_codes,
                 critical_notification_outcome=CriticalNotificationOutcome.CALL_RAISED,
                 critical_notification_error_type=type(error).__name__,
@@ -493,8 +545,8 @@ class TradingEngine:
 
         return TradingSessionResult(
             reason=SessionEndReason.KILL_SWITCH,
-            total_pnl=total_pnl,
-            loss_limit=loss_limit,
+            cumulative_trade_return_score=cumulative_trade_return_score,
+            cumulative_trade_return_score_floor=score_floor,
             unresolved_position_codes=unresolved_codes,
             critical_notification_outcome=CriticalNotificationOutcome.CALL_RETURNED,
         )
@@ -503,11 +555,6 @@ class TradingEngine:
         """[Pre-process] 선택된 타겟(Fast or Slow)의 최신 API 데이터만 선별 수집"""
         self._checkpoint_shadow_lifecycle()
         self._assert_open_for_work()
-        for stock_code in targets:
-            self._checkpoint_shadow_lifecycle()
-            if stock_code not in self.state_tracker._l1_cache:
-                self.state_tracker.recover_state_from_crash(stock_code)
-                
         # [최적화] 전체 50개가 아닌 due_targets(예: 3개)에 대해서만 API 호출
         self.analyzer.update_priority_supply(targets)
         self._checkpoint_shadow_lifecycle()
@@ -534,7 +581,7 @@ class TradingEngine:
                     raise
                 logger.error(f"Eval Error ({futures[f]}): {e}")
         self._checkpoint_shadow_lifecycle()
-        return results
+        return sorted(results, key=lambda verdict: verdict["stock_code"])
 
     def _worker_task(self, code: str) -> Optional[Dict]:
         """[Worker] 단위 작업: 데이터 조회 + 전략 계산"""
@@ -547,41 +594,88 @@ class TradingEngine:
             return verdict
         return None
 
-    def _process_decisions(self, verdicts: List[Dict]):
+    def _process_decisions(
+        self,
+        verdicts: List[Dict],
+        context: Optional[CycleContext] = None,
+    ):
         """[Decision] 전략 결과를 바탕으로 매수/매도/관망 결정 (Orchestrator 역할)"""
+        if context is None:
+            self.stock_mgr.reconcile_overnight_positions()
         for verdict in verdicts:
             self._checkpoint_shadow_lifecycle()
-            self._log_status(verdict)
             stock_code = verdict['stock_code']
 
             # 1. 매도(청산) 검사 - 보유 중인 경우
             if stock_code in self.stock_mgr.active_positions:
+                persisted = self.stock_mgr.active_positions[stock_code]
+                if persisted.status is PositionStatus.OVERNIGHT:
+                    decision_args = (
+                        persisted,
+                        verdict["price"],
+                        verdict.get("forces", {}),
+                    )
+                    overnight_decision = (
+                        self.strategy.decide_position(*decision_args, context.now)
+                        if context is not None
+                        else self.strategy.decide_position(*decision_args)
+                    )
+                    if overnight_decision.decision is not PositionDecision.HOLD:
+                        raise PaperTradePersistenceError(
+                            "OVERNIGHT must reconcile to OPEN before a decision transition"
+                        )
+                    self._log_status(verdict)
+                    continue
                 pos = self.stock_mgr.update_position_data(verdict)
                 if not pos: continue
-                
-                forces = verdict.get('forces', {}) 
-                exit_reason = self.strategy.get_exit_reason(pos, verdict['price'], forces)
-                
-                if exit_reason:
+
+                self._log_status(verdict)
+                forces = verdict.get('forces', {})
+                decision_args = (
+                    pos,
+                    verdict['price'],
+                    forces,
+                )
+                decision = (
+                    self.strategy.decide_position(*decision_args, context.now)
+                    if context is not None
+                    else self.strategy.decide_position(*decision_args)
+                )
+
+                if decision.decision is PositionDecision.SELL:
+                    assert decision.reason is not None
+                    if pos.status is not PositionStatus.OPEN:
+                        raise PaperTradePersistenceError(
+                            "only OPEN can become CLOSED"
+                        )
                     if getattr(self, "_paper_only", False):
-                        self._execute_paper_transition('SELL', verdict, exit_reason)
+                        self._execute_paper_transition(
+                            'SELL', verdict, decision.reason, context
+                        )
                     else:
-                        self._execute_order('SELL', verdict, exit_reason)
+                        self._execute_order('SELL', verdict, decision.reason, context)
+                    if hasattr(self.strategy, '_kinetic_state'):
+                        self.strategy._kinetic_state.pop(stock_code, None)
+                elif decision.decision is PositionDecision.MARK_OVERNIGHT:
+                    self.stock_mgr.apply_paper_mark_overnight(pos, context)
                     if hasattr(self.strategy, '_kinetic_state'):
                         self.strategy._kinetic_state.pop(stock_code, None)
             
             # 2. 매수(진입) 검사 - 미보유 시
-            elif self._should_enter(verdict):
-                if getattr(self, "_paper_only", False):
-                    self._execute_paper_transition('BUY', verdict)
-                else:
-                    self._execute_order('BUY', verdict)
+            else:
+                self._log_status(verdict)
+                if self._should_enter(verdict, context):
+                    if getattr(self, "_paper_only", False):
+                        self._execute_paper_transition('BUY', verdict, context=context)
+                    else:
+                        self._execute_order('BUY', verdict, context=context)
 
     def _execute_paper_transition(
         self,
         side: str,
         verdict: Dict,
         reason: Optional[str] = None,
+        context: Optional[CycleContext] = None,
     ) -> None:
         """Apply a local shadow-paper transition with no broker capability."""
 
@@ -589,39 +683,53 @@ class TradingEngine:
         success = False
         data: Union[Dict, Position, None] = None
         if side == 'BUY':
-            success, data = self.stock_mgr.apply_paper_buy(verdict)
+            success, data = self.stock_mgr.apply_paper_buy(verdict, context)
             if success and isinstance(data, dict):
                 self.notifier.notify_buy(data)
         elif side == 'SELL':
             success, data = self.stock_mgr.apply_paper_sell(
-                verdict, reason if reason else "Unknown"
+                verdict, reason if reason else "Unknown", context
             )
             if success and isinstance(data, Position):
                 self.notifier.notify_sell(data)
         if not success:
             raise RuntimeError(f"shadow paper {side} transition failed: {code}")
 
-    def _should_enter(self, verdict: Dict) -> bool:
+    def _should_enter(
+        self,
+        verdict: Dict,
+        context: Optional[CycleContext] = None,
+    ) -> bool:
         """[Filter] 진입 조건 종합 검증 (시간, 중복, 신호)"""
         return (
-            self.strategy.is_trading_window() and
+            self.strategy.is_trading_window(
+                context.now if context is not None else None
+            ) and
             verdict['is_buy_signal'] and
             verdict['stock_code'] not in self.stock_mgr.active_positions
         )
 
-    def _execute_order(self, side: str, verdict: Dict, reason: Optional[str] = None):
+    def _execute_order(
+        self,
+        side: str,
+        verdict: Dict,
+        reason: Optional[str] = None,
+        context: Optional[CycleContext] = None,
+    ):
         """[Execution] 매매 집행 통합 메서드"""
         code = verdict['stock_code']
         success = False
         data: Union[Dict, Position, None] = None
 
         if side == 'BUY':
-            success, data = self.stock_mgr.process_buy_order(verdict)
+            success, data = self.stock_mgr.apply_paper_buy(verdict, context)
             if success and isinstance(data, dict): 
                 self.notifier.notify_buy(data)
         elif side == 'SELL':
             safe_reason = reason if reason else "Unknown"
-            success, data = self.stock_mgr.process_sell_order(verdict, safe_reason)
+            success, data = self.stock_mgr.apply_paper_sell(
+                verdict, safe_reason, context
+            )
             if success and isinstance(data, Position):
                 self.notifier.notify_sell(data)
 

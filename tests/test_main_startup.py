@@ -339,6 +339,8 @@ def test_valid_open_forwards_same_settings_and_date_before_existing_session_flow
         output_dir_str=str(tmp_path / "runtime" / "output" / "20260717"),
         monitor=monitor,
     )
+    runtime.shutdown_engine = monitor.close
+    runtime.close = MagicMock()
 
     def validate_settings():
         events.append("validate")

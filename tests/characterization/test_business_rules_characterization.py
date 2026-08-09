@@ -9,6 +9,14 @@ from kiwoom_stock.core import indicators
 from kiwoom_stock.core.physics_engine import calculate_net_velocity
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
+from kiwoom_stock.domain.state import (
+    PhysicalStateBatchCommitReceipt,
+    PhysicalStateCommitReceipt,
+    PhysicalStateHydrationSource,
+    PhysicalStateLoadResult,
+    PhysicalTrackerState,
+    PhysicalStateWrite,
+)
 from kiwoom_stock.monitoring.manager import Position
 from kiwoom_stock.monitoring.strategy import TradingStrategy
 
@@ -32,11 +40,33 @@ class _NoDatabase:
     def __init__(self):
         self.submissions = []
 
-    def get_last_physical_state(self, stock_code):
-        return None
+    def load_physical_state(self, stock_code):
+        return PhysicalStateLoadResult(PhysicalStateHydrationSource.INITIAL, None)
 
-    def submit_physical_state(self, stock_code, forces):
-        self.submissions.append((stock_code, dict(forces)))
+    def persist_physical_state(self, state, forces):
+        return self.persist_physical_state_batch(
+            (PhysicalStateWrite(state, tuple(dict(forces).items())),)
+        ).items[0]
+
+    def persist_physical_state_batch(self, writes):
+        writes = tuple(writes)
+        receipts = tuple(
+            PhysicalStateCommitReceipt(
+                write.state.stock_code,
+                write.state.last_observed_at.isoformat(),
+                write.state.updated_at,
+            )
+            for write in writes
+        )
+        self.submissions.extend(
+            (write.state.stock_code, dict(write.forces)) for write in writes
+        )
+        return PhysicalStateBatchCommitReceipt(
+            receipts[0].generation, receipts, receipts[0].committed_at
+        )
+
+    def close(self):
+        pass
 
 
 def _physics_params(**overrides):
@@ -253,7 +283,7 @@ class PhysicalStateCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(captured["previous_velocity"], 1.5)
 
-    def test_frozen_volume_skips_physical_state_persistence(self):
+    def test_frozen_volume_persists_canonical_state_transition(self):
         repository = _NoDatabase()
         tracker = PhysicalStateTracker(repository)
 
@@ -272,25 +302,12 @@ class PhysicalStateCharacterizationTests(unittest.TestCase):
         tracker.process_tick(**arguments)
         tracker.process_tick(**arguments)
 
-        self.assertEqual(len(repository.submissions), 1)
+        self.assertEqual(len(repository.submissions), 2)
 
-    def test_strength_history_uses_240_second_proxy_and_prunes_after_320_seconds(self):
-        now = datetime(2026, 7, 17, 10, 0, 0)
+    def test_strength_baseline_is_external_and_private_history_is_removed(self):
         tracker = PhysicalStateTracker(_NoDatabase())
-
-        tracker._strength_history["005930"] = [(now - timedelta(seconds=240), 90.0)]
-        with patch("kiwoom_stock.core.state_manager.datetime", _frozen_datetime(now)):
-            self.assertEqual(tracker._get_and_update_prev_strength("005930", 110.0), 90.0)
-
-        tracker._strength_history["000660"] = [
-            (now - timedelta(seconds=321), 80.0),
-            (now - timedelta(seconds=239), 95.0),
-        ]
-        with patch("kiwoom_stock.core.state_manager.datetime", _frozen_datetime(now)):
-            self.assertEqual(tracker._get_and_update_prev_strength("000660", 110.0), 110.0)
-
-        retained_strengths = [strength for _, strength in tracker._strength_history["000660"]]
-        self.assertNotIn(80.0, retained_strengths)
+        self.assertFalse(hasattr(tracker, "_strength_history"))
+        self.assertFalse(hasattr(tracker, "_get_and_update_prev_strength"))
 
     def test_reference_mass_boundary_and_log_scale_are_forwarded_to_physics(self):
         captured_reference_masses = []
@@ -379,23 +396,28 @@ class PhysicalStateCharacterizationTests(unittest.TestCase):
         self.assertEqual(frozen_call["interval_impulse"], 0.0)
         self.assertEqual(frozen_call["interval_amount_krw"], 0.0)
         self.assertEqual(result["forces"]["impulse"], 0.0)
-        self.assertEqual(len(repository.submissions), 1)
+        self.assertEqual(len(repository.submissions), 2)
 
-    def test_crash_recovery_applies_exponential_hourly_decay(self):
-        now = datetime(2026, 7, 17, 12, 0, 0)
+    def test_complete_v1_recovery_decays_while_legacy_is_separate(self):
+        from datetime import timezone
+
+        now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
 
         class RecoveryDatabase(_NoDatabase):
-            def get_last_physical_state(self, stock_code):
+            def load_physical_state(self, stock_code):
                 self.asserted_code = stock_code
-                return {
-                    "velocity": 10.0,
-                    "timestamp": now - timedelta(hours=2),
-                }
+                persisted_at = now - timedelta(hours=2)
+                return PhysicalStateLoadResult(
+                    PhysicalStateHydrationSource.PERSISTED,
+                    PhysicalTrackerState(
+                        1, stock_code, 10.0, 100.0, 70_000.0, (),
+                        persisted_at, persisted_at,
+                    ),
+                )
 
         database = RecoveryDatabase()
-        tracker = PhysicalStateTracker(database)
-        with patch("kiwoom_stock.core.state_manager.datetime", _frozen_datetime(now)):
-            tracker.recover_state_from_crash("005930", decay_constant=0.5)
+        tracker = PhysicalStateTracker(database, clock=lambda: now)
+        tracker.recover_state_from_crash("005930", decay_constant=0.5)
 
         self.assertEqual(database.asserted_code, "005930")
         self.assertAlmostEqual(tracker._l1_cache["005930"], 10.0 * math.exp(-1.0))
@@ -518,10 +540,26 @@ class ExitPriorityCharacterizationTests(unittest.TestCase):
 
         with patch("kiwoom_stock.monitoring.strategy.datetime", _frozen_datetime(at_forced_exit)):
             strategy = TradingStrategy({"debug_mode": False, "day_trade_exit_time": "15:30"})
-            reason = strategy.get_exit_reason(position, 10_000.0, forces)
+            decision = strategy.decide_position(position, 10_000.0, forces)
 
-        self.assertIsNone(reason)
-        self.assertEqual(position.status, "OVERNIGHT")
+        self.assertEqual(decision.decision.value, "MARK_OVERNIGHT")
+        self.assertEqual(position.status, "OPEN")
+
+    def test_fixed_target_precedes_late_overnight_candidate(self):
+        at_forced_exit = datetime(2026, 7, 17, 15, 27, 0)
+        position = _position()
+        forces = {"current_velocity": 3.0, "thrust": 2.0001, "magnetic": 0.1}
+        strategy = TradingStrategy({"debug_mode": False, "day_trade_exit_time": "15:30"})
+
+        reason = strategy.get_exit_reason(
+            position,
+            10_300.0,
+            forces,
+            now=at_forced_exit,
+        )
+
+        self.assertIn("Fixed Target", reason)
+        self.assertEqual(position.status, "OPEN")
 
     def test_existing_overnight_status_blocks_forced_exit_and_bailout(self):
         late = datetime(2026, 7, 17, 15, 30, 0)
@@ -577,7 +615,12 @@ class ExitPriorityCharacterizationTests(unittest.TestCase):
         self.assertIn("Sniper Exit", reason)
 
     def test_kill_switch_activates_at_exact_configured_loss(self):
-        strategy = TradingStrategy({"debug_mode": True, "total_loss_limit": -5.0})
+        strategy = TradingStrategy(
+            {
+                "debug_mode": True,
+                "cumulative_trade_return_score_floor": -5.0,
+            }
+        )
 
         self.assertFalse(strategy.is_kill_switch_activated(-4.9999))
         self.assertTrue(strategy.is_kill_switch_activated(-5.0))

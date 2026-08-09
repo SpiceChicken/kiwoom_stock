@@ -11,6 +11,9 @@ from kiwoom_stock.infrastructure.kiwoom_credentials import (
     StrictFileCredentialProvider,
     credential_repository_boundary,
 )
+from kiwoom_stock.infrastructure.kiwoom_market_only import (
+    KiwoomMarketDataGatewayAdapter,
+)
 from kiwoom_stock.application.runtime import RuntimeDisabledError
 from kiwoom_stock.core import config
 from kiwoom_stock.infrastructure.reporting import (
@@ -67,7 +70,9 @@ def _extract_and_save_1min_chart(
     client = client_factory(credentials=credentials, endpoint=endpoint)
     primary_error: Optional[BaseException] = None
     try:
-        collector = collector_factory(client.market)
+        market_gateway = KiwoomMarketDataGatewayAdapter.from_client(client)
+        market_gateway.preflight()
+        collector = collector_factory(market_gateway)
         target_rows = _read_traded_targets(
             target_date_str,
             database_path=settings.database.path,

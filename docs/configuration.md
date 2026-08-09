@@ -69,8 +69,30 @@ The following table is checked against the machine-readable `SETTING_SPECS` regi
 | `KIWOOM_DEBUG_MODE` | strict boolean | no | `false` | TradingStrategy | no | all | only `true` or `false` |
 | `KIWOOM_DAY_TRADE_EXIT_TIME` | HH:MM | no | `15:30` | TradingStrategy | no | all | valid 24-hour time |
 | `KIWOOM_ENTRY_DEADLINE` | HH:MM | no | `15:00` | TradingStrategy | no | all | earlier than exit time |
-| `KIWOOM_TOTAL_LOSS_LIMIT` | float percent | no | `-5` | TradingStrategy | no | all | finite and at most 0 |
+| `KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR` | float percentage points | no | `-5` | TradingStrategy | no | all | finite and at most 0 |
+| `KIWOOM_TOTAL_LOSS_LIMIT` | deprecated float percentage points | no | none | settings migration only | no | all | one-window deprecated input; equal canonical value required when both are set |
+| `KIWOOM_TARGET_STOP_UNIT_VERSION` | enum | atomic group | `percentage-points-v1` | TradingStrategy | no | all | exactly `percentage-points-v1`; all three settings together |
+| `KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS` | positive float percentage points | atomic group | `3.0` | TradingStrategy | no | all | finite and greater than 0; all three settings together |
+| `KIWOOM_STOP_LOSS_PERCENTAGE_POINTS` | positive float percentage points | atomic group | `3.0` | TradingStrategy | no | all | finite and greater than 0; all three settings together |
 <!-- settings-matrix:end -->
+
+The target/stop settings form one versioned atomic group. If all three are absent, the typed default is
+`percentage-points-v1` with `3.0` target and `3.0` stop magnitudes. Supplying any member requires all three.
+The values are percentage points (`%p`), not ratios. During the compatibility window, each of the four exact legacy
+containers (`CONFIG`, `CONFIG.strategy`, `STRATEGY_CONFIG`, `STRATEGY_CONFIG.strategy`) is validated independently.
+A container is either absent or contains the complete numeric pair `target_profit_rate=0.03` and
+`stop_loss_rate=-0.03`; split/orphan, string, non-finite, conflicting, and every other value fail validation. Matching
+complete pairs in multiple containers are accepted with complete provenance. Canonical settings override only complete
+valid legacy groups and cannot hide an orphan or invalid group. Settings adapts the accepted input to an immutable
+`TargetStopPolicy`; compatibility dictionaries publish no target/stop keys.
+
+The cumulative trade return score floor defaults to `-5` percentage points. The score is the simple sum of CLOSED
+per-trade `profit_rate` values for an explicit XKRX session date plus each active position's current
+`calc_profit_rate`; it is not weighted by quantity, notional, fees, tax, currency, or capital. The deprecated
+`KIWOOM_TOTAL_LOSS_LIMIT` environment input and legacy mapped `total_loss_limit` are accepted for one migration window.
+Old-only input emits a warning, new-only input is canonical, matching old and new input emits a warning and is accepted,
+and conflicting values fail startup. Runtime compatibility mappings publish only
+`cumulative_trade_return_score_floor`.
 
 `KIWOOM_S3_BUCKET_NAME` remains optional. In both `prod` and `production-like`, an unset bucket is an explicit
 `NOT_CONFIGURED` archive outcome: no S3 client or cleanup is started, local outputs are preserved, and the returned

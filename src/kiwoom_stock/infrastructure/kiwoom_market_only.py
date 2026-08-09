@@ -4,25 +4,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-import re
 import threading
 import time
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence, TypeVar
 from urllib.parse import urlsplit
 
 import requests
 
 from kiwoom_stock.api.auth import Authenticator, Sleeper, UtcClock, _utc_now
 from kiwoom_stock.api.base import BaseClient, is_valid_bearer_authorization
+from kiwoom_stock.api.exceptions import KiwoomAPIError
 from kiwoom_stock.api.services.market import MarketService
 from kiwoom_stock.application.credentials import KiwoomClientCredentials
+from kiwoom_stock.application.ports import (
+    MarketDataCollectionError,
+    MarketDataFailureKind,
+)
+from kiwoom_stock.domain.indicators import MIN_INDICATOR_ROWS
+from kiwoom_stock.monitoring.collector import (
+    MarketDataCollector,
+)
 from kiwoom_stock.settings import KiwoomEndpoint
 
 
 MAX_HTTP_ATTEMPTS = 23
-_STRICT_NUMERIC = re.compile(
-    r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$"
-)
+_MARKET_RESULT = TypeVar("_MARKET_RESULT")
+_KIWOOM_FAILURE_KINDS = {
+    "timeout": MarketDataFailureKind.TIMEOUT,
+    "invalid_json": MarketDataFailureKind.PARSE,
+    "invalid_contract": MarketDataFailureKind.MALFORMED,
+}
 
 
 def _clamp_timeout(timeout: Any, remaining: float) -> Any:
@@ -302,6 +313,121 @@ class MarketOnlyClient:
             self._session.close()
 
 
+class KiwoomMarketDataGatewayAdapter:
+    """Map provider failures onto the neutral market-data port contract."""
+
+    def __init__(
+        self,
+        market_service: Any,
+        auth_preflight: Callable[[], None] | None = None,
+    ) -> None:
+        self._market_service = market_service
+        self._auth_preflight = auth_preflight
+
+    @classmethod
+    def from_client(cls, client: Any) -> "KiwoomMarketDataGatewayAdapter":
+        return cls(client.market, client.ensure_auth_ready)
+
+    def preflight(self) -> None:
+        """Map authentication readiness without retaining provider error context."""
+
+        if self._auth_preflight is None:
+            return
+        try:
+            self._auth_preflight()
+        except MarketDataCollectionError as error:
+            kind = error.kind
+        except KiwoomAPIError as error:
+            kind = _KIWOOM_FAILURE_KINDS.get(
+                error.category,
+                MarketDataFailureKind.FETCH,
+            )
+        except Exception:
+            kind = MarketDataFailureKind.FETCH
+        else:
+            return
+        raise MarketDataCollectionError(kind, "auth_preflight") from None
+
+    def _call(
+        self,
+        operation: str,
+        call: Callable[[], _MARKET_RESULT],
+    ) -> _MARKET_RESULT:
+        try:
+            return call()
+        except MarketDataCollectionError:
+            raise
+        except KiwoomAPIError as error:
+            kind = _KIWOOM_FAILURE_KINDS.get(
+                error.category,
+                MarketDataFailureKind.FETCH,
+            )
+            raise MarketDataCollectionError(kind, operation) from error
+        except Exception as error:
+            raise MarketDataCollectionError(
+                MarketDataFailureKind.FETCH,
+                operation,
+            ) from error
+
+    def get_top_trading_value(
+        self,
+        market_tp: str = "001",
+    ) -> Sequence[Mapping[str, Any]]:
+        return self._call(
+            "top_trading_value",
+            lambda: self._market_service.get_top_trading_value(market_tp),
+        )
+
+    def get_stock_basic_info(self, stock_code: str) -> Mapping[str, Any]:
+        return self._call(
+            "stock_basic",
+            lambda: self._market_service.get_stock_basic_info(stock_code),
+        )
+
+    def get_minute_chart(
+        self,
+        stock_code: str,
+        tic: str,
+    ) -> Sequence[Mapping[str, Any]]:
+        return self._call(
+            f"minute_chart_{tic}m",
+            lambda: self._market_service.get_minute_chart(stock_code, tic),
+        )
+
+    def get_tick_strength(
+        self,
+        stock_code: str,
+    ) -> Sequence[Mapping[str, Any]]:
+        return self._call(
+            "tick_strength",
+            lambda: self._market_service.get_tick_strength(stock_code),
+        )
+
+    def get_program_trade(self) -> Sequence[Mapping[str, Any]]:
+        return self._call("program_trade", self._market_service.get_program_trade)
+
+    def get_foreign_window_total(self) -> Sequence[Mapping[str, Any]]:
+        return self._call(
+            "foreign_window_trade",
+            self._market_service.get_foreign_window_total,
+        )
+
+    def get_order_book(self, stock_code: str) -> Mapping[str, Any]:
+        return self._call(
+            "order_book",
+            lambda: self._market_service.get_order_book(stock_code),
+        )
+
+    def get_recent_ticks(
+        self,
+        stock_code: str,
+    ) -> Sequence[Mapping[str, Any]]:
+        return self._call(
+            "recent_ticks",
+            lambda: self._market_service.get_recent_ticks(stock_code),
+        )
+
+
 @dataclass(frozen=True)
 class MarketSnapshot:
     """Validated in-memory input for one calculation cycle."""
@@ -315,16 +441,9 @@ class MarketSnapshot:
 
 def _finite(record: Mapping[str, Any], key: str, location: str) -> float:
     value = record.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}")
-    if isinstance(value, str):
-        if _STRICT_NUMERIC.fullmatch(value) is None:
-            raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}")
-        value = value.replace(",", "")
-    try:
-        result = float(value)
-    except (TypeError, ValueError, OverflowError):
-        raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}") from None
+    result = float(value)
     if not math.isfinite(result):
         raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}")
     return result
@@ -337,14 +456,15 @@ def _positive(record: Mapping[str, Any], key: str, location: str, *, magnitude: 
 
 
 def _validate_chart(chart: Sequence[Mapping[str, Any]], location: str) -> None:
-    if len(chart) < 14:
+    if len(chart) < MIN_INDICATOR_ROWS:
         raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}")
     for row in chart:
         if not isinstance(row, Mapping):
             raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}")
         for key in ("cur_prc", "open_pric", "high_pric", "low_pric"):
             _positive(row, key, f"{location}.{key}", magnitude=True)
-        if abs(_finite(row, "trde_qty", f"{location}.trde_qty")) < 0.0:
+        volume = _finite(row, "trde_qty", f"{location}.trde_qty")
+        if volume < 0.0:
             raise ReadOnlyBoundaryError(f"market snapshot contract failed: {location}.trde_qty")
 
 
@@ -374,18 +494,47 @@ def fetch_market_snapshot(
     *,
     stock_code: str,
     proxy_code: str,
+    market_gateway: KiwoomMarketDataGatewayAdapter | None = None,
 ) -> MarketSnapshot:
-    """Fetch the exact five logical market reads, then validate raw inputs."""
+    """Fetch five reads through the same normalized runtime boundary."""
 
-    client.ensure_auth_ready()
+    gateway = market_gateway or KiwoomMarketDataGatewayAdapter.from_client(client)
+    gateway.preflight()
+    collector = MarketDataCollector(gateway)
+    basic = collector.fetch_stock_basic(stock_code)
+    if not basic:
+        raise MarketDataCollectionError(
+            MarketDataFailureKind.EMPTY,
+            "stock_basic",
+        )
+    stock_chart = collector.fetch_indicator_chart(stock_code, "5")
+    proxy_chart = collector.fetch_indicator_chart(proxy_code, "60")
+    strength = collector.fetch_tick_strength(stock_code)
+    if not strength:
+        raise MarketDataCollectionError(
+            MarketDataFailureKind.EMPTY,
+            "tick_strength",
+        )
+    order_book = collector.fetch_order_book(stock_code)
+    if not order_book:
+        raise MarketDataCollectionError(
+            MarketDataFailureKind.EMPTY,
+            "order_book",
+        )
     snapshot = MarketSnapshot(
-        basic=dict(client.market.get_stock_basic_info(stock_code)),
-        stock_chart=list(client.market.get_minute_chart(stock_code, "5")),
-        proxy_chart=list(client.market.get_minute_chart(proxy_code, "60")),
-        strength=list(client.market.get_tick_strength(stock_code)),
-        order_book=dict(client.market.get_order_book(stock_code)),
+        basic=basic,
+        stock_chart=stock_chart,
+        proxy_chart=proxy_chart,
+        strength=strength,
+        order_book=order_book,
     )
-    validate_market_snapshot(snapshot)
+    try:
+        validate_market_snapshot(snapshot)
+    except ReadOnlyBoundaryError as error:
+        raise MarketDataCollectionError(
+            MarketDataFailureKind.MALFORMED,
+            "market_snapshot",
+        ) from error
     return snapshot
 
 

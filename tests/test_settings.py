@@ -1,4 +1,5 @@
 import importlib
+from itertools import combinations
 import logging
 import os
 import re
@@ -19,10 +20,12 @@ from kiwoom_stock.settings import (
     KiwoomSettings,
     RuntimeSettings,
     Settings,
+    StrategySettings,
     SettingsValidationError,
     KiwoomEndpoint,
     load_settings_from_environment,
 )
+from kiwoom_stock.domain.strategy import TargetStopPolicy
 
 
 def valid_mapping():
@@ -127,8 +130,475 @@ def test_from_mapping_happy_path_and_defaults():
     assert settings.monitoring.slow_interval_seconds == 60
     assert settings.monitoring.market_proxy_code == "069500"
     assert settings.strategy.entry_deadline == "15:00"
+    assert settings.strategy.target_stop_unit_version == "percentage-points-v1"
+    assert settings.strategy.target_profit_percentage_points == 3.0
+    assert settings.strategy.stop_loss_percentage_points == 3.0
+    assert settings.strategy.cumulative_trade_return_score_floor == -5.0
     assert settings.storage.output_dir == Path("/tmp/kiwoom-output")
     assert settings.database.path == Path("trades.db")
+
+
+@pytest.mark.parametrize(
+    ("mapping_update", "legacy", "warning_expected"),
+    [
+        (
+            {"KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR": "-4.5"},
+            None,
+            False,
+        ),
+        ({"KIWOOM_TOTAL_LOSS_LIMIT": "-4.5"}, None, True),
+        (
+            {
+                "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR": "-4.5",
+                "KIWOOM_TOTAL_LOSS_LIMIT": "-4.5",
+            },
+            None,
+            True,
+        ),
+        (
+            {},
+            LegacyMappings.from_mappings(
+                {"strategy": {"total_loss_limit": -4.5}}
+            ),
+            True,
+        ),
+    ],
+)
+def test_cumulative_score_floor_migration_matrix(
+    mapping_update,
+    legacy,
+    warning_expected,
+):
+    settings = Settings.from_mapping(
+        {**valid_mapping(), **mapping_update},
+        legacy=legacy,
+    )
+    _, compatibility = settings.to_legacy_mappings()
+
+    assert settings.strategy.cumulative_trade_return_score_floor == -4.5
+    assert compatibility["strategy"] == {
+        "debug_mode": False,
+        "day_trade_exit_time": "15:30",
+        "entry_deadline": "15:00",
+        "cumulative_trade_return_score_floor": -4.5,
+        "regimes": {},
+    }
+    assert bool(settings.diagnostics.warnings) is warning_expected
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR": "-5",
+            "KIWOOM_TOTAL_LOSS_LIMIT": "-4",
+        },
+        {"KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR": "0.1"},
+        {"KIWOOM_TOTAL_LOSS_LIMIT": "0.1"},
+    ],
+)
+def test_cumulative_score_floor_conflict_or_positive_fails(updates):
+    with pytest.raises(SettingsValidationError) as caught:
+        Settings.from_mapping({**valid_mapping(), **updates})
+
+    assert "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR" in {
+        issue.name for issue in caught.value.issues
+    }
+
+
+_CUMULATIVE_SCORE_SOURCES = (
+    "canonical_env",
+    "deprecated_env",
+    "config_mapping",
+    "strategy_config_mapping",
+)
+
+
+def _cumulative_score_inputs(source_values):
+    mapping = valid_mapping()
+    config = {}
+    strategy_config = {}
+    if "canonical_env" in source_values:
+        mapping["KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR"] = source_values[
+            "canonical_env"
+        ]
+    if "deprecated_env" in source_values:
+        mapping["KIWOOM_TOTAL_LOSS_LIMIT"] = source_values["deprecated_env"]
+    if "config_mapping" in source_values:
+        config = {"strategy": {"total_loss_limit": source_values["config_mapping"]}}
+    if "strategy_config_mapping" in source_values:
+        strategy_config = {
+            "strategy": {
+                "total_loss_limit": source_values["strategy_config_mapping"]
+            }
+        }
+    return mapping, LegacyMappings.from_mappings(config, strategy_config)
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        selected
+        for size in range(1, len(_CUMULATIVE_SCORE_SOURCES) + 1)
+        for selected in combinations(_CUMULATIVE_SCORE_SOURCES, size)
+    ],
+    ids=lambda sources: "+".join(sources),
+)
+def test_cumulative_score_floor_all_source_combinations_accept_same_value(sources):
+    mapping, legacy = _cumulative_score_inputs({source: -4.25 for source in sources})
+
+    settings = Settings.from_mapping(
+        mapping,
+        legacy=legacy,
+        source_name="canonical test mapping",
+    )
+    _, compatibility = settings.to_legacy_mappings()
+    runtime_strategy = compatibility["strategy"]
+
+    assert settings.strategy.cumulative_trade_return_score_floor == -4.25
+    assert settings.diagnostics.sources[
+        "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR"
+    ] == (
+        "canonical test mapping"
+        if "canonical_env" in sources
+        else {
+            "deprecated_env": "KIWOOM_TOTAL_LOSS_LIMIT",
+            "config_mapping": "CONFIG.strategy.total_loss_limit",
+            "strategy_config_mapping": "STRATEGY_CONFIG.strategy.total_loss_limit",
+        }[sources[0]]
+    )
+    assert bool(settings.diagnostics.warnings) is (len(sources) > 1 or sources != ("canonical_env",))
+    assert runtime_strategy["cumulative_trade_return_score_floor"] == -4.25
+    assert "total_loss_limit" not in runtime_strategy
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    list(combinations(_CUMULATIVE_SCORE_SOURCES, 2)),
+    ids=lambda pair: str(pair),
+)
+def test_cumulative_score_floor_conflicts_between_every_source_pair_fail(left, right):
+    mapping, legacy = _cumulative_score_inputs({left: -4.0, right: -5.0})
+
+    with pytest.raises(SettingsValidationError) as caught:
+        Settings.from_mapping(mapping, legacy=legacy)
+
+    assert "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR" in {
+        issue.name for issue in caught.value.issues
+    }
+
+
+@pytest.mark.parametrize("source", _CUMULATIVE_SCORE_SOURCES)
+@pytest.mark.parametrize(
+    "invalid_value",
+    ["invalid", True, float("nan"), float("inf"), float("-inf"), 0.1],
+    ids=["invalid", "bool", "nan", "positive-inf", "negative-inf", "positive"],
+)
+def test_cumulative_score_floor_every_source_rejects_invalid_values(
+    source,
+    invalid_value,
+):
+    mapping, legacy = _cumulative_score_inputs({source: invalid_value})
+
+    with pytest.raises(SettingsValidationError) as caught:
+        Settings.from_mapping(mapping, legacy=legacy)
+
+    assert caught.value.issues
+
+
+def test_cumulative_score_floor_missing_uses_canonical_default_provenance():
+    settings = Settings.from_mapping(valid_mapping())
+    _, compatibility = settings.to_legacy_mappings()
+
+    assert settings.strategy.cumulative_trade_return_score_floor == -5.0
+    assert settings.diagnostics.sources[
+        "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR"
+    ] == "default"
+    assert settings.diagnostics.warnings == ()
+    assert compatibility["strategy"]["cumulative_trade_return_score_floor"] == -5.0
+    assert "total_loss_limit" not in compatibility["strategy"]
+
+
+def test_target_stop_canonical_group_preserves_values_sources_and_mapping():
+    mapping = {
+        **valid_mapping(),
+        "KIWOOM_TARGET_STOP_UNIT_VERSION": "percentage-points-v1",
+        "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS": "2.75",
+        "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS": "1.25",
+    }
+
+    settings = Settings.from_mapping(mapping, source_name="test canonical source")
+    _, compatibility = settings.to_legacy_mappings()
+    strategy = compatibility["strategy"]
+
+    assert settings.strategy.target_profit_percentage_points == 2.75
+    assert settings.strategy.stop_loss_percentage_points == 1.25
+    assert settings.strategy.target_stop_policy == TargetStopPolicy(
+        target_profit_percentage_points=2.75,
+        stop_loss_percentage_points=1.25,
+    )
+    assert "target_stop_unit_version" not in strategy
+    assert "target_profit_percentage_points" not in strategy
+    assert "stop_loss_percentage_points" not in strategy
+    assert "target_profit_rate" not in strategy
+    assert "stop_loss_rate" not in strategy
+    assert all(
+        settings.diagnostics.sources[name] == "test canonical source"
+        for name in (
+            "KIWOOM_TARGET_STOP_UNIT_VERSION",
+            "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS",
+            "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS",
+        )
+    )
+
+
+def test_exact_numeric_legacy_target_stop_pair_normalizes_with_provenance_warning():
+    legacy = LegacyMappings.from_mappings(
+        {"strategy": {"target_profit_rate": 0.03, "stop_loss_rate": -0.03}}
+    )
+
+    settings = Settings.from_mapping(valid_mapping(), legacy=legacy)
+    system, compatibility = settings.to_legacy_mappings()
+
+    assert settings.strategy.target_stop_unit_version == "percentage-points-v1"
+    assert settings.strategy.target_profit_percentage_points == 3.0
+    assert settings.strategy.stop_loss_percentage_points == 3.0
+    assert settings.diagnostics.sources["KIWOOM_TARGET_STOP_UNIT_VERSION"].startswith(
+        "normalized legacy pair: CONFIG.strategy"
+    )
+    assert any(
+        "Deprecated exact legacy target/stop pair 0.03/-0.03" in warning
+        for warning in settings.diagnostics.warnings
+    )
+    assert "target_profit_rate" not in system.get("strategy", {})
+    assert "stop_loss_rate" not in compatibility["strategy"]
+
+
+def test_canonical_target_stop_group_wins_exact_legacy_pair_with_warning():
+    legacy = LegacyMappings.from_mappings(
+        strategy_config={"target_profit_rate": 0.03, "stop_loss_rate": -0.03}
+    )
+    mapping = {
+        **valid_mapping(),
+        "KIWOOM_TARGET_STOP_UNIT_VERSION": "percentage-points-v1",
+        "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS": "4.0",
+        "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS": "2.0",
+    }
+
+    settings = Settings.from_mapping(mapping, legacy=legacy)
+
+    assert settings.strategy.target_profit_percentage_points == 4.0
+    assert settings.strategy.stop_loss_percentage_points == 2.0
+    assert any(
+        "Canonical target/stop group overrides deprecated exact legacy pair"
+        in warning
+        for warning in settings.diagnostics.warnings
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy", "label"),
+    [
+        (
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": 0.03, "stop_loss_rate": -0.03}
+            ),
+            "CONFIG",
+        ),
+        (
+            LegacyMappings.from_mappings(
+                {"strategy": {"target_profit_rate": 0.03, "stop_loss_rate": -0.03}}
+            ),
+            "CONFIG.strategy",
+        ),
+        (
+            LegacyMappings.from_mappings(
+                strategy_config={
+                    "target_profit_rate": 0.03,
+                    "stop_loss_rate": -0.03,
+                }
+            ),
+            "STRATEGY_CONFIG",
+        ),
+        (
+            LegacyMappings.from_mappings(
+                strategy_config={
+                    "strategy": {
+                        "target_profit_rate": 0.03,
+                        "stop_loss_rate": -0.03,
+                    }
+                }
+            ),
+            "STRATEGY_CONFIG.strategy",
+        ),
+    ],
+)
+def test_each_complete_legacy_container_normalizes_with_exact_group_provenance(
+    legacy,
+    label,
+):
+    settings = Settings.from_mapping(valid_mapping(), legacy=legacy)
+
+    assert settings.strategy.target_stop_policy == TargetStopPolicy()
+    assert label in settings.diagnostics.sources["KIWOOM_TARGET_STOP_UNIT_VERSION"]
+    assert any(label in warning for warning in settings.diagnostics.warnings)
+
+
+def test_matching_complete_legacy_containers_are_allowed_and_all_reported():
+    legacy = LegacyMappings.from_mappings(
+        {"target_profit_rate": 0.03, "stop_loss_rate": -0.03},
+        {
+            "strategy": {
+                "target_profit_rate": 0.03,
+                "stop_loss_rate": -0.03,
+            }
+        },
+    )
+
+    settings = Settings.from_mapping(valid_mapping(), legacy=legacy)
+    source = settings.diagnostics.sources["KIWOOM_TARGET_STOP_UNIT_VERSION"]
+
+    assert settings.strategy.target_stop_policy == TargetStopPolicy()
+    assert "CONFIG" in source
+    assert "STRATEGY_CONFIG.strategy" in source
+
+
+@pytest.mark.parametrize(
+    ("legacy", "expected_groups"),
+    [
+        (
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": 0.03},
+                {"stop_loss_rate": -0.03},
+            ),
+            {"LEGACY.CONFIG.target_stop", "LEGACY.STRATEGY_CONFIG.target_stop"},
+        ),
+        (
+            LegacyMappings.from_mappings(
+                {
+                    "target_profit_rate": 0.03,
+                    "strategy": {"stop_loss_rate": -0.03},
+                }
+            ),
+            {"LEGACY.CONFIG.target_stop", "LEGACY.CONFIG.strategy.target_stop"},
+        ),
+        (
+            LegacyMappings.from_mappings(
+                {
+                    "stop_loss_rate": -0.03,
+                    "strategy": {"target_profit_rate": 0.03},
+                }
+            ),
+            {"LEGACY.CONFIG.target_stop", "LEGACY.CONFIG.strategy.target_stop"},
+        ),
+        (
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": 0.03, "stop_loss_rate": -0.03},
+                {"target_profit_rate": 0.03},
+            ),
+            {"LEGACY.STRATEGY_CONFIG.target_stop"},
+        ),
+    ],
+)
+def test_split_or_complete_plus_orphan_legacy_groups_fail_aggregated(
+    legacy,
+    expected_groups,
+):
+    with pytest.raises(SettingsValidationError) as caught:
+        Settings.from_mapping(valid_mapping(), legacy=legacy)
+
+    issue_names = {issue.name for issue in caught.value.issues}
+    assert expected_groups.issubset(issue_names)
+
+
+def test_canonical_group_does_not_override_orphan_legacy_container():
+    canonical = {
+        **valid_mapping(),
+        "KIWOOM_TARGET_STOP_UNIT_VERSION": "percentage-points-v1",
+        "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS": "4.0",
+        "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS": "2.0",
+    }
+    legacy = LegacyMappings.from_mappings(
+        {"target_profit_rate": 0.03, "stop_loss_rate": -0.03},
+        {"strategy": {"target_profit_rate": 0.03}},
+    )
+
+    with pytest.raises(SettingsValidationError) as caught:
+        Settings.from_mapping(canonical, legacy=legacy)
+
+    assert "LEGACY.STRATEGY_CONFIG.strategy.target_stop" in {
+        issue.name for issue in caught.value.issues
+    }
+
+
+@pytest.mark.parametrize(
+    ("canonical", "legacy"),
+    [
+        ({"KIWOOM_TARGET_STOP_UNIT_VERSION": "percentage-points-v1"}, LegacyMappings()),
+        (
+            {
+                "KIWOOM_TARGET_STOP_UNIT_VERSION": "ratio-v0",
+                "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS": "3.0",
+                "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS": "3.0",
+            },
+            LegacyMappings(),
+        ),
+        ({}, LegacyMappings.from_mappings({"target_profit_rate": 0.03})),
+        (
+            {},
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": "0.03", "stop_loss_rate": "-0.03"}
+            ),
+        ),
+        (
+            {},
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": 0.3, "stop_loss_rate": -0.3}
+            ),
+        ),
+        (
+            {},
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": 3, "stop_loss_rate": -3}
+            ),
+        ),
+        (
+            {},
+            LegacyMappings.from_mappings(
+                {"target_profit_rate": 0.03, "stop_loss_rate": -0.03},
+                {"target_profit_rate": 0.04, "stop_loss_rate": -0.03},
+            ),
+        ),
+    ],
+)
+def test_target_stop_partial_unknown_or_ambiguous_legacy_group_fails(
+    canonical,
+    legacy,
+):
+    with pytest.raises(SettingsValidationError):
+        Settings.from_mapping({**valid_mapping(), **canonical}, legacy=legacy)
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), True, 0.0, -0.1])
+def test_typed_strategy_settings_rejects_invalid_target_stop_magnitudes(invalid):
+    with pytest.raises(ValueError):
+        TargetStopPolicy(
+            target_profit_percentage_points=invalid,
+            stop_loss_percentage_points=3.0,
+        )
+
+
+@pytest.mark.parametrize("invalid", ["nan", "inf", True, "0", "-0.1"])
+def test_canonical_target_stop_magnitude_fails_closed(invalid):
+    mapping = {
+        **valid_mapping(),
+        "KIWOOM_TARGET_STOP_UNIT_VERSION": "percentage-points-v1",
+        "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS": invalid,
+        "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS": "3.0",
+    }
+
+    with pytest.raises(SettingsValidationError):
+        Settings.from_mapping(mapping)
 
 
 @pytest.mark.parametrize(
@@ -191,7 +661,7 @@ def test_validation_aggregates_errors_with_help_and_canonical_names():
         "KIWOOM_DEBUG_MODE": "yes",
         "KIWOOM_DAY_TRADE_EXIT_TIME": "09:00",
         "KIWOOM_ENTRY_DEADLINE": "10:00",
-        "KIWOOM_TOTAL_LOSS_LIMIT": "1",
+        "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR": "1",
         "KIWOOM_SLACK_BOT_TOKEN": "token-without-channel",
     }
 
@@ -212,7 +682,7 @@ def test_validation_aggregates_errors_with_help_and_canonical_names():
         "KIWOOM_ETF_KEYWORDS",
         "KIWOOM_DEBUG_MODE",
         "KIWOOM_ENTRY_DEADLINE",
-        "KIWOOM_TOTAL_LOSS_LIMIT",
+        "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR",
         "KIWOOM_SLACK_CHANNEL_ID",
     } <= names
     assert ".env.example and docs/configuration.md" in str(caught.value)
@@ -767,9 +1237,15 @@ def test_main_creates_output_before_client_and_engine(monkeypatch, tmp_path):
         *,
         ledger,
         physical_state_repository,
+        market_gateway,
+        target_stop_policy,
+        wall_clock,
     ):
         assert output_dir.is_dir()
         assert Path(ledger.db_path) == database_path
+        assert market_gateway is not client.market
+        assert target_stop_policy is settings.strategy.target_stop_policy
+        assert callable(wall_clock)
         events.append("engine")
 
         def close_resources():
@@ -1136,7 +1612,7 @@ def test_setting_registry_matches_example_and_documentation():
     )[0]
     documented_names = set(re.findall(r"\| `?(KIWOOM_[A-Z0-9_]+)`? \|", matrix))
 
-    assert example_names == expected
+    assert example_names == expected - {"KIWOOM_TOTAL_LOSS_LIMIT"}
     assert documented_names == expected
     assert next(
         spec.consumer for spec in SETTING_SPECS if spec.name == "KIWOOM_DB_PATH"

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -43,6 +44,16 @@ from kiwoom_stock.application.shadow_worker import (
     run_shadow_continuous,
     run_shadow_once_managed,
 )
+from kiwoom_stock.application import shadow_worker as shadow_worker_module
+from kiwoom_stock.domain.models import (
+    PhysicalContinuityEvidence,
+    PositionDecision,
+    PositionDecisionResult,
+)
+
+
+def _continuity(source="initial", previous=None, depth=0):
+    return PhysicalContinuityEvidence(1, source, previous, depth)
 from kiwoom_stock.infrastructure.kiwoom_market_only import (
     AllowlistedReadOnlySession,
     ReadOnlyBoundaryError,
@@ -93,6 +104,7 @@ class FakeRuntime:
             db_identity=str(self.db_path),
             resources_closed=True,
             local_counts={},
+            continuity=_continuity(),
         )
 
 
@@ -475,6 +487,16 @@ def test_invalid_clock_and_calendar_fail_before_runtime_construction():
             ),
             runtime_factory=factory,
         )
+
+
+def test_shadow_calendar_adapter_delegates_to_shared_strict_xkrx_owner(monkeypatch):
+    shared = MagicMock(return_value=True)
+    monkeypatch.setattr(shadow_worker_module, "is_krx_session", shared)
+
+    assert shadow_worker_module.strict_krx_calendar(
+        date(2026, 8, 3)
+    ) is CalendarDecision.OPEN
+    shared.assert_called_once_with(date(2026, 8, 3))
 
 
 def test_open_calendar_runs_exactly_one_cycle_closes_and_returns_redacted_evidence():
@@ -874,7 +896,70 @@ def test_shadow_composition_uses_only_cached_market_and_isolated_paper_db(tmp_pa
             "SELECT last_updated FROM physics_state WHERE stock_code = '005930'"
         ).fetchone()[0]
     assert physics_rows == 1
-    assert updated_at.startswith("2026-08-03 10:00:00")
+    assert updated_at == "2026-08-03 10:00:00.000000"
+    assert receipt.continuity is not None
+    assert receipt.continuity.hydration_source == "initial"
+    assert receipt.continuity.baseline_source == "row_4_fixed_cadence"
+
+
+def test_two_fresh_shadow_runtimes_reopen_db_and_forward_continuity(tmp_path):
+    credentials_dir = tmp_path / "continuity-credentials"
+    credentials_dir.mkdir()
+    db_path = (tmp_path / "continuity-shadow" / "trades.db").resolve()
+    db_path.parent.mkdir()
+    settings = Settings.from_mapping(
+        {
+            "KIWOOM_EXECUTION_MODE": "shadow-once",
+            "KIWOOM_API_MODE": "prod",
+            "KIWOOM_APP_ENV": "prod",
+            "KIWOOM_PROCESS_NAME": "kiwoom-shadow-once",
+            "KIWOOM_CREDENTIALS_DIR": str(credentials_dir.resolve()),
+            "KIWOOM_DB_PATH": str(SHADOW_DATABASE_PATH),
+        }
+    )
+    credentials = KiwoomClientCredentials(
+        SensitiveText("synthetic-app-key"), SensitiveText("synthetic-secret-key")
+    )
+    volumes = iter((1_000_000, 1_000_100))
+
+    class IncreasingClient(FakeMarketClient):
+        def __init__(self, credentials_value, *, session):
+            super().__init__(credentials_value, session=session)
+            self.volume = next(volumes)
+
+        def get_stock_basic_info(self, stock_code):
+            result = super().get_stock_basic_info(stock_code)
+            result["trde_qty"] = str(self.volume)
+            return result
+
+    def make_runtime(at):
+        return create_shadow_runtime(
+            policy=_policy(),
+            settings=settings,
+            admission=ShadowAdmission(
+                now=at,
+                kst_date=at.date(),
+                decision=CalendarDecision.OPEN,
+            ),
+            credential_provider_factory=lambda _path: SimpleNamespace(
+                load=lambda: credentials
+            ),
+            session_factory=lambda **_kwargs: object(),
+            market_client_factory=IncreasingClient,
+            ledger_factory=lambda logical_path, clock: TradeLogger(db_path, clock=clock),
+        )
+
+    first_at = datetime(2026, 8, 3, 10, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    first = make_runtime(first_at).execute_once()
+    second = make_runtime(first_at.replace(minute=1)).execute_once()
+
+    assert first.continuity is not None
+    assert first.continuity.hydration_source == "initial"
+    assert second.continuity is not None
+    assert second.continuity.hydration_source == "persisted"
+    assert second.continuity.previous_observed_at == first_at
+    assert second.continuity.history_depth == 1
+    assert second.continuity.baseline_sample_index == 4
 
 
 def _shadow_settings(tmp_path, _db_path):
@@ -1005,8 +1090,11 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
             buy_signal=False,
             price=72000.0,
         )
-        engine.strategy.get_exit_reason = (
-            lambda _pos, _price, _forces: "Day Trade Close"
+        engine.strategy.decide_position = (
+            lambda _pos, _price, _forces: PositionDecisionResult(
+                PositionDecision.SELL,
+                "Day Trade Close",
+            )
         )
 
     sell_runtime = _shadow_runtime(
@@ -1024,6 +1112,115 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
             "SELECT status, sell_time, sell_reason FROM trades WHERE stock_code = '005930'"
         ).fetchone()
     assert sell_row == ("CLOSED", "2026-08-03 15:28:00", "Day Trade Close")
+
+
+def test_fresh_shadow_runtimes_preserve_same_session_overnight_then_reopen_and_sell(
+    tmp_path,
+):
+    """Exercise the production shadow composition across the 3B restart boundary."""
+
+    kst = ZoneInfo("Asia/Seoul")
+    db_path = (tmp_path / "kiwoom-shadow" / "overnight.db").resolve()
+    db_path.parent.mkdir()
+
+    buy_runtime = _shadow_runtime(
+        tmp_path,
+        db_path,
+        datetime(2026, 8, 3, 10, 5, tzinfo=kst),
+        configure_engine=lambda engine: setattr(
+            engine.strategy,
+            "evaluate",
+            lambda _metrics: _paper_verdict(buy_signal=True, price=71_000.0),
+        ),
+    )
+    assert buy_runtime.execute_once().local_counts["paper_buy"] == 1
+
+    def configure_mark(engine):
+        engine.strategy.evaluate = lambda _metrics: _paper_verdict(
+            buy_signal=False,
+            price=71_000.0,
+        )
+        engine.strategy.decide_position = (
+            lambda _pos, _price, _forces: PositionDecisionResult(
+                PositionDecision.MARK_OVERNIGHT
+            )
+        )
+
+    mark_at = datetime(2026, 8, 3, 15, 20, tzinfo=kst)
+    mark_runtime = _shadow_runtime(
+        tmp_path,
+        db_path,
+        mark_at,
+        configure_engine=configure_mark,
+    )
+    mark_runtime.execute_once()
+    with sqlite3.connect(db_path) as connection:
+        marked = connection.execute(
+            """
+            SELECT status, owning_session_date, state_changed_at, sell_reason
+            FROM trades WHERE stock_code = '005930'
+            """
+        ).fetchone()
+    assert marked == (
+        "OVERNIGHT",
+        "2026-08-03",
+        "2026-08-03T15:20:00+09:00",
+        None,
+    )
+
+    same_session_runtime = _shadow_runtime(
+        tmp_path,
+        db_path,
+        datetime(2026, 8, 3, 15, 21, tzinfo=kst),
+        configure_engine=lambda engine: setattr(
+            engine.strategy,
+            "evaluate",
+            lambda _metrics: _paper_verdict(
+                buy_signal=False,
+                price=73_130.0,
+            ),
+        ),
+    )
+    same_receipt = same_session_runtime.execute_once()
+    assert same_receipt.local_counts.get("paper_sell", 0) == 0
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            """
+            SELECT status, owning_session_date, state_changed_at, sell_reason
+            FROM trades WHERE stock_code = '005930'
+            """
+        ).fetchone() == marked
+
+    next_session_runtime = _shadow_runtime(
+        tmp_path,
+        db_path,
+        datetime(2026, 8, 4, 9, 0, tzinfo=kst),
+        configure_engine=lambda engine: setattr(
+            engine.strategy,
+            "evaluate",
+            lambda _metrics: _paper_verdict(
+                buy_signal=False,
+                price=73_130.0,
+            ),
+        ),
+    )
+    next_receipt = next_session_runtime.execute_once()
+    assert next_receipt.local_counts["paper_sell"] == 1
+    with sqlite3.connect(db_path) as connection:
+        closed = connection.execute(
+            """
+            SELECT status, owning_session_date, state_changed_at,
+                   sell_price, sell_reason
+            FROM trades WHERE stock_code = '005930'
+            """
+        ).fetchone()
+    assert closed == (
+        "CLOSED",
+        "2026-08-04",
+        "2026-08-04T09:00:00+09:00",
+        73_130.0,
+        "Fixed Target (3 %p; percentage-points-v1)",
+    )
 
 
 def test_engine_work_owner_rejects_repeat_before_extra_physics_write(tmp_path):
@@ -1157,7 +1354,7 @@ class _LatchMonitor:
             assert self.release.wait(timeout=2)
         if self.run_error is not None:
             raise self.run_error
-        return {"cycles": 1}
+        return {"cycles": 1, "continuity": _continuity()}
 
     def close(self):
         if self.close_error is not None:

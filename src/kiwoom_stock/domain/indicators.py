@@ -8,6 +8,10 @@
 from typing import Dict, List
 import statistics
 
+
+INDICATOR_PERIOD = 14
+MIN_INDICATOR_ROWS = INDICATOR_PERIOD + 1
+
 # ==========================================
 # 1. 기본 수학/통계 연산 (Basic Calculations)
 # ==========================================
@@ -125,7 +129,10 @@ def calculate_ema(series: List[float], period: int) -> float:
 # ==========================================
 
 
-def calculate_rsi(prices: List[float], period: int = 14) -> float:
+def calculate_rsi(
+    prices: List[float],
+    period: int = INDICATOR_PERIOD,
+) -> float:
     """
     [RSI] 상대강도지수 계산 (Wilder's Smoothing 적용)
     :param prices: 종가 리스트 (시간순: [과거, ..., 최신])
@@ -199,7 +206,12 @@ def calculate_bollinger_bands(
     }
 
 
-def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+def calculate_atr(
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    period: int = INDICATOR_PERIOD,
+) -> float:
     """
     [ATR] 평균 진폭 (Average True Range)
     :param highs: 고가 리스트 (시간순)
@@ -238,7 +250,7 @@ def calculate_atr_percent(
     lows: List[float],
     closes: List[float],
     current_price: float,
-    period: int = 14,
+    period: int = INDICATOR_PERIOD,
 ) -> float:
     """
     [ATR %] 주가 대비 변동성 비율 (Volatility Percentage)

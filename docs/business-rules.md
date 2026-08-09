@@ -43,14 +43,41 @@ Boundary behavior is covered by characterization tests, including inclusive thre
 ## Exit and retention rules
 
 - Zero-price positions are not panic-sold.
+- Paper positions use the string-compatible lifecycle states `OPEN`, `OVERNIGHT`, and `CLOSED`.
+- Fresh buys persist the current XKRX session date and an aware KST state-change instant. An overnight
+  candidate is committed as `OPEN -> OVERNIGHT` before memory changes; strategy evaluation returns a typed
+  intent and does not mutate the position.
+- An already persisted `OVERNIGHT` position is not reconsidered in the same owner session. During a later
+  regular XKRX session it is reopened exactly once, with the observed session as its new owner, before
+  target/stop or other exit decisions run. Holidays and pre/post-market instants do not cause transitions.
+- `OVERNIGHT -> CLOSED` is not a valid direct transition. Ledger, manager, and engine require a committed
+  `OVERNIGHT -> OPEN` reconciliation receipt before any sell decision can close the row.
+- Active legacy `OPEN` rows are backfilled only from an exact KST `buy_time` that belongs to an XKRX session.
+  All active identity, name/regime/time, price, force, status, and lifecycle fields are decoded before any
+  position memory is published. Missing legacy `OVERNIGHT` metadata, duplicates, and malformed active data
+  fail closed instead of being guessed.
+- Fixed paper exits use the versioned `percentage-points-v1` unit and full-precision raw position return:
+  - target is inclusive at `profit_rate >= target_profit_percentage_points`;
+  - stop is inclusive at `profit_rate <= -stop_loss_percentage_points`;
+  - fixed target/stop is checked before a new late-session overnight candidate, forced day close, and dynamic exits.
+- `TargetStopPolicy` and the unrounded position-return calculation are pure domain contracts. Settings constructs the
+  policy once and runtime/engine forwards the same object to the strategy.
+- `Position.calc_profit_rate`, fixed exits, and `TradeLogger.record_sell` consume the same unrounded percentage-point
+  calculation. SQLite stores the raw float; two-decimal formatting remains a notifier/report display concern only.
+- Fixed exit reasons state the `%p` threshold and unit. They are local paper-ledger decisions and do not claim a
+  broker fill or account result.
 - Day-trade exit time remains configurable.
-- Kill switch activates inclusively when total realized plus unrealized PnL is less than or equal to the configured loss
-  limit.
+- `cumulative_trade_return_score` is the unweighted simple sum of CLOSED per-trade percentage-point returns for an
+  explicit XKRX session date and active `Position.calc_profit_rate` current marks. Quantity, notional, fees, tax,
+  currency, and weighting do not participate.
+- Kill switch activates inclusively when `cumulative_trade_return_score <= cumulative_trade_return_score_floor`.
+  Both values must be finite non-boolean numbers and the floor must be at or below zero.
 - A confirmed kill switch is a terminal safety stop, not a liquidation receipt:
   - no actual or paper buy/sell order is created;
   - active position objects and ledger state remain unchanged and their codes are returned as an immutable unresolved
     snapshot;
   - the critical notifier callable is attempted once, with no critical retry or generic error-notification fallback;
+  - terminal evidence and the critical message state the cumulative trade return score and floor in percentage-points;
   - the engine latches the result, so the current and repeated `run()` calls perform no further tick, evaluation, order,
     database-write, or scheduler-sleep work.
 - Profit lock-in starts once profit reaches the configured threshold and combines velocity loss with a protected profit floor.

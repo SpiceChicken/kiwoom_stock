@@ -8,10 +8,8 @@ from enum import Enum
 from pathlib import Path
 from threading import Event
 import time
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, TypedDict
 from zoneinfo import ZoneInfo
-
-import exchange_calendars as xcals
 
 from kiwoom_stock.application.execution import (
     ExecutionMode,
@@ -32,13 +30,19 @@ from kiwoom_stock.application.shadow_lifecycle import (
     check_lifecycle,
     signal_stop_event,
 )
+from kiwoom_stock.domain.models import PhysicalContinuityEvidence
+from kiwoom_stock.utils.market_cal import (
+    KrxCalendarError,
+    is_krx_session,
+    seoul_now as _shared_seoul_now,
+)
 
 
 _SEOUL = ZoneInfo("Asia/Seoul")
-SHADOW_EVIDENCE_SCHEMA_VERSION = 1
+SHADOW_EVIDENCE_SCHEMA_VERSION = 2
 # Continuous evidence adds timing and database-reopen attestations without
 # changing the established one-shot evidence contract.
-SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 2
+SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 3
 
 
 class ShadowWorkerError(RuntimeError):
@@ -78,6 +82,17 @@ class CalendarDecision(str, Enum):
     CLOSED = "CLOSED"
 
 
+class _ShadowCommon(TypedDict):
+    mode: str
+    kst_date: str
+    calendar: str
+    source_sha: str
+    image_digest: str
+    activation_id: str
+    stock_code: str
+    proxy_code: str
+
+
 @dataclass(frozen=True)
 class ShadowAdmission:
     now: datetime
@@ -104,6 +119,7 @@ class ShadowExecutionReceipt:
     db_identity: str
     resources_closed: bool
     local_counts: Mapping[str, int]
+    continuity: PhysicalContinuityEvidence | None = None
 
 
 class ShadowRuntimePort(Protocol):
@@ -147,18 +163,17 @@ class RuntimeStopEvent:
 
 
 def seoul_now() -> datetime:
-    return datetime.now(_SEOUL)
+    return _shared_seoul_now()
 
 
 def strict_krx_calendar(target_date: date) -> CalendarDecision:
     try:
-        calendar = xcals.get_calendar("XKRX")
         return (
             CalendarDecision.OPEN
-            if calendar.is_session(target_date.isoformat())
+            if is_krx_session(target_date)
             else CalendarDecision.CLOSED
         )
-    except Exception:
+    except KrxCalendarError:
         raise CalendarUnavailableError("KRX calendar decision is unavailable") from None
 
 
@@ -180,6 +195,7 @@ class ShadowRunResult:
     resources_closed: bool
     side_effects: Mapping[str, bool]
     local_counts: Mapping[str, int]
+    continuity: PhysicalContinuityEvidence | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -200,6 +216,11 @@ class ShadowRunResult:
             "resources_closed": self.resources_closed,
             "side_effects": dict(self.side_effects),
             "local_counts": dict(self.local_counts),
+            "continuity": (
+                self.continuity.to_safe_dict()
+                if self.continuity is not None
+                else None
+            ),
         }
 
 
@@ -311,7 +332,7 @@ def run_shadow_once(
     if not isinstance(decision, CalendarDecision):
         raise CalendarUnavailableError("KRX calendar returned an invalid decision")
     activation = policy.activation
-    common = {
+    common: _ShadowCommon = {
         "mode": policy.mode.value,
         "kst_date": kst_date.isoformat(),
         "calendar": decision.value,
@@ -393,6 +414,8 @@ def run_shadow_once(
         raise ShadowWorkerError("shadow runtime reported invalid HTTP evidence")
     if receipt.http_attempts > policy.max_http_attempts:
         raise ShadowWorkerError("shadow HTTP attempt budget was exceeded")
+    if not isinstance(receipt.continuity, PhysicalContinuityEvidence):
+        raise ShadowWorkerError("shadow runtime omitted continuity evidence")
     return ShadowRunResult(
         status="PASS",
         cycles=1,
@@ -402,6 +425,7 @@ def run_shadow_once(
         resources_closed=receipt.resources_closed,
         side_effects=_zero_external_side_effects(),
         local_counts=receipt.local_counts,
+        continuity=receipt.continuity,
         **common,
     )
 

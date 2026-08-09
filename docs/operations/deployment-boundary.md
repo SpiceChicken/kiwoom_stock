@@ -27,8 +27,9 @@ or invoke Slack, S3, or Gemini.
    anonymous public image contract before it sends one bounded SSM command and
    polls it to completion. That command runs only `--check-config`.
 3. **Shadow worker rollout** accepts one exact main source SHA and uses a
-   separate protected OIDC role to install/read back the immutable host worker
-   and activation-document pair. It does not start or stop a container.
+   separate protected OIDC role to install/read back the immutable host worker,
+   standalone evidence validator, and activation-document artifact set. It does
+   not start or stop a container.
 4. **Shadow worker activation** is a separate protected, bounded command plane.
    It admits exact `oneshot`, `continuous`, or `stop` actions and never grants
    order or account capability.
@@ -154,6 +155,18 @@ Missing package visibility, GitHub Environment approval, OIDC configuration, IAM
 application, SSM execution, or host evidence is `BLOCKED`, not a presumed success.
 See [GitHub-to-EC2 container deployment](github-ec2-container-deployment.md).
 
+## Semantic downgrade boundary
+
+Additive SQLite columns do not make an old binary semantically safe while active `OVERNIGHT` rows exist. Before any
+separately approved old-binary activation, the stopped current r1 binary must inspect the exact preserved mounted DB via
+`python -m kiwoom_stock downgrade-preflight --database-path ABSOLUTE_DB`. Only exit `0` evidence with schema `1`, exact
+DB identity, `PASS`, count `0`, `read_only=true`, and `database_writes=0` can satisfy this precondition. `BLOCKED` or
+`FAILED` evidence causes no status conversion and forbids activation.
+
+This repository change provides the read-only command seam only. It does not wire or authorize host rollback,
+deployment, old-image activation, automatic data correction, or an arbitrary command surface. Those remain a separate
+approval and C4 real-path validation boundary.
+
 ## Bounded shadow activation boundary
 
 The shadow activation artifacts are deliberately separate from the check-only
@@ -162,12 +175,21 @@ promotion path:
 - `.github/workflows/cd-shadow-worker-activation.yml` accepts only an exact
   source SHA, public GHCR digest, and bounded activation ID. `oneshot` and
   `continuous` additionally require a successful candidate run and shadow
-  Compose hash; `stop` does not revalidate or pull a new candidate;
+  Compose hash. Before OIDC, every state including `stop` uses the authenticated
+  GitHub compare API to prove the source is the current protected-main workflow
+  SHA or its ancestor. This preserves an old deployed-main stop while rejecting
+  arbitrary branch commits before checkout Python is imported or executed;
 - `KiwoomStock-ShadowWorker` accepts only `oneshot`, `continuous`, or `stop` and invokes the
   root-owned `/usr/local/sbin/kiwoom-shadow-worker` on the fixed EC2 instance;
 - `deploy/ec2/shadow_worker_control.sh` verifies instance identity, root-owned
   `0400` credential files, image revision/user/entrypoint, and the exact
   `compose.shadow.yaml` hash before running one exact container;
+- `/usr/local/libexec/kiwoom-shadow-runtime-evidence.py` is the sole schema 2/3
+  evidence validator. Both the host adapter and checked-out workflow execute
+  those exact stdlib-only bytes; neither reconstructs evidence predicates. It
+  rejects duplicate/non-finite JSON, noncanonical dates, unknown/missing
+  event-specific fields, and unknown/missing side-effect keys, and emits only a
+  canonical projection of validated safe fields;
 - the shadow named volume is never removed by the executor, and the command
   reports only redacted tuple/status evidence.
 
@@ -190,7 +212,7 @@ identity comparison, stop verifies either a clean signal transition
 (`DEADLINE`/`run-deadline`), requires a non-137 zero exit, removes that exact
 container, and preserves its named volume and image.
 
-Continuous evidence uses schema version `2` and records the elapsed start time
+Continuous evidence uses schema version `3` and records the elapsed start time
 of each cycle, the observed interval between cycle starts, whether the current
 cycle reopened the same database identity, and the cumulative reopen count.
 The first safe tick must have no prior interval and `db_reopened=false`; a
@@ -201,10 +223,12 @@ identity change between cycles fails closed. This makes the bounded start/stop
 artifact carry direct evidence of the fresh-runtime and same-isolated-ledger
 contract rather than only the configured interval.
 
-Activation also requires the exact installed worker SHA-256 and deterministic
-canonical activation-document SHA-256 recorded by rollout evidence. The
-root-owned worker compares its own root:root `0750` bytes and the root-only
-`0600` binding marker before any `oneshot`, `continuous`, or `stop` logic. A
+Activation also requires exact worker and validator SHA-256 values plus the
+deterministic canonical activation-document SHA-256 recorded by rollout evidence.
+The root-owned worker compares its own root:root `0750` bytes, the validator's
+fixed root:root `0750` regular/non-symlink/single-link installation, and the
+root-only `0600` binding marker before any `oneshot`, `continuous`, or `stop`
+logic. A
 missing marker, mismatch, incomplete rollback, or document/host skew fails
 before Docker or Kiwoom execution.
 
@@ -215,10 +239,11 @@ JSON content with duplicate-key rejection, and compares its hash with rollout
 evidence. It sends that explicit numeric version. `$LATEST` is forbidden;
 therefore a failed rollout that leaves a newer non-default version cannot bypass
 default rollback.
-The activation artifact records that attested numeric version and both strict
-pair hashes beside the command ID/status. Rollout host before/new/reconciled/final
-evidence records bounded owner, mode, link count, regular-file and metadata-valid
-fields for worker and binding; raw stdout and credentials remain excluded.
+The activation artifact records that attested numeric version and all three
+strict artifact-set hashes beside the command ID/status. Rollout host
+before/new/reconciled/final evidence records bounded owner, mode, link count,
+regular-file and metadata-valid fields for worker, validator, and binding; raw
+stdout and credentials remain excluded.
 
 The protected `production-shadow` Environment must provide the distinct
 `KIWOOM_AWS_SHADOW_ROLE_ARN` variable. The role policy is limited to the custom
@@ -268,26 +293,45 @@ aggregate-command/node-invocation total/recent/nonterminal counts and results.
 The shared non-cancelling concurrency group prevents a new activation from
 starting after this gate while the rollout remains in progress.
 
-The executor recalculates worker raw, activation-document raw/canonical, and
-rollout-document hashes. It captures pre-state, installs and reads back the host
-pair, creates and defaults one activation-document version, requires semantic
+The executor recalculates worker and validator raw hashes plus activation-document
+raw/canonical and rollout-document hashes. It captures pre-state, installs and
+reads back the host artifact set, creates and defaults one activation-document version, requires semantic
 and canonical-byte read-back, then reads the host again. Failure restores and
 confirms the previous document default first, then restores the exact attempt
 backup. Uncertain rollback records `skew=true`; activation stays paused. Audit is
 bounded/redacted, atomic mode `0600`, retained 14 days, and excludes credentials,
 source bodies, and raw command output.
 
-The host transaction uses the same fixed exclusive flock as activation. Worker and binding
-are each completed in private temporary files on their destination filesystem,
-checked for owner/mode/hash (and worker `bash -n`), file-fsynced, atomically
-renamed, then parent-fsynced. Binding publishes last. Rollback uses the same
+The host transaction uses the same fixed exclusive flock as activation. Worker,
+validator, and binding are each completed in private temporary files on their
+destination filesystem, checked for owner/mode/hash (plus worker `bash -n` and
+validator Python compilation), file-fsynced, atomically renamed, then
+parent-fsynced. Validator publishes before worker and binding is the commit point.
+Rollback uses the same
 primitive and an exact attempt manifest. The executor marks install as applying
 before submission; terminal/evidence/transport ambiguity triggers bounded host
-read-back and rollback when state differs. Unknown command acceptance remains
-`skew=true` even when the immediate read-back matches, because a late command
-cannot be proven absent. Audit records per-action command acceptance, ID,
+read-back. A lost `send-command` response is never retried: after the immediate
+read-back, the executor uses the existing read-only command history permissions
+to identify one command by exact rollout attempt/action comment, rollout
+document/version, instance, and complete parameter tuple, cross-checks one node
+invocation, and waits for its terminal evidence. A reconciled successful install
+may continue; a reconciled terminal failure or evidence mismatch enters the
+normal exact rollback. Missing, multiple, malformed, or tuple-mismatched history
+remains `skew=true`, and the audit deliberately leaves `host_final` unset because
+a late command cannot be proven absent. Audit records per-action command acceptance, ID,
 terminal status/response, host before/new/final, default reconciliation, and
 separate rollback failure category.
+
+Before any install backup, exact-SHA download, or publish, the host checks under
+that same lock whether the exact fixed name `kiwoom-shadow-once` exists in any
+lifecycle state. Running, exited, deadline-completed, dead, and missing/mismatched
+label states all reject rollout, leaving the old artifact tuple intact and
+therefore stoppable. Only a successful empty exact-name inventory proves absence;
+missing Docker or daemon/permission/list failure also fails closed. Prestate is
+classified as all-absent, coherent legacy
+worker/binding, coherent current artifact set, or incoherent. Incoherent
+binding-to-observed hashes set `preexisting_skew=true`/`skew=true` and stop before
+install rather than later claiming a healthy rollback.
 
 The stable activation SSM document acquires that lock before it opens or execs
 the mutable worker path and passes inherited FD `9`. The worker verifies the FD
@@ -296,7 +340,31 @@ the lock before any self-hash/binding guard. A direct host invocation receives
 no inherited FD and acquires the same lock itself. An argv/environment marker
 without the real approved lock FD cannot bypass this check.
 
-Attempt backup publication is also atomic and durable. Prior worker/binding or
+`deploy/check_shadow_ssm_contract.py` is the project-authoritative SSM D2 gate.
+It duplicate-safely parses both workflows and documents, then connects the
+activation workflow to the installed worker's actual option parser and the
+rollout workflow to the Python executor. The activation AWS CLI allowlist is
+exactly one host `send-command`, one polling `get-command-invocation`, and one
+final evidence `get-command-invocation`. The rollout executor write allowlist is
+exactly three sites: one host `send-command`, one activation-document update,
+and one default-version update. At runtime, every `AwsCli.call` tuple is also
+classified against the complete current read/write command allowlist before a
+subprocess starts; a missing or incorrect caller `write` classification fails
+closed. The checker verifies every call site, the sole AWS subprocess seam,
+the rollout module's complete subprocess import/attribute/binding surface, and
+all supported shell write primitives for protected inputs at quote/comment-aware
+command-unit boundaries. It also fixes the worker mode guard position, requires
+the CI checker as the sole non-comment executable command in its step, and
+normalizes supported `command`, `env`, and absolute Python build launchers before
+checking the CI build/package dependency DAG.
+Exact input/environment/target/flag mappings, document schemas,
+terminal/evidence handling, and artifact installation wiring remain required.
+CI runs this checker explicitly; the generic agent-chain checker's
+unsupported exit `2` is not treated as PASS. This static gate does not prove
+AWS eventual consistency or the EC2/Docker real path, which remains a separate
+validator boundary.
+
+Attempt backup publication is also atomic and durable. Prior worker/validator/binding or
 their absence sentinels plus the manifest are created in a private staging
 directory, checked for root ownership/mode/link/hash, individually fsynced, then
 the directory is fsynced and atomically renamed to the final attempt directory;

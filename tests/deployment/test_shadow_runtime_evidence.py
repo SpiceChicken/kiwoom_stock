@@ -1,0 +1,263 @@
+"""Direct contract tests for the standalone runtime evidence validator."""
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+
+VALIDATOR = Path("deploy/ec2/shadow_runtime_evidence.py")
+SOURCE_SHA = "a" * 40
+IMAGE = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
+ACTIVATION_ID = "validator-test"
+
+
+def _continuity():
+    return {
+        "schema_version": 1,
+        "hydration_source": "initial",
+        "previous_observed_at": None,
+        "history_depth": 0,
+        "baseline_source": "row_4_fixed_cadence",
+        "baseline_sample_index": 4,
+        "baseline_time_estimated": True,
+    }
+
+
+def _base():
+    return {
+        "source_sha": SOURCE_SHA,
+        "image_digest": IMAGE,
+        "activation_id": ACTIVATION_ID,
+        "resources_closed": True,
+        "side_effects": {
+            "broker_orders": False, "account": False, "oauth_revoke": False,
+            "slack": False, "gemini": False, "s3": False, "reports": False,
+        },
+    }
+
+
+def _oneshot():
+    return {
+        **_base(), "schema_version": 2, "status": "PASS",
+        "mode": "shadow-once", "kst_date": "2026-08-09", "calendar": "OPEN",
+        "stock_code": "005930", "proxy_code": "069500", "cycles": 1,
+        "http_attempts": 6,
+        "api_counts": {
+            "token": 1, "stock_basic": 1, "stock_chart_5m": 1,
+            "proxy_chart_60m": 1, "stock_strength": 1, "stock_orderbook": 1,
+        },
+        "local_counts": {
+            "status": 1, "paper_buy": 0, "paper_sell": 0, "error": 0,
+            "critical": 0,
+        },
+        "db_identity": "/var/lib/kiwoom/shadow-trades.db",
+        "continuity": _continuity(),
+    }
+
+
+def _cycle():
+    value = _oneshot()
+    value.update({
+        "schema_version": 3, "event": "cycle", "mode": "shadow-continuous",
+        "cycle_index": 1, "elapsed_seconds": 0.25, "interval_seconds": 60.0,
+        "cycle_start_elapsed_seconds": 0.0, "observed_interval_seconds": None,
+        "db_reopened": False, "db_reopens": 0,
+    })
+    return value
+
+
+def _terminal():
+    return {
+        **_base(), "schema_version": 3, "event": "terminal",
+        "status": "STOPPED", "mode": "shadow-continuous",
+        "reason": "stop-requested", "elapsed_seconds": 120.0,
+        "cycles": 2, "db_reopens": 1,
+        "first_cycle_start_elapsed_seconds": 0.0,
+        "second_cycle_start_elapsed_seconds": 60.0,
+        "second_cycle_interval_seconds": 60.0,
+        "minimum_cycle_interval_seconds": 60.0,
+    }
+
+
+def _run(value, *, mode="shadow-once", event="oneshot", input_format="json-lines",
+         output="accepted-record"):
+    content = value if isinstance(value, str) else json.dumps(value)
+    if input_format == "ssm-invocation" and not isinstance(value, str):
+        content = json.dumps({
+            "Status": "Success", "ResponseCode": 0,
+            "StandardOutputContent": content,
+        })
+    return subprocess.run(
+        [sys.executable, str(VALIDATOR), "--mode", mode, "--event", event,
+         "--source-sha", SOURCE_SHA, "--image-digest", IMAGE,
+         "--activation-id", ACTIVATION_ID, "--input-format", input_format,
+         "--output", output], input=content, text=True, capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "mode", "event"),
+    [(_oneshot(), "shadow-once", "oneshot"),
+     (_cycle(), "shadow-continuous", "cycle"),
+     (_terminal(), "shadow-continuous", "terminal")],
+)
+def test_direct_json_lines_and_ssm_invocation_have_one_contract(value, mode, event):
+    direct = _run(value, mode=mode, event=event)
+    invocation = _run(
+        value, mode=mode, event=event, input_format="ssm-invocation",
+        output="activation-summary",
+    )
+    assert direct.returncode == 0, direct.stderr
+    assert json.loads(direct.stdout) == value
+    assert invocation.returncode == 0, invocation.stderr
+    summary = json.loads(invocation.stdout)
+    assert summary["runtime_status"] == value["status"]
+    assert summary["side_effects"]["orders"] is False
+    assert summary["ssm_status"] == "Success"
+    assert type(summary["ssm_response_code"]) is int
+    assert summary["ssm_response_code"] == 0
+
+
+@pytest.mark.parametrize("response_code", [True, 0.0, "0", None])
+def test_ssm_invocation_rejects_non_exact_or_missing_response_code(response_code):
+    invocation = {
+        "Status": "Success", "StandardOutputContent": json.dumps(_oneshot()),
+    }
+    if response_code is not None:
+        invocation["ResponseCode"] = response_code
+    completed = _run(json.dumps(invocation), input_format="ssm-invocation")
+    assert completed.returncode == 1
+    assert completed.stderr == (
+        "shadow evidence invalid: invocation_response_code_invalid\n"
+    )
+
+
+@pytest.mark.parametrize("status", ["Failed", "Cancelled", "TimedOut", None])
+def test_ssm_invocation_requires_exact_success_before_stdout(status):
+    invocation = {
+        "ResponseCode": 0, "StandardOutputContent": json.dumps(_oneshot()),
+    }
+    if status is not None:
+        invocation["Status"] = status
+    completed = _run(json.dumps(invocation), input_format="ssm-invocation")
+    assert completed.returncode == 1
+    assert completed.stderr == "shadow evidence invalid: invocation_status_invalid\n"
+
+
+def test_json_lines_host_input_does_not_require_an_invocation_envelope():
+    completed = _run(_oneshot(), input_format="json-lines")
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_closed_one_shot_and_single_cycle_terminal_remain_exactly_supported():
+    closed = _oneshot()
+    closed.update({
+        "status": "CLOSED", "calendar": "CLOSED", "cycles": 0,
+        "http_attempts": 0, "api_counts": {}, "local_counts": {},
+        "db_identity": None, "continuity": None,
+    })
+    terminal = _terminal()
+    terminal.update({
+        "cycles": 1, "db_reopens": 0,
+        "second_cycle_start_elapsed_seconds": None,
+        "second_cycle_interval_seconds": None,
+        "minimum_cycle_interval_seconds": None,
+    })
+    assert _run(closed).returncode == 0
+    assert _run(
+        terminal, mode="shadow-continuous", event="terminal"
+    ).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: {**value, "source_sha": "c" * 40},
+        lambda value: {**value, "schema_version": True},
+        lambda value: {**value, "resources_closed": False},
+        lambda value: {**value, "side_effects": {**value["side_effects"], "account": True}},
+        lambda value: {**value, "http_attempts": True},
+        lambda value: {**value, "continuity": {**value["continuity"], "extra": 1}},
+        lambda value: {**value, "continuity": {**value["continuity"], "previous_observed_at": "2026-08-09T10:00:00"}},
+    ],
+)
+def test_contract_failures_are_exit_one_without_raw_reflection(mutation):
+    completed = _run(mutation(_oneshot()))
+    assert completed.returncode == 1
+    assert completed.stderr.startswith("shadow evidence invalid: ")
+    assert SOURCE_SHA not in completed.stderr
+    assert IMAGE not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: {**value, "unknown_capability": True},
+        lambda value: {
+            key: item for key, item in value.items() if key != "calendar"
+        },
+        lambda value: {
+            **value,
+            "side_effects": {**value["side_effects"], "wire_transfer": True},
+        },
+        lambda value: {
+            **value,
+            "side_effects": {
+                key: item for key, item in value["side_effects"].items()
+                if key != "reports"
+            },
+        },
+        lambda value: {**value, "kst_date": "2026-8-9"},
+        lambda value: {**value, "kst_date": "not-a-date"},
+    ],
+)
+def test_unknown_keys_and_invalid_dates_fail_closed(mutation):
+    assert _run(mutation(_oneshot())).returncode == 1
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_standard_json_constants_and_non_finite_timings_fail(constant):
+    payload = json.dumps(_cycle()).replace("0.25", constant, 1)
+    assert _run(
+        payload, mode="shadow-continuous", event="cycle"
+    ).returncode == 1
+    terminal = _terminal()
+    terminal["second_cycle_interval_seconds"] = float(constant)
+    assert _run(
+        terminal, mode="shadow-continuous", event="terminal"
+    ).returncode == 1
+
+
+def test_accepted_record_is_exact_canonical_safe_projection():
+    accepted = _run(_cycle(), mode="shadow-continuous", event="cycle")
+    assert accepted.returncode == 0, accepted.stderr
+    assert set(json.loads(accepted.stdout)) == set(_cycle())
+    rejected = _run(
+        {**_cycle(), "synthetic_secret": "must-not-pass"},
+        mode="shadow-continuous", event="cycle",
+    )
+    assert rejected.returncode == 1
+    assert "must-not-pass" not in rejected.stderr
+
+
+@pytest.mark.parametrize("payload", ['{"broken"', "[]", "null"])
+def test_malformed_and_non_object_records_are_stable_exit_one(payload):
+    completed = _run(payload)
+    assert completed.returncode == 1
+    assert completed.stderr.startswith("shadow evidence invalid: ")
+
+
+def test_bounded_input_and_usage_fail_closed_without_echoing_payload():
+    secret = "secret-value-that-must-not-be-reflected"
+    completed = _run("{" + secret + "x" * 1_048_576)
+    assert completed.returncode == 1
+    assert secret not in completed.stderr
+    usage = subprocess.run(
+        [sys.executable, str(VALIDATOR)], capture_output=True, text=True,
+        check=False,
+    )
+    assert usage.returncode == 2

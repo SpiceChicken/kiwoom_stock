@@ -214,8 +214,42 @@ class _RecordingBase:
             "cntr_str_tm": [{"cntr_str": "100"}],
             "stk_prm_trde_prst": [{"stk_cd": "A"}],
             "frgn_wicket_trde_upper": [{"stk_cd": "A"}],
-            "cntr_infr": {"cur_prc": "1"},
+            "cntr_infr": [{"cur_prc": "1"}],
         }
+
+
+@pytest.mark.parametrize(
+    ("method_name", "required_key", "args"),
+    [
+        ("get_top_trading_value", "trde_prica_upper", ()),
+        ("get_minute_chart", "stk_min_pole_chart_qry", ("005930", "5")),
+        ("get_tick_strength", "cntr_str_tm", ("005930",)),
+        ("get_program_trade", "stk_prm_trde_prst", ()),
+        ("get_foreign_window_total", "frgn_wicket_trde_upper", ()),
+        ("get_recent_ticks", "cntr_infr", ("005930",)),
+    ],
+)
+def test_market_list_operations_preserve_missing_wrong_and_present_empty_shape(
+    method_name,
+    required_key,
+    args,
+):
+    class ShapeBase:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def request(self, *_args, **_kwargs):
+            return self.payload
+
+    for invalid in ({}, {required_key: {}}, {required_key: "[]"}):
+        service = MarketService(ShapeBase(invalid))
+        with pytest.raises(KiwoomAPIError) as raised:
+            getattr(service, method_name)(*args)
+        assert raised.value.category == "invalid_contract"
+        assert required_key not in str(raised.value)
+
+    service = MarketService(ShapeBase({required_key: []}))
+    assert getattr(service, method_name)(*args) == []
 
 
 def test_market_and_account_service_endpoint_api_id_and_payload_mappings(monkeypatch):

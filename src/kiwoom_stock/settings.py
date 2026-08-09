@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+from numbers import Real
 from dataclasses import dataclass, field
 from datetime import time
 from enum import Enum
@@ -22,6 +23,11 @@ from pydantic import ValidationError, create_model
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from kiwoom_stock.application.execution import ExecutionMode
+from kiwoom_stock.domain.strategy import (
+    TARGET_STOP_UNIT_VERSION,
+    StrategySemanticsValidationError,
+    TargetStopPolicy,
+)
 
 
 CONFIGURATION_HELP = ".env.example and docs/configuration.md"
@@ -54,6 +60,29 @@ _FORBIDDEN_NORMALIZED_KEYS = frozenset(
     }
 )
 _MISSING = object()
+_TARGET_STOP_CANONICAL_NAMES = (
+    "KIWOOM_TARGET_STOP_UNIT_VERSION",
+    "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS",
+    "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS",
+)
+_TARGET_STOP_CANONICAL_MAPPING_KEYS = (
+    "target_stop_unit_version",
+    "target_profit_percentage_points",
+    "stop_loss_percentage_points",
+)
+_AMBIGUOUS_TARGET_STOP_KEYS = ("target_profit_rate", "stop_loss_rate")
+_TARGET_STOP_COMPATIBILITY_KEYS = (
+    *_AMBIGUOUS_TARGET_STOP_KEYS,
+    *_TARGET_STOP_CANONICAL_MAPPING_KEYS,
+)
+_CUMULATIVE_SCORE_CANONICAL_NAME = (
+    "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR"
+)
+_CUMULATIVE_SCORE_DEPRECATED_ENV_NAME = "KIWOOM_TOTAL_LOSS_LIMIT"
+_CUMULATIVE_SCORE_MAPPING_KEYS = (
+    "cumulative_trade_return_score_floor",
+    "total_loss_limit",
+)
 
 
 @dataclass(frozen=True)
@@ -139,8 +168,17 @@ _SETTING_SPEC_ROWS: Tuple[Tuple[Any, ...], ...] = (
      "valid 24-hour HH:MM"),
     ("KIWOOM_ENTRY_DEADLINE", "HH:MM", "no", "15:00", "TradingStrategy", False,
      "valid HH:MM earlier than exit time"),
-    ("KIWOOM_TOTAL_LOSS_LIMIT", "float percentage", "no", "-5", "TradingStrategy", False,
-     "finite and <= 0"),
+    ("KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR", "float percentage points", "no", "-5",
+     "TradingStrategy", False, "finite and <= 0"),
+    ("KIWOOM_TOTAL_LOSS_LIMIT", "deprecated float percentage points", "no", None,
+     "settings migration only", False,
+     "deprecated input; must equal the canonical score floor when both are set"),
+    ("KIWOOM_TARGET_STOP_UNIT_VERSION", "enum", "atomic group", TARGET_STOP_UNIT_VERSION,
+     "TradingStrategy", False, "exactly percentage-points-v1; all three target/stop settings together"),
+    ("KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS", "positive float percentage points", "atomic group", "3.0",
+     "TradingStrategy", False, "finite and > 0; all three target/stop settings together"),
+    ("KIWOOM_STOP_LOSS_PERCENTAGE_POINTS", "positive float percentage points", "atomic group", "3.0",
+     "TradingStrategy", False, "finite and > 0; all three target/stop settings together"),
 )
 SETTING_SPECS: Tuple[SettingSpec, ...] = tuple(_spec(*row) for row in _SETTING_SPEC_ROWS)
 
@@ -166,9 +204,10 @@ _CANONICAL_STRATEGY_KEYS: Tuple[str, ...] = (
     "debug_mode",
     "day_trade_exit_time",
     "entry_deadline",
-    "total_loss_limit",
-    "target_profit_rate",
-    "stop_loss_rate",
+    "cumulative_trade_return_score_floor",
+    "target_stop_unit_version",
+    "target_profit_percentage_points",
+    "stop_loss_percentage_points",
     "regimes",
 )
 
@@ -250,10 +289,35 @@ class StrategySettings:
     debug_mode: bool
     day_trade_exit_time: str
     entry_deadline: str
-    total_loss_limit: float
-    target_profit_rate: float
-    stop_loss_rate: float
+    cumulative_trade_return_score_floor: float
+    target_stop_policy: TargetStopPolicy
     regimes: Mapping[str, Any] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.cumulative_trade_return_score_floor, bool)
+            or not isinstance(self.cumulative_trade_return_score_floor, (int, float))
+            or not math.isfinite(float(self.cumulative_trade_return_score_floor))
+            or self.cumulative_trade_return_score_floor > 0
+        ):
+            raise ValueError(
+                "cumulative_trade_return_score_floor must be a finite "
+                "non-boolean number at or below zero"
+            )
+        if not isinstance(self.target_stop_policy, TargetStopPolicy):
+            raise TypeError("target_stop_policy must be a TargetStopPolicy")
+
+    @property
+    def target_stop_unit_version(self) -> str:
+        return self.target_stop_policy.unit_version
+
+    @property
+    def target_profit_percentage_points(self) -> float:
+        return self.target_stop_policy.target_profit_percentage_points
+
+    @property
+    def stop_loss_percentage_points(self) -> float:
+        return self.target_stop_policy.stop_loss_percentage_points
 
 
 @dataclass(frozen=True)
@@ -443,9 +507,22 @@ class Settings:
         debug_mode = _strict_bool(get("KIWOOM_DEBUG_MODE", "false"), issues)
         exit_time = _clock("KIWOOM_DAY_TRADE_EXIT_TIME", get("KIWOOM_DAY_TRADE_EXIT_TIME", "15:30"), issues)
         entry_deadline = _clock("KIWOOM_ENTRY_DEADLINE", get("KIWOOM_ENTRY_DEADLINE", "15:00"), issues)
-        loss_limit = _nonpositive_float(get("KIWOOM_TOTAL_LOSS_LIMIT", "-5"), issues)
-        target_profit = _legacy_float(legacy_data, "target_profit_rate", 0.03, issues, warnings)
-        stop_loss = _legacy_float(legacy_data, "stop_loss_rate", -0.03, issues, warnings)
+        cumulative_score_floor = _resolve_cumulative_trade_return_score_floor(
+            mapping,
+            legacy_data,
+            issues,
+            warnings,
+            sources,
+            source_name,
+        )
+        target_stop_policy = _resolve_target_stop_settings(
+            mapping,
+            legacy_data,
+            issues,
+            warnings,
+            sources,
+            source_name,
+        )
         regimes = _legacy_mapping(legacy_data, "regimes", issues, warnings)
 
         if fast is not None and slow is not None and fast > slow:
@@ -474,9 +551,8 @@ class Settings:
             or max_stocks is None
             or exit_time is None
             or entry_deadline is None
-            or loss_limit is None
-            or target_profit is None
-            or stop_loss is None
+            or cumulative_score_floor is None
+            or target_stop_policy is None
         ):
             raise RuntimeError("validated settings unexpectedly remained incomplete")
         return cls(
@@ -484,7 +560,14 @@ class Settings:
             ExecutionSettings(execution_mode),
             KiwoomSettings(api_mode, credentials_dir),
             MonitoringSettings(fast, slow, workers, proxy_code, max_stocks, etf_keywords),
-            StrategySettings(debug_mode, exit_time, entry_deadline, loss_limit, target_profit, stop_loss, regimes),
+            StrategySettings(
+                debug_mode,
+                exit_time,
+                entry_deadline,
+                cumulative_score_floor,
+                target_stop_policy,
+                regimes,
+            ),
             NotificationSettings(webhook_url, slack_token, slack_channel, gemini_key),
             StorageSettings(output_dir, bucket, aws_region),
             DatabaseSettings(database_path),
@@ -497,6 +580,22 @@ class Settings:
 
         system = _thaw_mapping(self._legacy.config)
         strategy_config = _thaw_mapping(self._legacy.strategy_config)
+        for container in (system, strategy_config):
+            for key in (
+                *_TARGET_STOP_COMPATIBILITY_KEYS,
+                *_CUMULATIVE_SCORE_MAPPING_KEYS,
+            ):
+                container.pop(key, None)
+            nested_strategy = container.get("strategy")
+            if isinstance(nested_strategy, Mapping):
+                container["strategy"] = {
+                    key: value
+                    for key, value in nested_strategy.items()
+                    if key not in (
+                        *_TARGET_STOP_COMPATIBILITY_KEYS,
+                        *_CUMULATIVE_SCORE_MAPPING_KEYS,
+                    )
+                }
         for key in _CANONICAL_SYSTEM_COMPATIBILITY_KEYS:
             strategy_config.pop(key, None)
         system.update(
@@ -529,15 +628,24 @@ class Settings:
         strategy_values: Dict[str, Any] = {}
         for source in (system.get("strategy", {}), strategy_config.get("strategy", {})):
             if isinstance(source, Mapping):
-                strategy_values.update(source)
+                strategy_values.update(
+                    {
+                        key: value
+                        for key, value in source.items()
+                        if key not in (
+                            *_TARGET_STOP_COMPATIBILITY_KEYS,
+                            *_CUMULATIVE_SCORE_MAPPING_KEYS,
+                        )
+                    }
+                )
         strategy_values.update(
             {
                 "debug_mode": self.strategy.debug_mode,
                 "day_trade_exit_time": self.strategy.day_trade_exit_time,
                 "entry_deadline": self.strategy.entry_deadline,
-                "total_loss_limit": self.strategy.total_loss_limit,
-                "target_profit_rate": self.strategy.target_profit_rate,
-                "stop_loss_rate": self.strategy.stop_loss_rate,
+                "cumulative_trade_return_score_floor": (
+                    self.strategy.cumulative_trade_return_score_floor
+                ),
                 "regimes": _thaw_mapping(self.strategy.regimes),
             }
         )
@@ -984,12 +1092,101 @@ def _clock(name: str, value: Any, issues: List[SettingsIssue]) -> Optional[str]:
     return text
 
 
-def _nonpositive_float(value: Any, issues: List[SettingsIssue]) -> Optional[float]:
-    parsed = _finite_float("KIWOOM_TOTAL_LOSS_LIMIT", value, issues)
-    if parsed is not None and parsed > 0:
-        issues.append(SettingsIssue("KIWOOM_TOTAL_LOSS_LIMIT", "must be less than or equal to zero"))
+def _resolve_cumulative_trade_return_score_floor(
+    mapping: Mapping[str, str],
+    legacy: LegacyMappings,
+    issues: List[SettingsIssue],
+    warnings: List[str],
+    sources: Dict[str, str],
+    source_name: str,
+) -> Optional[float]:
+    """Resolve the canonical floor and its one-window deprecated inputs."""
+    canonical_present = _CUMULATIVE_SCORE_CANONICAL_NAME in mapping
+    deprecated_values: List[Tuple[str, Any]] = []
+    if _CUMULATIVE_SCORE_DEPRECATED_ENV_NAME in mapping:
+        deprecated_values.append(
+            (
+                _CUMULATIVE_SCORE_DEPRECATED_ENV_NAME,
+                mapping[_CUMULATIVE_SCORE_DEPRECATED_ENV_NAME],
+            )
+        )
+    for container_name, path in _LEGACY_CANDIDATES[
+        _CUMULATIVE_SCORE_DEPRECATED_ENV_NAME
+    ]:
+        container = (
+            legacy.config if container_name == "CONFIG" else legacy.strategy_config
+        )
+        value = _lookup(container, path)
+        if value is not _MISSING:
+            deprecated_values.append(
+                (f"{container_name}.{'.'.join(path)}", value)
+            )
+
+    canonical_value: Optional[float] = None
+    if canonical_present:
+        canonical_value = _finite_float(
+            _CUMULATIVE_SCORE_CANONICAL_NAME,
+            mapping[_CUMULATIVE_SCORE_CANONICAL_NAME],
+            issues,
+        )
+        sources[_CUMULATIVE_SCORE_CANONICAL_NAME] = source_name
+
+    parsed_deprecated: List[Tuple[str, float]] = []
+    for label, raw_value in deprecated_values:
+        parsed = _finite_float(label, raw_value, issues)
+        if parsed is not None:
+            parsed_deprecated.append((label, parsed))
+
+    if deprecated_values:
+        warnings.append(
+            "Deprecated cumulative score floor input(s) %s; migrate to %s."
+            % (
+                ", ".join(label for label, _ in deprecated_values),
+                _CUMULATIVE_SCORE_CANONICAL_NAME,
+            )
+        )
+
+    if canonical_present:
+        floor = canonical_value
+        if (
+            floor is not None
+            and len(parsed_deprecated) == len(deprecated_values)
+            and any(value != floor for _, value in parsed_deprecated)
+        ):
+            issues.append(
+                SettingsIssue(
+                    _CUMULATIVE_SCORE_CANONICAL_NAME,
+                    "conflicts with a deprecated cumulative score floor input",
+                )
+            )
+            floor = None
+    elif deprecated_values:
+        if len(parsed_deprecated) != len(deprecated_values):
+            floor = None
+        elif not _all_equal([value for _, value in parsed_deprecated]):
+            issues.append(
+                SettingsIssue(
+                    _CUMULATIVE_SCORE_CANONICAL_NAME,
+                    "deprecated cumulative score floor inputs conflict",
+                )
+            )
+            floor = None
+        else:
+            floor = parsed_deprecated[0][1]
+            sources[_CUMULATIVE_SCORE_CANONICAL_NAME] = parsed_deprecated[0][0]
+    else:
+        floor = -5.0
+        sources[_CUMULATIVE_SCORE_CANONICAL_NAME] = "default"
+
+    if floor is not None and floor > 0:
+        issues.append(
+            SettingsIssue(
+                _CUMULATIVE_SCORE_CANONICAL_NAME,
+                "must be less than or equal to zero",
+            )
+        )
         return None
-    return parsed
+    return floor
 
 
 def _s3_bucket(value: Any, issues: List[SettingsIssue]) -> Optional[str]:
@@ -1034,22 +1231,162 @@ def _legacy_values(legacy: LegacyMappings, key: str) -> List[Tuple[str, Any]]:
     return result
 
 
-def _legacy_float(
+def _scan_legacy_target_stop_groups(
     legacy: LegacyMappings,
-    key: str,
-    default: float,
+    issues: List[SettingsIssue],
+) -> Tuple[bool, Tuple[str, ...]]:
+    config_strategy = legacy.config.get("strategy")
+    strategy_strategy = legacy.strategy_config.get("strategy")
+    groups: Tuple[Tuple[str, Mapping[str, Any]], ...] = (
+        ("CONFIG", legacy.config),
+        (
+            "CONFIG.strategy",
+            config_strategy if isinstance(config_strategy, Mapping) else {},
+        ),
+        ("STRATEGY_CONFIG", legacy.strategy_config),
+        (
+            "STRATEGY_CONFIG.strategy",
+            strategy_strategy if isinstance(strategy_strategy, Mapping) else {},
+        ),
+    )
+    any_present = False
+    exact_labels: List[str] = []
+    complete_pairs: List[Tuple[str, Any, Any]] = []
+    for label, group in groups:
+        has_target = "target_profit_rate" in group
+        has_stop = "stop_loss_rate" in group
+        if not has_target and not has_stop:
+            continue
+        any_present = True
+        issue_name = f"LEGACY.{label}.target_stop"
+        if has_target != has_stop:
+            missing = "stop_loss_rate" if has_target else "target_profit_rate"
+            issues.append(
+                SettingsIssue(
+                    issue_name,
+                    f"is an orphan group missing {missing}",
+                )
+            )
+            continue
+        target = group["target_profit_rate"]
+        stop = group["stop_loss_rate"]
+        complete_pairs.append((label, target, stop))
+        if (
+            isinstance(target, bool)
+            or isinstance(stop, bool)
+            or not isinstance(target, Real)
+            or not isinstance(stop, Real)
+            or not math.isfinite(float(target))
+            or not math.isfinite(float(stop))
+            or target != 0.03
+            or stop != -0.03
+        ):
+            issues.append(
+                SettingsIssue(
+                    issue_name,
+                    "only the exact numeric pair 0.03/-0.03 can be migrated",
+                )
+            )
+            continue
+        exact_labels.append(label)
+
+    if len(complete_pairs) > 1 and not _all_equal(
+        [(target, stop) for _, target, stop in complete_pairs]
+    ):
+        issues.append(
+            SettingsIssue(
+                "LEGACY.target_stop",
+                "complete target/stop groups have conflicting values",
+            )
+        )
+    return any_present, tuple(exact_labels)
+
+
+def _resolve_target_stop_settings(
+    canonical: Mapping[str, Any],
+    legacy: LegacyMappings,
     issues: List[SettingsIssue],
     warnings: List[str],
-) -> Optional[float]:
-    values = _legacy_values(legacy, key)
-    if not values:
-        return default
-    if not _all_equal([value for _, value in values]):
-        issues.append(SettingsIssue("LEGACY.strategy.%s" % key, "has conflicting legacy values"))
-    warnings.append(
-        "Legacy strategy key %s is preserved but has no active canonical setting." % key
-    )
-    return _finite_float("LEGACY.strategy.%s" % key, values[0][1], issues)
+    sources: Dict[str, str],
+    source_name: str,
+) -> Optional[TargetStopPolicy]:
+    present = set(canonical).intersection(_TARGET_STOP_CANONICAL_NAMES)
+    issue_count = len(issues)
+    legacy_present, legacy_labels = _scan_legacy_target_stop_groups(legacy, issues)
+    legacy_is_valid = legacy_present and len(issues) == issue_count
+
+    if present:
+        missing = set(_TARGET_STOP_CANONICAL_NAMES).difference(present)
+        for name in sorted(missing):
+            issues.append(
+                SettingsIssue(name, "must be set with the complete target/stop atomic group")
+            )
+            sources[name] = "missing"
+        for name in sorted(present):
+            sources[name] = source_name
+        version_value = canonical.get("KIWOOM_TARGET_STOP_UNIT_VERSION")
+        if version_value != TARGET_STOP_UNIT_VERSION:
+            issues.append(
+                SettingsIssue(
+                    "KIWOOM_TARGET_STOP_UNIT_VERSION",
+                    "must be exactly percentage-points-v1",
+                )
+            )
+            version: Optional[str] = None
+        else:
+            version = TARGET_STOP_UNIT_VERSION
+        target = (
+            _positive_float(
+                "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS",
+                canonical.get("KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS", _MISSING),
+                issues,
+            )
+            if "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS" in canonical
+            else None
+        )
+        stop = (
+            _positive_float(
+                "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS",
+                canonical.get("KIWOOM_STOP_LOSS_PERCENTAGE_POINTS", _MISSING),
+                issues,
+            )
+            if "KIWOOM_STOP_LOSS_PERCENTAGE_POINTS" in canonical
+            else None
+        )
+        if legacy_is_valid:
+            warnings.append(
+                "Canonical target/stop group overrides deprecated exact legacy pair from %s."
+                % ", ".join(legacy_labels)
+            )
+        if version is None or target is None or stop is None:
+            return None
+        try:
+            return TargetStopPolicy(version, target, stop)
+        except StrategySemanticsValidationError:
+            issues.append(
+                SettingsIssue(
+                    "KIWOOM_TARGET_STOP_POLICY",
+                    "must define one valid percentage-points-v1 policy",
+                )
+            )
+            return None
+
+    if legacy_present:
+        provenance = ", ".join(legacy_labels)
+        for name in _TARGET_STOP_CANONICAL_NAMES:
+            sources[name] = "normalized legacy pair: " + provenance
+        if legacy_is_valid:
+            warnings.append(
+                "Deprecated exact legacy target/stop pair 0.03/-0.03 from %s was normalized "
+                "to 3.0/3.0 percentage-points-v1."
+                % provenance
+            )
+            return TargetStopPolicy()
+        return None
+
+    for name in _TARGET_STOP_CANONICAL_NAMES:
+        sources[name] = "default"
+    return TargetStopPolicy()
 
 
 def _legacy_mapping(

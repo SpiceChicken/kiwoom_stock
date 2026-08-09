@@ -1,14 +1,33 @@
 """Static contracts for the bounded, no-order shadow activation plane."""
 
 import json
+from contextlib import nullcontext
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 import yaml
 
+from kiwoom_stock.application.shadow_worker import (
+    SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION,
+    SHADOW_EVIDENCE_SCHEMA_VERSION,
+    CalendarDecision,
+    ShadowExecutionReceipt,
+    ShadowRunResult,
+    run_shadow_continuous,
+)
+from kiwoom_stock.application.execution import (
+    ActivationTuple,
+    ExecutionMode,
+    ExecutionPolicy,
+)
+from kiwoom_stock.domain.models import PhysicalContinuityEvidence
+
 
 SCRIPT = Path("deploy/ec2/shadow_worker_control.sh")
+VALIDATOR = Path("deploy/ec2/shadow_runtime_evidence.py")
 DOCUMENT = Path("deploy/ssm/shadow-worker-document.yaml")
 WORKFLOW = Path(".github/workflows/cd-shadow-worker-activation.yml")
 POLICY = Path("deploy/iam/github-shadow-activation-policy.json.example")
@@ -17,39 +36,89 @@ IMAGE = "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64
 ACTIVATION_ID = "continuous-test"
 
 
+def _continuity(source="initial", previous=None, depth=0):
+    return PhysicalContinuityEvidence(1, source, previous, depth)
+
+
+def _api_counts():
+    return {
+        "token": 1,
+        "stock_basic": 1,
+        "stock_chart_5m": 1,
+        "proxy_chart_60m": 1,
+        "stock_strength": 1,
+        "stock_orderbook": 1,
+    }
+
+
+def _local_counts():
+    return {
+        "status": 1,
+        "paper_buy": 0,
+        "paper_sell": 0,
+        "error": 0,
+        "critical": 0,
+    }
+
+
+def _oneshot_evidence(**updates):
+    result = ShadowRunResult(
+        status="PASS",
+        mode="shadow-once",
+        kst_date="2026-08-08",
+        calendar="OPEN",
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        stock_code="005930",
+        proxy_code="069500",
+        cycles=1,
+        http_attempts=6,
+        api_counts=_api_counts(),
+        db_identity="/var/lib/kiwoom/shadow-trades.db",
+        resources_closed=True,
+        side_effects={
+            "broker_orders": False,
+            "account": False,
+            "oauth_revoke": False,
+            "slack": False,
+            "gemini": False,
+            "s3": False,
+            "reports": False,
+        },
+        local_counts=_local_counts(),
+        continuity=_continuity(),
+    ).to_safe_dict()
+    result.update(updates)
+    return result
+
+
 def _cycle_evidence(**updates):
     result = {
-        "schema_version": 2,
+        "schema_version": SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION,
         "event": "cycle",
         "status": "PASS",
         "mode": "shadow-continuous",
+        "kst_date": "2026-08-08",
+        "calendar": "OPEN",
         "source_sha": SOURCE_SHA,
         "image_digest": IMAGE,
         "activation_id": ACTIVATION_ID,
+        "stock_code": "005930",
+        "proxy_code": "069500",
         "cycle_index": 1,
         "cycles": 1,
         "http_attempts": 6,
-        "api_counts": {
-            "token": 1,
-            "stock_basic": 1,
-            "stock_chart_5m": 1,
-            "proxy_chart_60m": 1,
-            "stock_strength": 1,
-            "stock_orderbook": 1,
-        },
-        "local_counts": {
-            "status": 1,
-            "paper_buy": 0,
-            "paper_sell": 0,
-            "error": 0,
-            "critical": 0,
-        },
+        "api_counts": _api_counts(),
+        "local_counts": _local_counts(),
         "db_identity": "/var/lib/kiwoom/shadow-trades.db",
+        "elapsed_seconds": 0.25,
         "interval_seconds": 60.0,
         "cycle_start_elapsed_seconds": 0.0,
         "observed_interval_seconds": None,
         "db_reopened": False,
         "db_reopens": 0,
+        "continuity": _continuity().to_safe_dict(),
         "resources_closed": True,
         "side_effects": {
             "broker_orders": False,
@@ -66,30 +135,36 @@ def _cycle_evidence(**updates):
 
 
 def _terminal_evidence(**updates):
-    result = _cycle_evidence()
-    result.update(
-        event="terminal",
-        status="DEADLINE",
-        reason="run-deadline",
-        cycles=15,
-        first_cycle_start_elapsed_seconds=0.0,
-        second_cycle_start_elapsed_seconds=60.0,
-        second_cycle_interval_seconds=60.0,
-        minimum_cycle_interval_seconds=60.0,
-        db_reopens=14,
-    )
-    result.pop("cycle_index", None)
-    result.pop("interval_seconds", None)
-    result.pop("cycle_start_elapsed_seconds", None)
-    result.pop("observed_interval_seconds", None)
-    result.pop("db_reopened", None)
+    result = {
+        "schema_version": SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION,
+        "event": "terminal", "status": "DEADLINE",
+        "mode": "shadow-continuous", "source_sha": SOURCE_SHA,
+        "image_digest": IMAGE, "activation_id": ACTIVATION_ID,
+        "cycles": 15, "elapsed_seconds": 900.0,
+        "first_cycle_start_elapsed_seconds": 0.0,
+        "second_cycle_start_elapsed_seconds": 60.0,
+        "second_cycle_interval_seconds": 60.0,
+        "minimum_cycle_interval_seconds": 60.0, "db_reopens": 14,
+        "resources_closed": True,
+        "side_effects": {
+            "broker_orders": False, "account": False, "oauth_revoke": False,
+            "slack": False, "gemini": False, "s3": False, "reports": False,
+        },
+        "reason": "run-deadline",
+    }
     result.update(updates)
     return result
 
 
 def _run_sourced(command, *args):
+    validator = VALIDATOR.resolve()
+    adapter = (
+        f'validate_safe_evidence() {{ python3 "{validator}" '
+        '--mode "$1" --event "$2" --source-sha "$3" --image-digest "$4" '
+        '--activation-id "$5" --input-format json-lines --output accepted-record; }; '
+    )
     return subprocess.run(
-        ["bash", "-c", f'source "$1"; {command}', "test", str(SCRIPT), *args],
+        ["bash", "-c", f'source "$1"; {adapter}{command}', "test", str(SCRIPT), *args],
         check=False,
         capture_output=True,
         text=True,
@@ -97,41 +172,46 @@ def _run_sourced(command, *args):
 
 
 def _run_host_cycle_parser(evidence, tmp_path):
-    payload = tmp_path / "cycle-evidence.json"
-    payload.write_text(json.dumps(evidence), encoding="utf-8")
-    return _run_sourced(
-        'validate_safe_evidence shadow-continuous cycle "$3" "$4" "$5" <"$2"',
-        str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID,
+    del tmp_path
+    return _run_validator(evidence, "shadow-continuous", "cycle", "json-lines")
+
+
+def _run_host_oneshot_parser(evidence, tmp_path):
+    del tmp_path
+    return _run_validator(evidence, "shadow-once", "oneshot", "json-lines")
+
+
+def _run_validator(evidence, mode, event, input_format, output="accepted-record"):
+    payload = evidence if isinstance(evidence, str) else json.dumps(evidence)
+    if input_format == "ssm-invocation" and not isinstance(evidence, str):
+        payload = json.dumps({
+            "Status": "Success", "ResponseCode": 0,
+            "StandardOutputContent": payload,
+        })
+    return subprocess.run(
+        [sys.executable, str(VALIDATOR), "--mode", mode, "--event", event,
+         "--source-sha", SOURCE_SHA, "--image-digest", IMAGE,
+         "--activation-id", ACTIVATION_ID, "--input-format", input_format,
+         "--output", output],
+        input=payload, check=False, capture_output=True, text=True,
+    )
+
+
+def _run_workflow_parser(evidence, desired_state):
+    mode = "shadow-once" if desired_state == "oneshot" else "shadow-continuous"
+    event = {"oneshot": "oneshot", "continuous": "cycle", "stop": "terminal"}[desired_state]
+    return _run_validator(
+        evidence, mode, event, "ssm-invocation", "activation-summary"
     )
 
 
 def _run_workflow_cycle_parser(evidence):
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    step = next(
-        item for item in workflow["jobs"]["activate"]["steps"]
-        if item.get("name") == "Execute bounded shadow action"
-    )
-    parser = step["run"].split("runtime_evidence=", 1)[1]
-    parser = parser.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    invocation = {"StandardOutputContent": json.dumps(evidence)}
-    return subprocess.run(
-        [
-            sys.executable,
-            "-",
-            json.dumps(invocation),
-            "continuous",
-            SOURCE_SHA,
-            IMAGE,
-            ACTIVATION_ID,
-        ],
-        input=parser,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    return _run_workflow_parser(evidence, "continuous")
 
 
-def _run_activation_evidence_builder(document_version="7", worker_hash="c" * 64):
+def _run_activation_evidence_builder(
+    document_version="7", worker_hash="c" * 64, validator_hash="e" * 64
+):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     step = next(
         item for item in workflow["jobs"]["activate"]["steps"]
@@ -140,9 +220,50 @@ def _run_activation_evidence_builder(document_version="7", worker_hash="c" * 64)
     parser = step["run"].rsplit("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
     return subprocess.run(
         [sys.executable, "-", SOURCE_SHA, IMAGE, "123", ACTIVATION_ID,
-         "oneshot", "00000000-0000-0000-0000-000000000001", "Success", "0",
-         document_version, worker_hash, "d" * 64, '{"runtime_status":"PASS"}'],
+         "oneshot", "00000000-0000-0000-0000-000000000001",
+         document_version, worker_hash, validator_hash, "d" * 64,
+         '{"runtime_status":"PASS","ssm_status":"Success",'
+         '"ssm_response_code":0}'],
         input=parser, check=False, capture_output=True, text=True,
+    )
+
+
+def _run_activation_poll(
+    statuses: Path, tmp_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(
+        item for item in workflow["jobs"]["activate"]["steps"]
+        if item.get("name") == "Execute bounded shadow action"
+    )
+    script = step["run"]
+    start = script.index("status=Pending")
+    end = script.index('invocation_file="${RUNNER_TEMP}', start)
+    poll = script[start:end].replace("sleep 10", ":")
+    poll += 'printf \'%s\\n\' "${status}"; cat "${COUNT_FILE}"\n'
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    aws = tools / "aws"
+    aws.write_text(
+        "#!/usr/bin/env bash\n"
+        'count="$(cat "${COUNT_FILE}")"\n'
+        'count="$((count + 1))"\n'
+        'printf \'%s\\n\' "${count}" >"${COUNT_FILE}"\n'
+        'sed -n "${count}p" "${STATUS_FILE}"\n',
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    count_file = tmp_path / "count"
+    count_file.write_text("0\n", encoding="utf-8")
+    environment = dict(os.environ)
+    environment.update({
+        "PATH": f"{tools}:{environment['PATH']}",
+        "STATUS_FILE": str(statuses), "COUNT_FILE": str(count_file),
+        "EC2_INSTANCE_ID": "i-test", "command_id": "unused",
+    })
+    return subprocess.run(
+        ["bash", "-c", poll], env=environment, check=False,
+        capture_output=True, text=True,
     )
 
 
@@ -197,6 +318,7 @@ def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters(
         "ActivationId",
         "ComposeShadowSha256",
         "ExpectedWorkerSha256",
+        "ExpectedValidatorSha256",
         "ExpectedShadowDocumentSha256",
         "ExpectedInstanceId",
         "Region",
@@ -239,6 +361,7 @@ def test_activation_prelock_prevents_old_inode_execution(tmp_path):
         "SSM_SourceSha": SOURCE_SHA, "SSM_ActivationId": ACTIVATION_ID,
         "SSM_ComposeShadowSha256": "0" * 64,
         "SSM_ExpectedWorkerSha256": "c" * 64,
+        "SSM_ExpectedValidatorSha256": "e" * 64,
         "SSM_ExpectedShadowDocumentSha256": "d" * 64,
         "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
         "SSM_Region": "ap-northeast-2",
@@ -290,11 +413,13 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
         "activation_id",
         "desired_state",
         "worker_sha256",
+        "validator_sha256",
         "shadow_document_sha256",
     }
     assert triggers["workflow_dispatch"]["inputs"]["build_run_id"]["required"] is False
     assert triggers["workflow_dispatch"]["inputs"]["compose_shadow_sha256"]["required"] is False
     assert triggers["workflow_dispatch"]["inputs"]["worker_sha256"]["required"] is True
+    assert triggers["workflow_dispatch"]["inputs"]["validator_sha256"]["required"] is True
     assert triggers["workflow_dispatch"]["inputs"]["shadow_document_sha256"]["required"] is True
     assert workflow["permissions"] == {}
     assert workflow["concurrency"]["cancel-in-progress"] is False
@@ -313,19 +438,123 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert "ssm get-parameters" not in text.lower()
     assert "DesiredState=${DESIRED_STATE}" in text
     assert "ExpectedWorkerSha256=${WORKER_SHA256}" in text
+    assert "ExpectedValidatorSha256=${VALIDATOR_SHA256}" in text
     assert "ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256}" in text
-    assert "runtime safe result was not found" in text
-    assert '"orders": side_effects["broker_orders"]' in text
-    assert '"database": bool(result.get("db_identity"))' in text
+    assert "deploy/ec2/shadow_runtime_evidence.py" in text
+    assert "--input-format ssm-invocation" in text
+    assert "def valid_continuity" not in text
     assert 'if [[ "${DESIRED_STATE}" == stop ]]' in text
     assert 'actual_compose_shadow_sha256="$(sha256sum compose.shadow.yaml' in text
-    assert 'COMPOSE_SHADOW_SHA256="${actual_compose_shadow_sha256}"' in text
     assert '[[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]' in text
-    assert '"${document_version}" "${WORKER_SHA256}" "${SHADOW_DOCUMENT_SHA256}"' in text
+    assert '"${command_id}" "${document_version}" \\' in text
+    assert '"${WORKER_SHA256}" "${VALIDATOR_SHA256}" \\' in text
     assert '"document_version": document_version' in text
     assert '"worker_sha256": worker_sha256' in text
+    assert '"validator_sha256": validator_sha256' in text
     assert '"shadow_document_sha256": shadow_document_sha256' in text
     assert 're.fullmatch(r"[1-9][0-9]*", document_version)' in text
+    assert 'Success|Failed|Cancelled|TimedOut) break' in text
+    assert 'TimedOut|Cancelling) break' not in text
+    assert '--query ResponseCode --output text' not in text
+    assert '[[ "${status}" == Success' not in text
+
+
+def test_activation_poll_treats_cancelling_as_nonterminal_until_success(tmp_path):
+    statuses = tmp_path / "statuses"
+    statuses.write_text("Cancelling\nSuccess\n", encoding="utf-8")
+    completed = _run_activation_poll(statuses, tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["Success", "2"]
+
+
+def test_activation_poll_reaches_cancelled_and_validator_rejects_failure(tmp_path):
+    statuses = tmp_path / "statuses"
+    statuses.write_text("Cancelling\nCancelled\n", encoding="utf-8")
+    completed = _run_activation_poll(statuses, tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["Cancelled", "2"]
+    invocation = json.dumps({
+        "Status": "Cancelled", "ResponseCode": 1,
+        "StandardOutputContent": json.dumps(_oneshot_evidence()),
+    })
+    rejected = _run_validator(
+        invocation, "shadow-once", "oneshot", "ssm-invocation"
+    )
+    assert rejected.returncode == 1
+    assert rejected.stderr == "shadow evidence invalid: invocation_status_invalid\n"
+
+
+def test_stop_pre_oidc_rejects_non_main_source_before_checkout_python(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(
+        item for item in workflow["jobs"]["activate"]["steps"]
+        if item["name"] == "Validate immutable shadow tuple and candidate run"
+    )
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "executed"
+    for name, body in {
+        "gh": "#!/usr/bin/env bash\nprintf 'diverged\\t%s\\t%s\\n' \"$SOURCE_SHA\" \"$SOURCE_SHA\"\n",
+        "git": "#!/usr/bin/env bash\ntouch \"$EXECUTION_MARKER\"\nprintf '%s\\n' \"$SOURCE_SHA\"\n",
+        "sha256sum": "#!/usr/bin/env bash\ntouch \"$EXECUTION_MARKER\"\nprintf '%s  file\\n' \"$VALIDATOR_SHA256\"\n",
+        "python3": "#!/usr/bin/env bash\ntouch \"$EXECUTION_MARKER\"\nexit 0\n",
+    }.items():
+        path = tools / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    environment = dict(os.environ)
+    environment.update({
+        "PATH": f"{tools}:{environment['PATH']}",
+        "EXECUTION_MARKER": str(marker),
+        "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "f" * 40,
+        "GITHUB_REPOSITORY": "SpiceChicken/kiwoom_stock",
+        "SOURCE_SHA": SOURCE_SHA, "IMAGE_DIGEST": IMAGE,
+        "BUILD_RUN_ID": "", "COMPOSE_SHADOW_SHA256": "",
+        "ACTIVATION_ID": ACTIVATION_ID, "DESIRED_STATE": "stop",
+        "WORKER_SHA256": "c" * 64, "VALIDATOR_SHA256": "d" * 64,
+        "SHADOW_DOCUMENT_SHA256": "e" * 64,
+    })
+    completed = subprocess.run(
+        ["bash", "-c", step["run"]], env=environment, check=False,
+        capture_output=True, text=True,
+    )
+    assert completed.returncode != 0
+    assert not marker.exists()
+
+
+def test_stop_pre_oidc_accepts_proven_old_main_ancestor(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(
+        item for item in workflow["jobs"]["activate"]["steps"]
+        if item["name"] == "Validate immutable shadow tuple and candidate run"
+    )
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name, body in {
+        "gh": "#!/usr/bin/env bash\nprintf 'ahead\\t%s\\t%s\\n' \"$SOURCE_SHA\" \"$SOURCE_SHA\"\n",
+        "git": "#!/usr/bin/env bash\nprintf '%s\\n' \"$SOURCE_SHA\"\n",
+        "sha256sum": "#!/usr/bin/env bash\nprintf '%s  file\\n' \"$VALIDATOR_SHA256\"\n",
+        "python3": "#!/usr/bin/env bash\nexit 0\n",
+    }.items():
+        path = tools / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    environment = dict(os.environ)
+    environment.update({
+        "PATH": f"{tools}:{environment['PATH']}",
+        "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "f" * 40,
+        "GITHUB_REPOSITORY": "SpiceChicken/kiwoom_stock",
+        "SOURCE_SHA": SOURCE_SHA, "IMAGE_DIGEST": IMAGE,
+        "BUILD_RUN_ID": "", "COMPOSE_SHADOW_SHA256": "",
+        "ACTIVATION_ID": ACTIVATION_ID, "DESIRED_STATE": "stop",
+        "WORKER_SHA256": "c" * 64, "VALIDATOR_SHA256": "d" * 64,
+        "SHADOW_DOCUMENT_SHA256": "e" * 64,
+    })
+    completed = subprocess.run(
+        ["bash", "-c", step["run"]], env=environment, check=False,
+        capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_activation_evidence_binds_attested_numeric_version_and_pair_hashes():
@@ -334,38 +563,90 @@ def test_activation_evidence_binds_attested_numeric_version_and_pair_hashes():
     evidence = json.loads(completed.stdout)
     assert evidence["document_version"] == "7"
     assert evidence["worker_sha256"] == "c" * 64
+    assert evidence["validator_sha256"] == "e" * 64
     assert evidence["shadow_document_sha256"] == "d" * 64
+    assert evidence["ssm_status"] == "Success"
+    assert type(evidence["ssm_response_code"]) is int
+    assert evidence["ssm_response_code"] == 0
     assert _run_activation_evidence_builder(document_version="$LATEST").returncode != 0
     assert _run_activation_evidence_builder(worker_hash="bad").returncode != 0
+    assert _run_activation_evidence_builder(validator_hash="bad").returncode != 0
+
+
+def test_one_shot_schema_2_production_serializer_round_trips_both_consumers(
+    tmp_path,
+):
+    evidence = _oneshot_evidence()
+    assert SHADOW_EVIDENCE_SCHEMA_VERSION == 2
+    assert evidence["schema_version"] == 2
+    host = _run_host_oneshot_parser(evidence, tmp_path)
+    workflow = _run_workflow_parser(evidence, "oneshot")
+    assert host.returncode == 0, host.stderr
+    assert workflow.returncode == 0, workflow.stderr
+
+    continuity = evidence["continuity"]
+    assert isinstance(continuity, dict)
+    malformed = (
+        _oneshot_evidence(schema_version=1),
+        _oneshot_evidence(continuity=None),
+        _oneshot_evidence(continuity={**continuity, "hydration_source": "unknown"}),
+        _oneshot_evidence(continuity={**continuity, "history_depth": True}),
+        _oneshot_evidence(continuity={**continuity, "baseline_sample_index": 3}),
+    )
+    for candidate in malformed:
+        assert _run_host_oneshot_parser(candidate, tmp_path).returncode != 0
+        assert _run_workflow_parser(candidate, "oneshot").returncode != 0
+
+
+def test_one_shot_closed_serializer_has_exact_zero_cycle_contract(tmp_path):
+    closed = ShadowRunResult(
+        status="CLOSED",
+        mode="shadow-once",
+        kst_date="2026-08-08",
+        calendar="CLOSED",
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        stock_code="005930",
+        proxy_code="069500",
+        cycles=0,
+        http_attempts=0,
+        api_counts={},
+        db_identity=None,
+        resources_closed=True,
+        side_effects={
+            "broker_orders": False,
+            "account": False,
+            "oauth_revoke": False,
+            "slack": False,
+            "gemini": False,
+            "s3": False,
+            "reports": False,
+        },
+        local_counts={},
+        continuity=None,
+    ).to_safe_dict()
+    assert _run_host_oneshot_parser(closed, tmp_path).returncode == 0
+    assert _run_workflow_parser(closed, "oneshot").returncode == 0
 
 
 def test_host_evidence_parser_rejects_stale_and_malformed_first_ticks(tmp_path):
-    payload = tmp_path / "tick.json"
-    command = (
-        'validate_safe_evidence shadow-continuous cycle "$3" "$4" "$5" <"$2"'
-    )
-    payload.write_text(json.dumps(_cycle_evidence()), encoding="utf-8")
-    valid = _run_sourced(
-        command,
-        str(payload),
-        SOURCE_SHA,
-        IMAGE,
-        ACTIVATION_ID,
+    del tmp_path
+    valid = _run_validator(
+        _cycle_evidence(), "shadow-continuous", "cycle", "json-lines"
     )
     assert valid.returncode == 0, valid.stderr
 
-    payload.write_text(
-        json.dumps(_cycle_evidence(source_sha="c" * 40)),
-        encoding="utf-8",
+    stale = _run_validator(
+        _cycle_evidence(source_sha="c" * 40),
+        "shadow-continuous", "cycle", "json-lines",
     )
-    stale = _run_sourced(command, str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID)
     assert stale.returncode != 0
 
-    payload.write_text(
-        json.dumps(_cycle_evidence(http_attempts=24)),
-        encoding="utf-8",
+    malformed = _run_validator(
+        _cycle_evidence(http_attempts=24),
+        "shadow-continuous", "cycle", "json-lines",
     )
-    malformed = _run_sourced(command, str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID)
     assert malformed.returncode != 0
 
     for api_counts, local_counts in (
@@ -374,11 +655,10 @@ def test_host_evidence_parser_rejects_stale_and_malformed_first_ticks(tmp_path):
         (_cycle_evidence()["api_counts"], {}),
         (_cycle_evidence()["api_counts"], {**_cycle_evidence()["local_counts"], "extra": 0}),
     ):
-        payload.write_text(
-            json.dumps(_cycle_evidence(api_counts=api_counts, local_counts=local_counts)),
-            encoding="utf-8",
+        rejected = _run_validator(
+            _cycle_evidence(api_counts=api_counts, local_counts=local_counts),
+            "shadow-continuous", "cycle", "json-lines",
         )
-        rejected = _run_sourced(command, str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID)
         assert rejected.returncode != 0
 
 
@@ -404,6 +684,7 @@ def test_host_and_workflow_reject_non_integer_or_invalid_cycle_schema(tmp_path):
         invalid.append(_cycle_evidence(**{field: 1.0}))
     invalid.extend(
         (
+            _cycle_evidence(schema_version=2),
             _cycle_evidence(api_counts={**valid["api_counts"], "token": True}),
             _cycle_evidence(api_counts={**valid["api_counts"], "token": 1.0}),
             _cycle_evidence(local_counts={**valid["local_counts"], "status": True}),
@@ -419,29 +700,45 @@ def test_host_and_workflow_reject_non_integer_or_invalid_cycle_schema(tmp_path):
         assert _run_workflow_cycle_parser(evidence).returncode != 0
 
 
-def test_host_and_workflow_validate_continuous_terminal_reopen_evidence(tmp_path):
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    step = next(
-        item for item in workflow["jobs"]["activate"]["steps"]
-        if item.get("name") == "Execute bounded shadow action"
-    )
-    parser = step["run"].split("runtime_evidence=", 1)[1]
-    parser = parser.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+def test_host_and_workflow_validate_nested_continuity_schema_3(tmp_path):
+    persisted = PhysicalContinuityEvidence(
+        schema_version=1,
+        hydration_source="persisted",
+        previous_observed_at=datetime(2026, 8, 8, 10, 0, tzinfo=timezone.utc),
+        history_depth=2,
+    ).to_safe_dict()
+    valid = _cycle_evidence(continuity=persisted)
+    assert _run_host_cycle_parser(valid, tmp_path).returncode == 0
+    assert _run_workflow_cycle_parser(valid).returncode == 0
 
+    invalid_continuity = (
+        None,
+        {**persisted, "schema_version": True},
+        {**persisted, "schema_version": 2},
+        {**persisted, "hydration_source": "unknown"},
+        {**persisted, "previous_observed_at": "2026-08-08T10:00:00"},
+        {**persisted, "previous_observed_at": True},
+        {**persisted, "history_depth": True},
+        {**persisted, "history_depth": -1},
+        {**persisted, "baseline_source": "synthetic_event_time"},
+        {**persisted, "baseline_sample_index": 3},
+        {**persisted, "baseline_sample_index": True},
+        {**persisted, "baseline_time_estimated": False},
+        {**persisted, "extra": 1},
+    )
+    for continuity in invalid_continuity:
+        evidence = _cycle_evidence(continuity=continuity)
+        assert _run_host_cycle_parser(evidence, tmp_path).returncode != 0
+        assert _run_workflow_cycle_parser(evidence).returncode != 0
+
+
+def test_host_and_workflow_validate_continuous_terminal_reopen_evidence(tmp_path):
+    del tmp_path
     terminal = _terminal_evidence()
-    payload = tmp_path / "terminal-evidence.json"
-    payload.write_text(json.dumps(terminal), encoding="utf-8")
-    host = _run_sourced(
-        'validate_safe_evidence shadow-continuous terminal "$3" "$4" "$5" <"$2"',
-        str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID,
+    host = _run_validator(
+        terminal, "shadow-continuous", "terminal", "json-lines"
     )
-    workflow_result = subprocess.run(
-        [
-            sys.executable, "-", json.dumps({"StandardOutputContent": json.dumps(terminal)}),
-            "stop", SOURCE_SHA, IMAGE, ACTIVATION_ID,
-        ],
-        input=parser, check=False, capture_output=True, text=True,
-    )
+    workflow_result = _run_workflow_parser(terminal, "stop")
     assert host.returncode == 0, host.stderr
     assert workflow_result.returncode == 0, workflow_result.stderr
 
@@ -453,19 +750,78 @@ def test_host_and_workflow_validate_continuous_terminal_reopen_evidence(tmp_path
         {"schema_version": 1},
     ):
         malformed = {**terminal, **updates}
-        payload.write_text(json.dumps(malformed), encoding="utf-8")
-        assert _run_sourced(
-            'validate_safe_evidence shadow-continuous terminal "$3" "$4" "$5" <"$2"',
-            str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID,
+        assert _run_validator(
+            malformed, "shadow-continuous", "terminal", "json-lines"
         ).returncode != 0
-        failed_workflow = subprocess.run(
-            [
-                sys.executable, "-", json.dumps({"StandardOutputContent": json.dumps(malformed)}),
-                "stop", SOURCE_SHA, IMAGE, ACTIVATION_ID,
-            ],
-            input=parser, check=False, capture_output=True, text=True,
-        )
+        failed_workflow = _run_workflow_parser(malformed, "stop")
         assert failed_workflow.returncode != 0
+
+
+def test_actual_continuous_emitter_cycle_and_terminal_round_trip_consumers(
+    tmp_path,
+):
+    now = [0.0]
+    emitted = []
+
+    class StopAfterFirstCycle:
+        def __init__(self):
+            self.stopped = False
+
+        def set(self):
+            self.stopped = True
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, timeout=None):
+            now[0] += timeout or 0.0
+            self.stopped = True
+            return True
+
+    receipt = ShadowExecutionReceipt(
+        cycles=1,
+        http_attempts=6,
+        api_counts=_api_counts(),
+        db_identity="/var/lib/kiwoom/shadow-trades.db",
+        resources_closed=True,
+        local_counts=_local_counts(),
+        continuity=_continuity(),
+    )
+    policy = ExecutionPolicy.for_request(
+        ExecutionMode.SHADOW_CONTINUOUS,
+        ActivationTuple(
+            source_sha=SOURCE_SHA,
+            image_digest=IMAGE,
+            activation_id=ACTIVATION_ID,
+        ),
+    )
+    terminal_result = run_shadow_continuous(
+        policy,
+        runtime_factory=lambda *_args: type(
+            "Runtime",
+            (),
+            {"execute_once": lambda self: receipt},
+        )(),
+        emit=emitted.append,
+        lock_path=tmp_path / "emitter.lock",
+        clock=lambda: datetime(2026, 8, 8, 10, 0, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=StopAfterFirstCycle(),
+        monotonic=lambda: now[0],
+        lock_factory=lambda _path: nullcontext(),
+    )
+    assert len(emitted) == 1
+    cycle = emitted[0]
+    terminal = terminal_result.to_safe_dict()
+
+    assert _run_host_cycle_parser(cycle, tmp_path).returncode == 0
+    assert _run_workflow_cycle_parser(cycle).returncode == 0
+    host_terminal = _run_validator(
+        terminal, "shadow-continuous", "terminal", "json-lines"
+    )
+    workflow_terminal = _run_workflow_parser(terminal, "stop")
+    assert host_terminal.returncode == 0, host_terminal.stderr
+    assert workflow_terminal.returncode == 0, workflow_terminal.stderr
 
 
 def test_host_stop_fails_when_container_is_absent():

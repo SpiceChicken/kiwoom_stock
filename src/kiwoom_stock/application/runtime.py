@@ -6,6 +6,8 @@ import logging
 import os
 from pathlib import Path
 import threading
+import time
+from types import TracebackType
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol
 from zoneinfo import ZoneInfo
 
@@ -16,7 +18,11 @@ from kiwoom_stock.application.credential_preflight import (
     preflight_settings,
 )
 from kiwoom_stock.application.credentials import CredentialProvider
-from kiwoom_stock.application.ports import PaperTradeLedger, PhysicalStateRepository
+from kiwoom_stock.application.ports import (
+    MarketDataGateway,
+    PaperTradeLedger,
+    PhysicalStateRepository,
+)
 from kiwoom_stock.application.execution import ExecutionMode, ExecutionPolicy
 from kiwoom_stock.application.shadow_worker import (
     CalendarDecision,
@@ -35,6 +41,8 @@ from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.infrastructure.physical_state_repository import (
     AsyncPhysicalStateRepository,
 )
+from kiwoom_stock.domain.models import PhysicalContinuityEvidence
+from kiwoom_stock.domain.strategy import TargetStopPolicy
 from kiwoom_stock.infrastructure.kiwoom_credentials import (
     StrictFileCredentialProvider,
     credential_repository_boundary,
@@ -42,15 +50,38 @@ from kiwoom_stock.infrastructure.kiwoom_credentials import (
 from kiwoom_stock.infrastructure.kiwoom_market_only import (
     AllowlistedReadOnlySession,
     CachedMarketGateway,
+    KiwoomMarketDataGatewayAdapter,
     MarketOnlyClient,
     fetch_market_snapshot,
 )
 from kiwoom_stock.monitoring.engine import TradingEngine
 from kiwoom_stock.monitoring.local_shadow_notifier import LocalShadowNotifier
 from kiwoom_stock.settings import KiwoomApiMode, Settings
+from kiwoom_stock.utils.market_cal import seoul_now
 
 
 logger = logging.getLogger(__name__)
+
+NORMAL_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+
+
+def _start_normal_shutdown_deadline(
+    timeout_seconds: Optional[float] = None,
+) -> tuple[float, Callable[[], float]]:
+    """Create the shared normal-shutdown deadline and clamped budget reader."""
+
+    budget = (
+        NORMAL_SHUTDOWN_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    started_at = time.monotonic()
+    deadline = started_at + budget
+
+    def remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    return started_at, remaining
 
 
 class RuntimeDisabledError(RuntimeError):
@@ -83,7 +114,11 @@ def _default_credential_provider_factory(path: Path) -> CredentialProvider:
 
 
 class LedgerFactory(Protocol):
-    def __call__(self, db_path: Path) -> TradeLogger:
+    def __call__(
+        self,
+        db_path: Path,
+        clock: Callable[[], datetime],
+    ) -> TradeLogger:
         """Construct the configured paper ledger and physical queue owner."""
 
 
@@ -100,12 +135,18 @@ class EngineFactory(Protocol):
         *,
         ledger: PaperTradeLedger,
         physical_state_repository: PhysicalStateRepository,
+        market_gateway: MarketDataGateway,
+        target_stop_policy: TargetStopPolicy,
+        wall_clock: Callable[[], datetime],
     ) -> Any:
         """Build an engine from already constructed persistence dependencies."""
 
 
-def _default_ledger_factory(db_path: Path) -> TradeLogger:
-    return TradeLogger(db_path)
+def _default_ledger_factory(
+    db_path: Path,
+    clock: Callable[[], datetime],
+) -> TradeLogger:
+    return TradeLogger(db_path, clock=clock)
 
 
 def _default_shadow_ledger_factory(
@@ -127,24 +168,99 @@ def _default_engine_factory(
     *,
     ledger: PaperTradeLedger,
     physical_state_repository: PhysicalStateRepository,
+    market_gateway: MarketDataGateway,
+    target_stop_policy: Optional[TargetStopPolicy] = None,
+    wall_clock: Callable[[], datetime] = seoul_now,
 ) -> Any:
     return TradingEngine(
         client,
         app_config,
         ledger=ledger,
         physical_state_repository=physical_state_repository,
+        market_gateway=market_gateway,
+        target_stop_policy=target_stop_policy,
+        wall_clock=wall_clock,
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class TradingRuntime:
     """Fully wired runtime objects needed by the process entrypoint."""
 
     settings: Settings
     app_config: Dict[str, Any] = field(repr=False)
     output_dir_str: str
-    client: Any = field(repr=False)
     monitor: Any
+    _market_owner: Any = field(repr=False)
+    _ledger: PaperTradeLedger = field(repr=False)
+    _shutdown_budget_seconds: float = field(
+        default_factory=lambda: NORMAL_SHUTDOWN_TIMEOUT_SECONDS,
+        repr=False,
+    )
+    _shutdown_started_at: Optional[float] = field(default=None, init=False, repr=False)
+    _shutdown_remaining: Optional[Callable[[], float]] = field(
+        default=None, init=False, repr=False
+    )
+    _shutdown_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+    _shutdown_complete: threading.Event = field(
+        default_factory=threading.Event, init=False, repr=False
+    )
+    _shutdown_error: Optional[BaseException] = field(default=None, init=False, repr=False)
+    _shutdown_traceback: Optional[TracebackType] = field(
+        default=None, init=False, repr=False
+    )
+
+    def shutdown_engine(self) -> None:
+        """Let one caller own close while peers share its bounded result."""
+
+        selected_remaining: Optional[Callable[[], float]]
+        with self._shutdown_lock:
+            owner = self._shutdown_remaining is None
+            if owner:
+                started_at, selected_remaining = _start_normal_shutdown_deadline(
+                    self._shutdown_budget_seconds
+                )
+                self._shutdown_started_at = started_at
+                self._shutdown_remaining = selected_remaining
+            else:
+                selected_remaining = self._shutdown_remaining
+        assert selected_remaining is not None
+
+        if owner:
+            try:
+                set_deadline = getattr(self._ledger, "set_shutdown_deadline", None)
+                if callable(set_deadline):
+                    set_deadline(selected_remaining)
+                self.monitor._deadline_remaining = selected_remaining
+                stop_event = getattr(self.monitor, "_stop_event", None)
+                if stop_event is None:
+                    stop_event = threading.Event()
+                    self.monitor._stop_event = stop_event
+                stop_event.set()
+                self.monitor.close()
+            except BaseException as error:
+                with self._shutdown_lock:
+                    self._shutdown_error = error
+                    self._shutdown_traceback = error.__traceback__
+                raise
+            finally:
+                self._shutdown_complete.set()
+            return
+
+        if not self._shutdown_complete.wait(timeout=selected_remaining()):
+            raise RuntimeError("normal runtime shutdown deadline exceeded")
+        with self._shutdown_lock:
+            shutdown_error = self._shutdown_error
+            error_traceback = self._shutdown_traceback
+        if shutdown_error is not None:
+            raise shutdown_error.with_traceback(error_traceback)
+
+    def close(self) -> None:
+        """Close the private market/auth lifecycle owner without network revoke."""
+
+        self._market_owner.close()
 
 
 class ShadowExecutionFailure(ShadowCycleTerminated):
@@ -262,6 +378,9 @@ class ShadowRuntime:
             or local_counts["paper_buy"] + local_counts["paper_sell"] > 1
         ):
             raise RuntimeError("shadow runtime reported invalid local evidence")
+        continuity = cycle.get("continuity")
+        if not isinstance(continuity, PhysicalContinuityEvidence):
+            raise RuntimeError("shadow runtime reported invalid continuity evidence")
         return ShadowExecutionReceipt(
             cycles=1,
             http_attempts=attempts,
@@ -269,6 +388,7 @@ class ShadowRuntime:
             db_identity=str(self._db_path),
             resources_closed=True,
             local_counts=local_counts,
+            continuity=continuity,
         )
 
     def _checkpoint_lifecycle(self) -> None:
@@ -292,6 +412,7 @@ def create_trading_runtime(
         _default_physical_state_repository_factory
     ),
     prevalidated_settings: Optional[Settings] = None,
+    clock: Callable[[], datetime] = seoul_now,
 ) -> TradingRuntime:
     """Validate settings and build the production monitor graph."""
     preflight = (
@@ -314,30 +435,47 @@ def create_trading_runtime(
     physical_state_repository: Optional[PhysicalStateRepository] = None
     client: Any = None
     try:
-        ledger = ledger_factory(settings.database.path)
+        ledger = ledger_factory(settings.database.path, clock)
         physical_state_repository = physical_state_repository_factory(ledger)
         endpoint = settings.kiwoom.endpoint
         credentials = preflight.credentials
         if endpoint is None or credentials is None:
             raise ValueError("enabled credential preflight is incomplete")
         client = client_factory(credentials=credentials, endpoint=endpoint)
-        client.ensure_auth_ready()
+        market_gateway = KiwoomMarketDataGatewayAdapter.from_client(client)
+        market_gateway.preflight()
         monitor = engine_factory(
             client,
             app_config,
             ledger=ledger,
             physical_state_repository=physical_state_repository,
+            market_gateway=market_gateway,
+            target_stop_policy=settings.strategy.target_stop_policy,
+            wall_clock=clock,
         )
     except BaseException:
-        _close_failed_runtime_resources(client, physical_state_repository, ledger)
+        try:
+            _, deadline_remaining = _start_normal_shutdown_deadline()
+            _close_failed_runtime_resources(
+                client,
+                physical_state_repository,
+                ledger,
+                deadline_remaining,
+            )
+        except BaseException as error:
+            logger.error(
+                "Runtime construction rollback setup failed (type=%s).",
+                type(error).__name__,
+            )
         raise
 
     return TradingRuntime(
         settings=settings,
         app_config=app_config,
         output_dir_str=config_module.OUTPUT_DIR_STR,
-        client=client,
         monitor=monitor,
+        _market_owner=client,
+        _ledger=ledger,
     )
 
 
@@ -422,10 +560,12 @@ def create_shadow_runtime(
         admission.checkpoint()
         client = market_client_factory(credentials, session=session)
         admission.checkpoint()
+        live_gateway = KiwoomMarketDataGatewayAdapter.from_client(client)
         snapshot = fetch_market_snapshot(
             client,
             stock_code=policy.stock_code,
             proxy_code=policy.proxy_code,
+            market_gateway=live_gateway,
         )
         admission.checkpoint()
         gateway = CachedMarketGateway(policy.stock_code, policy.proxy_code, snapshot)
@@ -444,6 +584,8 @@ def create_shadow_runtime(
             app_config,
             ledger=ledger,
             physical_state_repository=repository,
+            market_gateway=gateway,
+            target_stop_policy=settings.strategy.target_stop_policy,
             notifier=notifier,
             paper_transition_guard=policy.assert_paper_transition,
             wall_clock=admission.clock,
@@ -559,16 +701,75 @@ def _close_failed_runtime_resources(
     client: Any,
     physical_state_repository: Optional[PhysicalStateRepository],
     ledger: Optional[PaperTradeLedger],
+    deadline_remaining: Callable[[], float],
 ) -> None:
-    """Release constructed local resources without replacing the primary error."""
-    for label, resource in (
-        ("Kiwoom client", client),
-        ("physical-state repository", physical_state_repository),
-        ("paper ledger", ledger),
-    ):
-        if resource is None or not hasattr(resource, "close"):
-            continue
+    """Bound rollback liveness without claiming timed-out resources were closed."""
+
+    completed = threading.Event()
+    phase = ["coordinator start"]
+    phase_lock = threading.Lock()
+
+    def close_resources() -> None:
         try:
-            resource.close()
-        except BaseException:
-            logger.exception("Failed to close %s during runtime construction rollback.", label)
+            with phase_lock:
+                phase[0] = "paper ledger deadline installation"
+            try:
+                set_deadline = getattr(ledger, "set_shutdown_deadline", None)
+                if callable(set_deadline):
+                    set_deadline(deadline_remaining)
+            except BaseException as error:
+                logger.error(
+                    "Runtime construction rollback deadline installation failed "
+                    "for paper ledger (type=%s).",
+                    type(error).__name__,
+                )
+            for label, resource in (
+                ("Kiwoom client", client),
+                ("physical-state repository", physical_state_repository),
+                ("paper ledger", ledger),
+            ):
+                with phase_lock:
+                    phase[0] = label
+                try:
+                    close = getattr(resource, "close", None)
+                    if callable(close):
+                        close()
+                except BaseException as error:
+                    logger.error(
+                        "Failed to close %s during runtime construction rollback "
+                        "(type=%s).",
+                        label,
+                        type(error).__name__,
+                    )
+        finally:
+            with phase_lock:
+                phase[0] = "complete"
+                completed.set()
+
+    coordinator = threading.Thread(
+        target=close_resources,
+        name="RuntimeConstructionRollback",
+        daemon=True,
+    )
+    try:
+        coordinator.start()
+        finished = completed.wait(timeout=deadline_remaining())
+    except BaseException as error:
+        with phase_lock:
+            phase_snapshot = phase[0]
+        logger.error(
+            "Runtime construction rollback coordination failed "
+            "(phase=%s, type=%s).",
+            phase_snapshot,
+            type(error).__name__,
+        )
+        return
+    if not finished:
+        with phase_lock:
+            if completed.is_set():
+                return
+            phase_snapshot = phase[0]
+        logger.warning(
+            "Runtime construction rollback deadline exceeded (phase=%s).",
+            phase_snapshot,
+        )

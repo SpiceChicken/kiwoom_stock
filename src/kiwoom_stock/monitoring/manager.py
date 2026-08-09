@@ -1,12 +1,48 @@
 import logging
-from typing import Callable, Dict, List, Optional
-from datetime import datetime
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from datetime import date, datetime
+from numbers import Real
+from typing import Callable, Dict, List, Mapping, Optional
 
-from kiwoom_stock.application.ports import MarketDataGateway
-from kiwoom_stock.domain.models import Position
+from kiwoom_stock.application.ports import (
+    MarketDataCollectionError,
+    MarketDataFailureKind,
+    MarketDataGateway,
+    PaperTradeLedger,
+    PaperTradePersistenceError,
+    PositionTransitionReceipt,
+)
+from kiwoom_stock.application.session import CycleContext
+from kiwoom_stock.domain.models import Position, PositionStatus
+from kiwoom_stock.domain.strategy import (
+    StrategySemanticsValidationError,
+    calculate_position_return_percentage_points,
+)
+from kiwoom_stock.utils.market_cal import (
+    KrxCalendarError,
+    current_krx_session,
+    next_krx_session,
+    require_aware_kst,
+    seoul_now,
+)
 
 # utils에서 설정한 핸들러를 상속받기 위해 로거 선언
 logger = logging.getLogger(__name__)
+
+
+def _validated_atr(value: object, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+    ):
+        raise StrategySemanticsValidationError(
+            f"{name} must be a finite nonnegative number"
+        )
+    return float(value)
 
 class StockManager:
     """
@@ -16,10 +52,14 @@ class StockManager:
     def __init__(
         self,
         market_gateway: MarketDataGateway,
-        db,
+        db: PaperTradeLedger,
         filter_config: Dict,
         *,
         clock: Optional[Callable[[], datetime]] = None,
+        current_session_resolver: Callable[[datetime], Optional[date]] = (
+            current_krx_session
+        ),
+        next_session_resolver: Callable[[date], date] = next_krx_session,
         paper_transition_guard: Callable[[], None] = lambda: None,
         strict_paper_errors: bool = False,
     ):
@@ -27,56 +67,121 @@ class StockManager:
         self.db = db
         self.etf_keywords = tuple(filter_config.get("etf_keywords", []))
         self.max_stocks = filter_config.get("max_stocks", 50)
-        self._clock = clock
+        self._clock = clock or seoul_now
+        self._current_session_resolver = current_session_resolver
+        self._next_session_resolver = next_session_resolver
         self._paper_transition_guard = paper_transition_guard
         self._strict_paper_errors = strict_paper_errors
         
         self.stocks: List[str] = []
         self.stock_names: Dict[str, str] = {}
 
-        raw_positions = self.db.load_open_positions()
-        # [개선] Position 객체로 관리
-        self.active_positions: Dict[str, Position] = {
-            code: Position(**data) for code, data in raw_positions.items()
-        }
+        raw_positions = self.db.load_active_positions()
+        candidates: Dict[str, Position] = {}
+        for code, data in raw_positions.items():
+            candidates[code] = Position(**data)
+        self.active_positions = candidates
+
+    def _now(self) -> datetime:
+        try:
+            return require_aware_kst(self._clock(), "position lifecycle clock")
+        except KrxCalendarError:
+            raise
+        except Exception as error:
+            raise KrxCalendarError("position lifecycle clock failed") from error
+
+    def _current_session(self, now: datetime) -> Optional[date]:
+        try:
+            return self._current_session_resolver(now)
+        except KrxCalendarError:
+            raise
+        except Exception as error:
+            raise KrxCalendarError("current XKRX session lookup failed") from error
+
+    @staticmethod
+    def _assert_transition_receipt(
+        receipt: PositionTransitionReceipt,
+        position: Position,
+        *,
+        previous_status: PositionStatus,
+        status: PositionStatus,
+        owning_session_date: date,
+        state_changed_at: datetime,
+    ) -> None:
+        if not isinstance(receipt, PositionTransitionReceipt):
+            raise PaperTradePersistenceError("invalid paper transition receipt")
+        if (
+            receipt.position_id != position.id
+            or receipt.stock_code != position.stock_code
+            or receipt.previous_status is not previous_status
+            or receipt.status is not status
+            or receipt.owning_session_date != owning_session_date
+            or receipt.state_changed_at != state_changed_at
+        ):
+            raise PaperTradePersistenceError("paper transition receipt mismatch")
 
     def update_target_stocks(self):
         """
         [Manager] 보유 종목을 최우선으로 포함하여 감시 리스트를 갱신합니다.
         
         """
-        try:
-            new_stocks = []
-            seen_codes = set() # 중복 체크용
-            
-            # 1. 실시간 거래대금 상위 종목 먼저 추가
-            upper_list = self.market_gateway.get_top_trading_value(market_tp="001")
-            for item in upper_list:
-                if len(new_stocks) >= self.max_stocks: break
-                code, name = item['stk_cd'], item['stk_nm']
-                
-                # ETF 제외 필터
-                if any(kw in name for kw in self.etf_keywords): continue
-                
-                if code not in seen_codes:
-                    new_stocks.append(code)
-                    seen_codes.add(code)
-                    self.stock_names[code] = name
+        upper_list = self.market_gateway.get_top_trading_value(market_tp="001")
+        if not isinstance(upper_list, Sequence) or isinstance(
+            upper_list,
+            (str, bytes, bytearray),
+        ):
+            raise MarketDataCollectionError(
+                MarketDataFailureKind.MALFORMED,
+                "top_trading_value",
+            )
+        if not upper_list:
+            raise MarketDataCollectionError(
+                MarketDataFailureKind.EMPTY,
+                "top_trading_value",
+            )
 
-            # 2. [핵심] 보유 종목을 리스트 끝에 추가 (단, max_stocks 여유가 있을 때)
-            # 보유 종목은 반드시 감시해야 하므로, 슬라이싱 전에 추가하는 것이 안전합니다.
-            for code, pos in self.active_positions.items():
-                if code not in seen_codes:
-                    new_stocks.append(code)
-                    seen_codes.add(code)
-                    self.stock_names[code] = pos.stock_name
+        new_stocks = []
+        new_names = dict(self.stock_names)
+        seen_codes = set()
+        for item in upper_list:
+            if len(new_stocks) >= self.max_stocks:
+                break
+            if not isinstance(item, Mapping):
+                raise MarketDataCollectionError(
+                    MarketDataFailureKind.MALFORMED,
+                    "top_trading_value",
+                )
+            code = item.get("stk_cd")
+            name = item.get("stk_nm")
+            if (
+                not isinstance(code, str)
+                or not code
+                or not isinstance(name, str)
+                or not name
+            ):
+                raise MarketDataCollectionError(
+                    MarketDataFailureKind.MALFORMED,
+                    "top_trading_value",
+                )
+            if any(keyword in name for keyword in self.etf_keywords):
+                continue
+            if code not in seen_codes:
+                new_stocks.append(code)
+                seen_codes.add(code)
+                new_names[code] = name
 
-            # 3. 최종 감시 종목 설정 (보유 종목을 포함한 리스트)
-            # 주의: 여기서 [:self.max_stocks]로 자르면 뒤에 붙인 보유 종목이 잘릴 수 있습니다.
-            self.stocks = new_stocks
-            logger.info(f"감시 종목 갱신 (총 {len(self.stocks)}개 | 보유: {len(self.active_positions)}개 포함)")
-        except Exception as e:
-            logger.error(f"종목 갱신 실패: {e}")
+        for code, position in self.active_positions.items():
+            if code not in seen_codes:
+                new_stocks.append(code)
+                seen_codes.add(code)
+                new_names[code] = position.stock_name
+
+        self.stocks, self.stock_names = new_stocks, new_names
+        logger.info(
+            "감시 종목 갱신 (총 %d개 | 보유: %d개 포함)",
+            len(self.stocks),
+            len(self.active_positions),
+        )
 
     def update_position_data(self, verdict: Dict):
         """
@@ -89,35 +194,117 @@ class StockManager:
             return None
 
         pos = self.active_positions[stock_code]
-
-        pos.sell_price = verdict['price']
+        current_price = verdict.get("price")
+        calculate_position_return_percentage_points(
+            getattr(pos, "buy_price", None),
+            current_price,
+        )
+        atr_percent = _validated_atr(verdict.get("atr_percent"), "atr_percent")
+        down_atr_percent = _validated_atr(
+            verdict.get("down_atr_percent"),
+            "down_atr_percent",
+        )
 
         # [New] ATR 정보를 Position 객체에 임시 저장 (메모리 전용)
         # DB 스키마에 없어도 객체 속성으로는 동적 할당 가능
-        # verdict에 'atr_percent'가 없으면 기본값 0.5 사용
-        pos.atr_percent = verdict['atr_percent']
-        pos.down_atr_percent = verdict['down_atr_percent']
+        pos.sell_price = current_price
+        pos.atr_percent = atr_percent
+        pos.down_atr_percent = down_atr_percent
         
         return pos
 
-    def get_total_pnl_status(self, realized_pnl: float) -> float:
-        """
-        [Manager] 실현 손익과 미실현 손익을 합산하여 현재 총 손익률을 반환합니다.
-        
-        """
-        # 미실현 손익 합산 (pos.calc_profit_rate 활용)
-        unrealized_pnl = sum(pos.calc_profit_rate for pos in self.active_positions.values())
-        return realized_pnl + unrealized_pnl
+    def calculate_cumulative_trade_return_score(
+        self,
+        realized_trade_return_score: float,
+    ) -> float:
+        """Add realized and active per-trade percentage-point returns without weighting."""
+        if (
+            isinstance(realized_trade_return_score, bool)
+            or not isinstance(realized_trade_return_score, Real)
+            or not math.isfinite(float(realized_trade_return_score))
+        ):
+            raise StrategySemanticsValidationError(
+                "realized_trade_return_score must be a finite non-boolean number"
+            )
+        active_score = sum(
+            position.calc_profit_rate for position in self.active_positions.values()
+        )
+        score = float(realized_trade_return_score) + active_score
+        if not math.isfinite(score):
+            raise StrategySemanticsValidationError(
+                "cumulative_trade_return_score must be finite"
+            )
+        return score
 
-    def apply_paper_buy(self, verdict: Dict) -> tuple[bool, Optional[Dict]]:
+    def calculate_fresh_cumulative_trade_return_score(
+        self,
+        realized_trade_return_score: float,
+        fresh_active_marks: Mapping[str, float],
+    ) -> float:
+        """Purely score every active position from this cycle's exact fresh mark."""
+
+        active_codes = set(self.active_positions)
+        if set(fresh_active_marks) != active_codes:
+            raise StrategySemanticsValidationError(
+                "fresh active marks must exactly cover all active positions"
+            )
+        active_score = sum(
+            calculate_position_return_percentage_points(
+                self.active_positions[code].buy_price,
+                fresh_active_marks[code],
+            )
+            for code in sorted(active_codes)
+        )
+        if (
+            isinstance(realized_trade_return_score, bool)
+            or not isinstance(realized_trade_return_score, Real)
+            or not math.isfinite(float(realized_trade_return_score))
+        ):
+            raise StrategySemanticsValidationError(
+                "realized_trade_return_score must be a finite non-boolean number"
+            )
+        score = float(realized_trade_return_score) + active_score
+        if not math.isfinite(score):
+            raise StrategySemanticsValidationError(
+                "cumulative_trade_return_score must be finite"
+            )
+        return score
+
+    def get_total_pnl_status(self, realized_pnl: float) -> float:
+        """Deprecated compatibility wrapper for one migration window."""
+        import warnings
+
+        warnings.warn(
+            "get_total_pnl_status() is deprecated; use "
+            "calculate_cumulative_trade_return_score().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.calculate_cumulative_trade_return_score(realized_pnl)
+
+    def apply_paper_buy(
+        self,
+        verdict: Dict,
+        context: Optional[CycleContext] = None,
+    ) -> tuple[bool, Optional[Dict]]:
         """
         [Manager] 브로커 주문 없이 paper 매수 상태만 기록합니다.
 
         """
         stock_code = verdict['stock_code']
         forces = verdict.get('forces', {})
-        
+
         try:
+            now = context.now if context is not None else self._now()
+            owning_session_date = (
+                context.xkrx_session_date
+                if context is not None
+                else self._current_session(now)
+            )
+            if owning_session_date is None:
+                raise KrxCalendarError(
+                    "paper buy requires a current regular XKRX session"
+                )
             # 1. 최종 paper buy_data 구성
             buy_data = {
                 "stock_code": stock_code,
@@ -133,8 +320,11 @@ class StockManager:
                 "impulse": forces.get('impulse', 0.0),
                 "net_force": forces.get('net_force', 0.0),
 
-                "buy_time": (self._clock or datetime.now)().strftime('%Y-%m-%d %H:%M:%S'),
-                "buy_regime": verdict.get('regime')
+                "buy_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+                "buy_regime": verdict.get('regime'),
+                "status": PositionStatus.OPEN,
+                "owning_session_date": owning_session_date,
+                "state_changed_at": now,
             }
             
             # 2. 격리된 paper DB 기록 및 내부 포지션 업데이트
@@ -150,21 +340,53 @@ class StockManager:
                 raise
             return False, None
 
-    def apply_paper_sell(self, verdict: Dict, reason: str) -> tuple[bool, Optional[Position]]:
+    def apply_paper_sell(
+        self,
+        verdict: Dict,
+        reason: str,
+        context: Optional[CycleContext] = None,
+    ) -> tuple[bool, Optional[Position]]:
         """
         [Manager] 브로커 주문 없이 paper 매도 상태만 기록합니다.
         """
         stock_code = verdict['stock_code']
         
         try:
-            # 1. paper DB 기록용 데이터 생성
             pos = self.active_positions[stock_code]
-            pos.sell_price = verdict['price']
-            pos.sell_reason = reason
+            if pos.status is not PositionStatus.OPEN:
+                raise PaperTradePersistenceError(
+                    "only OPEN can become CLOSED"
+                )
+            candidate = replace(
+                pos,
+                sell_price=verdict['price'],
+                sell_reason=reason,
+            )
+            if pos.owning_session_date is None:
+                raise PaperTradePersistenceError(
+                    "active position has no owning session metadata"
+                )
 
-            # 2. 격리된 paper DB 기록 및 내부 포지션 업데이트
             self._paper_transition_guard()
-            self.db.record_sell(pos)
+            receipt = (
+                self.db.record_sell(candidate, state_changed_at=context.now)
+                if context is not None
+                else self.db.record_sell(candidate)
+            )
+            self._assert_transition_receipt(
+                receipt,
+                pos,
+                previous_status=PositionStatus.OPEN,
+                status=PositionStatus.CLOSED,
+                owning_session_date=pos.owning_session_date,
+                state_changed_at=receipt.state_changed_at,
+            )
+            pos.sell_price = candidate.sell_price
+            pos.sell_reason = candidate.sell_reason
+            pos.sell_time = receipt.state_changed_at.strftime("%Y-%m-%d %H:%M:%S")
+            pos.profit_rate = candidate.calc_profit_rate
+            pos.status = receipt.status
+            pos.state_changed_at = receipt.state_changed_at
             del self.active_positions[pos.stock_code]
             
             return True, pos
@@ -174,6 +396,97 @@ class StockManager:
             if self._strict_paper_errors:
                 raise
             return False, None
+
+    def apply_paper_mark_overnight(
+        self,
+        position: Position,
+        context: Optional[CycleContext] = None,
+    ) -> Position:
+        """Durably mark one OPEN position before publishing memory state."""
+
+        if position.status is not PositionStatus.OPEN:
+            raise PaperTradePersistenceError("only OPEN can become OVERNIGHT")
+        if position.owning_session_date is None:
+            raise PaperTradePersistenceError("OPEN position has no owning session")
+        now = context.now if context is not None else self._now()
+        current_session = (
+            context.xkrx_session_date
+            if context is not None
+            else self._current_session(now)
+        )
+        if current_session != position.owning_session_date:
+            raise PaperTradePersistenceError(
+                "overnight mark requires the owning regular XKRX session"
+            )
+        self._paper_transition_guard()
+        receipt = self.db.mark_position_overnight(
+            position,
+            state_changed_at=now,
+        )
+        self._assert_transition_receipt(
+            receipt,
+            position,
+            previous_status=PositionStatus.OPEN,
+            status=PositionStatus.OVERNIGHT,
+            owning_session_date=position.owning_session_date,
+            state_changed_at=now,
+        )
+        position.status = receipt.status
+        position.state_changed_at = receipt.state_changed_at
+        return position
+
+    def reconcile_overnight_positions(
+        self,
+        context: Optional[CycleContext] = None,
+    ) -> int:
+        """Reopen stale OVERNIGHT rows once in the current regular session."""
+
+        now = context.now if context is not None else self._now()
+        current_session = (
+            context.xkrx_session_date
+            if context is not None
+            else self._current_session(now)
+        )
+        if current_session is None:
+            return 0
+        reopened = 0
+        for position in tuple(self.active_positions.values()):
+            if position.status is not PositionStatus.OVERNIGHT:
+                continue
+            owner = position.owning_session_date
+            if owner is None:
+                raise PaperTradePersistenceError(
+                    "OVERNIGHT position has no owning session"
+                )
+            try:
+                next_session = self._next_session_resolver(owner)
+            except KrxCalendarError:
+                raise
+            except Exception as error:
+                raise KrxCalendarError("next XKRX session lookup failed") from error
+            if current_session == owner:
+                continue
+            if current_session < next_session:
+                continue
+            self._paper_transition_guard()
+            receipt = self.db.reopen_position(
+                position,
+                owning_session_date=current_session,
+                state_changed_at=now,
+            )
+            self._assert_transition_receipt(
+                receipt,
+                position,
+                previous_status=PositionStatus.OVERNIGHT,
+                status=PositionStatus.OPEN,
+                owning_session_date=current_session,
+                state_changed_at=now,
+            )
+            position.status = receipt.status
+            position.owning_session_date = receipt.owning_session_date
+            position.state_changed_at = receipt.state_changed_at
+            reopened += 1
+        return reopened
 
     def process_buy_order(self, verdict: Dict) -> tuple[bool, Optional[Dict]]:
         """Legacy paper-only compatibility wrapper; never submit a broker order here."""

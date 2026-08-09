@@ -1,7 +1,7 @@
 """Characterize the SQLite paper ledger without external services or live orders."""
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 import json
 import os
 from pathlib import Path
@@ -12,11 +12,22 @@ import tempfile
 import textwrap
 import unittest
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from kiwoom_stock.core import database as database_module
 from kiwoom_stock.core.database import TradeLogger
-from kiwoom_stock.monitoring import manager as manager_module
 from kiwoom_stock.monitoring.manager import Position, StockManager
+
+
+PAPER_FORCES = {
+    "thrust": 0.1,
+    "gravity": -0.2,
+    "drag": -0.3,
+    "magnetic": 0.4,
+    "jerk": 0.5,
+    "impulse": 0.6,
+    "net_force": 0.7,
+}
 
 
 def _frozen_datetime(value: datetime):
@@ -56,14 +67,92 @@ class _ForbiddenExternalFacade:
 
 
 class _PositionOnlyDatabase:
-    def load_open_positions(self):
+    def load_active_positions(self):
         return {}
 
 
 class PaperLedgerCharacterizationTests(unittest.TestCase):
+    def test_fractional_return_is_persisted_and_aggregated_without_pre_rounding(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            db_path = Path(temporary_directory) / "raw-return.sqlite3"
+            state_time = datetime(
+                2026, 8, 7, 11, 0, 0, tzinfo=ZoneInfo("Asia/Seoul")
+            )
+            clock = lambda: state_time
+            first = TradeLogger(db_path, clock=clock)
+            try:
+                buy_id = first.record_buy(
+                    {
+                        "stock_code": "005930",
+                        "stock_name": "Samsung",
+                        "buy_price": 10_000.0,
+                        "buy_time": "2026-08-07 10:00:00",
+                        "buy_regime": "STABLE_BULL",
+                        "owning_session_date": date(2026, 8, 7),
+                        "state_changed_at": state_time,
+                        **PAPER_FORCES,
+                    }
+                )
+                position = Position(
+                    id=buy_id,
+                    stock_code="005930",
+                    stock_name="Samsung",
+                    buy_price=10_000.0,
+                    buy_time="2026-08-07 10:00:00",
+                    buy_regime="STABLE_BULL",
+                    sell_price=10_255.5,
+                    sell_reason="Fixed Target (2.555 %p; percentage-points-v1)",
+                    owning_session_date=date(2026, 8, 7),
+                    state_changed_at=state_time,
+                )
+                first.record_sell(position)
+                first.conn.execute(
+                    "INSERT INTO trades (status, sell_time, profit_rate) "
+                    "VALUES ('CLOSED', '2026-08-06 14:00:00', 99.0)"
+                )
+                first.conn.commit()
+            finally:
+                first.close()
+
+            reopened = TradeLogger(db_path, clock=clock)
+            try:
+                row = reopened.conn.execute(
+                    "SELECT profit_rate, sell_reason FROM trades WHERE id = ?",
+                    (buy_id,),
+                ).fetchone()
+                self.assertEqual(row["profit_rate"], 2.555)
+                self.assertNotEqual(row["profit_rate"], 2.55)
+                self.assertEqual(
+                    reopened.get_cumulative_realized_trade_return_score(
+                        date(2026, 8, 7)
+                    ),
+                    2.555,
+                )
+                self.assertIn("2.555 %p", row["sell_reason"])
+                self.assertEqual(
+                    reopened.get_cumulative_realized_trade_return_score(
+                        date(2026, 8, 6)
+                    ),
+                    99.0,
+                )
+                with self.assertRaisesRegex(ValueError, "XKRX session"):
+                    reopened.get_cumulative_realized_trade_return_score(
+                        date(2026, 8, 9)
+                    )
+                with self.assertRaisesRegex(TypeError, "must be a date"):
+                    reopened.get_cumulative_realized_trade_return_score(
+                        datetime(2026, 8, 7, 10, 0)
+                    )
+                with self.assertWarns(DeprecationWarning):
+                    self.assertEqual(reopened.get_today_realized_pnl(), 2.555)
+            finally:
+                reopened.close()
+
     def test_schema_custom_path_recovery_and_open_closed_transition(self):
         buy_time = datetime(2026, 7, 17, 10, 0, 0)
         sell_time = datetime(2026, 7, 17, 11, 0, 0)
+        kst = ZoneInfo("Asia/Seoul")
+        lifecycle_time = [buy_time.replace(tzinfo=kst)]
         external = _ForbiddenExternalFacade()
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -76,7 +165,7 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                 "connect",
                 autospec=True,
             ) as network_connect:
-                first = TradeLogger(str(db_path))
+                first = TradeLogger(str(db_path), clock=lambda: lifecycle_time[0])
                 try:
                     table_names = {
                         row[0]
@@ -115,6 +204,8 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                             "sell_time",
                             "sell_reason",
                             "status",
+                            "owning_session_date",
+                            "state_changed_at",
                         },
                     )
                     self.assertEqual(
@@ -157,6 +248,8 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                             "sell_time": ("TEXT", 0, None, 0),
                             "sell_reason": ("TEXT", 0, None, 0),
                             "status": ("TEXT", 0, "'OPEN'", 0),
+                            "owning_session_date": ("TEXT", 0, None, 0),
+                            "state_changed_at": ("TEXT", 0, None, 0),
                         },
                     )
                     self.assertEqual(
@@ -178,7 +271,12 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                         },
                     )
 
-                    manager = StockManager(external, first, filter_config={})
+                    manager = StockManager(
+                        external,
+                        first,
+                        filter_config={},
+                        clock=lambda: lifecycle_time[0],
+                    )
                     manager.stock_names["005930"] = "Samsung"
                     verdict = {
                         "stock_code": "005930",
@@ -194,8 +292,7 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                             "net_force": 2.0,
                         },
                     }
-                    with patch.object(manager_module, "datetime", _frozen_datetime(buy_time)):
-                        bought, buy_data = manager.process_buy_order(verdict)
+                    bought, buy_data = manager.process_buy_order(verdict)
 
                     self.assertTrue(bought)
                     self.assertIsNotNone(buy_data)
@@ -203,18 +300,23 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                 finally:
                     first.close()
 
-                second = TradeLogger(str(db_path))
+                second = TradeLogger(str(db_path), clock=lambda: lifecycle_time[0])
                 try:
-                    recovered = StockManager(external, second, filter_config={})
+                    recovered = StockManager(
+                        external,
+                        second,
+                        filter_config={},
+                        clock=lambda: lifecycle_time[0],
+                    )
                     self.assertEqual(set(recovered.active_positions), {"005930"})
                     self.assertEqual(recovered.active_positions["005930"].buy_price, 50_000.0)
 
                     sell_verdict = {"stock_code": "005930", "price": 55_000.0}
-                    with patch.object(database_module, "datetime", _frozen_datetime(sell_time)):
-                        sold, sold_position = recovered.process_sell_order(
-                            sell_verdict,
-                            "characterized exit",
-                        )
+                    lifecycle_time[0] = sell_time.replace(tzinfo=kst)
+                    sold, sold_position = recovered.process_sell_order(
+                        sell_verdict,
+                        "characterized exit",
+                    )
 
                     self.assertTrue(sold)
                     self.assertIsNotNone(sold_position)
@@ -231,6 +333,11 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                     self.assertEqual(row["sell_price"], 55_000.0)
                     self.assertEqual(row["profit_rate"], 10.0)
                     self.assertEqual(row["sell_reason"], "characterized exit")
+                    self.assertEqual(row["owning_session_date"], "2026-07-17")
+                    self.assertEqual(
+                        row["state_changed_at"],
+                        "2026-07-17T11:00:00+09:00",
+                    )
                     self.assertEqual(
                         {
                             name: row[name]
@@ -256,7 +363,12 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
                     )
 
                     with patch.object(database_module, "datetime", _frozen_datetime(sell_time)):
-                        self.assertEqual(second.get_today_realized_pnl(), 10.0)
+                        self.assertEqual(
+                            second.get_cumulative_realized_trade_return_score(
+                                date(2026, 7, 17)
+                            ),
+                            10.0,
+                        )
                 finally:
                     second.close()
 
@@ -323,7 +435,7 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
             self.assertTrue(custom_path.is_file())
             self.assertFalse((temp_root / "trades.db").exists())
 
-    def test_total_pnl_is_unweighted_percentage_sum(self):
+    def test_cumulative_trade_return_score_is_unweighted_percentage_sum(self):
         manager = StockManager(_ForbiddenExternalFacade(), _PositionOnlyDatabase(), filter_config={})
         manager.active_positions = {
             "A": Position(
@@ -346,7 +458,12 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
             ),
         }
 
-        self.assertEqual(manager.get_total_pnl_status(realized_pnl=1.25), 6.25)
+        self.assertEqual(
+            manager.calculate_cumulative_trade_return_score(
+                realized_trade_return_score=1.25
+            ),
+            6.25,
+        )
 
 
 if __name__ == "__main__":

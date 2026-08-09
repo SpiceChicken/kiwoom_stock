@@ -7,7 +7,6 @@ import requests
 
 from kiwoom_stock.api.auth import Authenticator, Sleeper, UtcClock, _utc_now
 from kiwoom_stock.api.base import BaseClient
-from kiwoom_stock.api.services.account import AccountService
 from kiwoom_stock.api.services.market import MarketService
 from kiwoom_stock.application.credentials import KiwoomClientCredentials
 from kiwoom_stock.settings import KiwoomEndpoint
@@ -34,27 +33,26 @@ class KiwoomClient:
         shared_session = session if session is not None else requests.Session()
         shared_session.trust_env = False
         self._session = shared_session
-        self.auth = Authenticator(
+        self._auth = Authenticator(
             credentials,
             endpoint,
             session=shared_session,
             clock=clock,
             sleeper=sleeper,
         )
-        self.base = BaseClient(
-            self.auth,
+        self._base = BaseClient(
+            self._auth,
             endpoint,
             session=shared_session,
             sleeper=sleeper,
         )
-        self.account = AccountService(self.base)
-        self.market = MarketService(self.base)
+        self.market = MarketService(self._base)
         self._closed = False
 
     def ensure_auth_ready(self) -> None:
         """Explicitly issue/validate a token without redundant socket probing."""
 
-        self.auth.ensure_ready()
+        self._auth.ensure_ready()
 
     def close(self) -> None:
         """Clear local token state; never auto-revoke over the network."""
@@ -63,7 +61,7 @@ class KiwoomClient:
             return
         self._closed = True
         try:
-            self.auth.close()
+            self._auth.close()
         finally:
             if self._owns_session:
                 self._session.close()

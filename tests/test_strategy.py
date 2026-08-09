@@ -1,7 +1,14 @@
+from copy import deepcopy
+from datetime import datetime
+
 import pytest
 from kiwoom_stock.monitoring.strategy import TradingStrategy
 from kiwoom_stock.core.schema import SupplyData
 from kiwoom_stock.monitoring.manager import Position
+from kiwoom_stock.domain.strategy import (
+    StrategySemanticsValidationError,
+    TargetStopPolicy,
+)
 
 @pytest.fixture
 def strategy():
@@ -149,6 +156,211 @@ class TestExitLogic:
         
         # -100.0% 손절이나 에러가 뜨지 않고 완벽히 무시되어야 함
         assert reason is None, "0원 틱 방어막이 뚫려 잘못된 청산 사유가 발생했습니다."
+
+    @pytest.mark.parametrize(
+        "invalid_buy_price",
+        [None, True, float("nan"), float("inf"), 0.0, -1.0],
+        ids=["none", "bool", "nan", "inf", "zero", "negative"],
+    )
+    def test_invalid_buy_price_fails_before_exit_or_kinetic_state_mutation(
+        self,
+        strategy,
+        invalid_buy_price,
+    ):
+        pos = _setup_mock_position()
+        pos.buy_price = invalid_buy_price
+        strategy._kinetic_state[pos.stock_code] = {
+            "buy_price": 10_000.0,
+            "max_price": 10_500.0,
+        }
+        before = deepcopy(strategy._kinetic_state)
+
+        with pytest.raises(StrategySemanticsValidationError, match="buy_price"):
+            strategy.get_exit_reason(
+                pos,
+                current_price=10_300.0,
+                forces={
+                    "current_velocity": 4.0,
+                    "thrust": 3.0,
+                    "magnetic": 1.0,
+                    "jerk": -2.0,
+                },
+                now=datetime(2026, 8, 3, 15, 27),
+            )
+
+        assert strategy._kinetic_state == before
+        assert pos.status == "OPEN"
+
+    def test_missing_buy_price_fails_before_overnight_or_kinetic_state_creation(
+        self,
+        strategy,
+    ):
+        pos = _setup_mock_position()
+        del pos.buy_price
+        pos.status = "OVERNIGHT"
+
+        with pytest.raises(StrategySemanticsValidationError, match="buy_price"):
+            strategy.get_exit_reason(
+                pos,
+                current_price=10_300.0,
+                forces={
+                    "current_velocity": 4.0,
+                    "thrust": 3.0,
+                    "magnetic": 1.0,
+                },
+                now=datetime(2026, 8, 3, 15, 27),
+            )
+
+        assert pos.stock_code not in strategy._kinetic_state
+        assert pos.status == "OVERNIGHT"
+
+    def test_direct_strategy_defaults_policy_and_rejects_wrong_policy_adapter(self):
+        strategy = TradingStrategy({"debug_mode": True})
+
+        assert strategy.target_stop_policy == TargetStopPolicy()
+        with pytest.raises(TypeError):
+            TradingStrategy({}, target_stop_policy=object())
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"target_profit_rate": 0.03, "stop_loss_rate": -0.03},
+            {"target_profit_rate": 0.03},
+            {"target_stop_unit_version": "percentage-points-v1"},
+            {
+                "target_stop_unit_version": "ratio-v0",
+                "target_profit_percentage_points": 3.0,
+                "stop_loss_percentage_points": 3.0,
+            },
+            {
+                "target_stop_unit_version": "percentage-points-v1",
+                "target_profit_percentage_points": "3.0",
+                "stop_loss_percentage_points": 3.0,
+            },
+            {
+                "target_stop_unit_version": "percentage-points-v1",
+                "target_profit_percentage_points": True,
+                "stop_loss_percentage_points": 3.0,
+            },
+            {
+                "target_stop_unit_version": "percentage-points-v1",
+                "target_profit_percentage_points": float("nan"),
+                "stop_loss_percentage_points": 3.0,
+            },
+            {
+                "target_stop_unit_version": "percentage-points-v1",
+                "target_profit_percentage_points": 3.0,
+                "stop_loss_percentage_points": 0.0,
+            },
+        ],
+    )
+    def test_direct_strategy_rejects_ambiguous_or_invalid_target_stop(self, config):
+        with pytest.raises((TypeError, ValueError)):
+            TradingStrategy(config)
+
+    @pytest.mark.parametrize(
+        ("score", "expected"),
+        [(-4.9999, False), (-5.0, True), (-5.0001, True)],
+    )
+    def test_cumulative_trade_return_score_floor_is_inclusive(
+        self,
+        score,
+        expected,
+    ):
+        strategy = TradingStrategy(
+            {"cumulative_trade_return_score_floor": -5.0}
+        )
+
+        assert strategy.is_kill_switch_activated(score) is expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [True, float("nan"), float("inf"), 0.1],
+    )
+    def test_cumulative_trade_return_score_floor_rejects_invalid_values(
+        self,
+        value,
+    ):
+        with pytest.raises(StrategySemanticsValidationError):
+            TradingStrategy(
+                {"cumulative_trade_return_score_floor": value}
+            )
+
+    def test_direct_strategy_rejects_deprecated_score_floor_dict_key(self):
+        with pytest.raises(StrategySemanticsValidationError, match="unsupported"):
+            TradingStrategy({"total_loss_limit": -5.0})
+
+    @pytest.mark.parametrize(
+        ("current_price", "expected"),
+        [
+            (10255.499, None),
+            (10255.5, "Fixed Target"),
+            (10255.501, "Fixed Target"),
+            (9744.501, None),
+            (9744.5, "Fixed Stop"),
+            (9744.499, "Fixed Stop"),
+        ],
+    )
+    def test_fixed_target_stop_use_inclusive_full_precision_boundaries(
+        self,
+        current_price,
+        expected,
+    ):
+        strategy = TradingStrategy(
+            {"debug_mode": True},
+            target_stop_policy=TargetStopPolicy(
+                target_profit_percentage_points=2.555,
+                stop_loss_percentage_points=2.555,
+            ),
+        )
+        pos = _setup_mock_position(atr=20.0, down_atr=1.0)
+
+        reason = strategy.get_exit_reason(
+            pos,
+            current_price=current_price,
+            forces={"jerk": 0.0, "thrust": 1.0},
+            now=datetime(2026, 8, 3, 10, 0),
+        )
+
+        if expected is None:
+            assert reason is None
+        else:
+            assert reason is not None and expected in reason
+            assert "2.555 %p" in reason
+            assert "percentage-points-v1" in reason
+            assert all(term not in reason.lower() for term in ("pnl", "portfolio", "fill"))
+
+    def test_fixed_target_precedes_late_overnight_candidate(self):
+        strategy = TradingStrategy({"debug_mode": False})
+        pos = _setup_mock_position()
+        forces = {
+            "current_velocity": 3.0,
+            "thrust": 2.1,
+            "magnetic": 0.1,
+            "jerk": 0.0,
+        }
+
+        reason = strategy.get_exit_reason(
+            pos,
+            current_price=10300.0,
+            forces=forces,
+            now=datetime(2026, 8, 3, 15, 27),
+        )
+
+        assert reason is not None and "Fixed Target" in reason
+        assert pos.status == "OPEN"
+
+    def test_persisted_overnight_still_blocks_fixed_target(self):
+        strategy = TradingStrategy({"debug_mode": False})
+        pos = _setup_mock_position()
+        pos.status = "OVERNIGHT"
+
+        assert strategy.get_exit_reason(
+            pos,
+            current_price=10300.0,
+            forces={"jerk": 0.0},
+            now=datetime(2026, 8, 3, 15, 27),
+        ) is None
 
     def test_exit_panic_bailout(self, strategy):
         pos = _setup_mock_position()

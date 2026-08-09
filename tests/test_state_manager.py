@@ -1,4 +1,11 @@
 from kiwoom_stock.core.state_manager import PhysicalStateTracker
+from kiwoom_stock.domain.state import (
+    PhysicalStateBatchCommitReceipt,
+    PhysicalStateCommitReceipt,
+    PhysicalStateHydrationSource,
+    PhysicalStateLoadResult,
+    PhysicalStateWrite,
+)
 
 
 class RecordingPhysicalStateRepository:
@@ -6,12 +13,33 @@ class RecordingPhysicalStateRepository:
         self.submissions = []
         self.requested_code = None
 
-    def get_last_physical_state(self, stock_code):
+    def load_physical_state(self, stock_code):
         self.requested_code = stock_code
-        return None
+        return PhysicalStateLoadResult(PhysicalStateHydrationSource.INITIAL, None)
 
-    def submit_physical_state(self, stock_code, forces):
-        self.submissions.append((stock_code, dict(forces)))
+    def persist_physical_state(self, state, forces):
+        write = PhysicalStateWrite(state, tuple(dict(forces).items()))
+        return self.persist_physical_state_batch((write,)).items[0]
+
+    def persist_physical_state_batch(self, writes):
+        writes = tuple(writes)
+        receipts = tuple(
+            PhysicalStateCommitReceipt(
+                write.state.stock_code,
+                write.state.last_observed_at.isoformat(),
+                write.state.updated_at,
+            )
+            for write in writes
+        )
+        self.submissions.extend(
+            (write.state.stock_code, dict(write.forces)) for write in writes
+        )
+        return PhysicalStateBatchCommitReceipt(
+            receipts[0].generation, receipts, receipts[0].committed_at
+        )
+
+    def close(self):
+        pass
 
 
 def test_time_freeze_defense_volume_unchanged():

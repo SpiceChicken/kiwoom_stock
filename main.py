@@ -10,10 +10,12 @@ from kiwoom_stock.application.lifecycle import (
     run_post_market_tasks,
 )
 from kiwoom_stock.application.ports import (
+    MarketDataGateway,
     PaperTradeLedger,
     PhysicalStateRepository,
 )
 from kiwoom_stock.application.session import TradingSessionResult
+from kiwoom_stock.domain.strategy import TargetStopPolicy
 from kiwoom_stock.api.client import KiwoomClient
 from kiwoom_stock.application.runtime import create_trading_runtime
 from kiwoom_stock.monitoring.engine import TradingEngine
@@ -48,6 +50,9 @@ def _create_engine(
     *,
     ledger: PaperTradeLedger,
     physical_state_repository: PhysicalStateRepository,
+    market_gateway: MarketDataGateway,
+    target_stop_policy: TargetStopPolicy,
+    wall_clock: Callable[[], datetime],
 ) -> TradingEngine:
     """Preserve the public engine patch point behind the typed runtime seam."""
 
@@ -56,6 +61,9 @@ def _create_engine(
         app_config,
         ledger=ledger,
         physical_state_repository=physical_state_repository,
+        market_gateway=market_gateway,
+        target_stop_policy=target_stop_policy,
+        wall_clock=wall_clock,
     )
 
 
@@ -108,25 +116,25 @@ def _log_close_failure_preserving_primary(
     primary_error.add_note(f"monitor close also failed: {close_error}")
 
 
-def _close_runtime_client(client: Any) -> None:
-    """Close the local API owner after all post-market consumers finish."""
+def _close_runtime(runtime: Any) -> None:
+    """Close the runtime's private market/auth owner after all API consumers."""
 
-    if client is None:
+    if runtime is None:
         return
     primary_error = sys.exception()
     try:
-        client.close()
+        runtime.close()
     except BaseException as close_error:
         if primary_error is None:
             raise
         logger.critical(
-            "Kiwoom client close also failed while preserving %s: %s",
+            "Runtime close also failed while preserving %s: %s",
             type(primary_error).__name__,
             type(close_error).__name__,
             exc_info=(type(close_error), close_error, close_error.__traceback__),
         )
         primary_error.add_note(
-            "Kiwoom client close also failed with "
+            "Runtime close also failed with "
             f"{type(close_error).__name__}"
         )
 
@@ -204,7 +212,7 @@ def main(
             except KeyboardInterrupt as run_interrupt:
                 close_attempted = True
                 try:
-                    monitor.close()
+                    runtime.shutdown_engine()
                 except BaseException as close_error:
                     _log_close_failure_preserving_primary(run_interrupt, close_error)
                     raise run_interrupt
@@ -217,7 +225,7 @@ def main(
 
             close_attempted = True
             try:
-                monitor.close()
+                runtime.shutdown_engine()
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as close_error:
@@ -265,7 +273,7 @@ def main(
             if not close_attempted:
                 close_attempted = True
                 try:
-                    monitor.close()
+                    runtime.shutdown_engine()
                 except BaseException as close_error:
                     _log_close_failure_preserving_primary(primary_error, close_error)
             raise
@@ -286,7 +294,7 @@ def main(
         sys.exit(1)
     finally:
         if runtime is not None:
-            _close_runtime_client(getattr(runtime, "client", None))
+            _close_runtime(runtime)
 
 
 if __name__ == "__main__":

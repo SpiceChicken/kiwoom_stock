@@ -23,9 +23,9 @@ readonly KILL_AFTER_SECONDS="${KIWOOM_SHADOW_KILL_AFTER_SECONDS:-15}"
 readonly DOWNLOAD_TIMEOUT_SECONDS="${KIWOOM_SHADOW_DOWNLOAD_TIMEOUT_SECONDS:-45}"
 readonly FIRST_TICK_TIMEOUT_SECONDS="${KIWOOM_SHADOW_FIRST_TICK_TIMEOUT_SECONDS:-240}"
 readonly CONTAINER_NAME="kiwoom-shadow-once"
-readonly SHADOW_EVIDENCE_SCHEMA_VERSION=1
-readonly SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION=2
+# Evidence schema authority is the fixed standalone validator artifact.
 readonly ROLLOUT_BINDING_FILE="${KIWOOM_SHADOW_BINDING_FILE:-/var/lib/kiwoom-stock/shadow-rollout-current.json}"
+readonly VALIDATOR_PATH="/usr/local/libexec/kiwoom-shadow-runtime-evidence.py"
 
 ACTIVE_CONTAINER_NAME=""
 WORK_DIR=""
@@ -77,14 +77,18 @@ validate_source_sha() {
 }
 
 validate_hash() {
-    [[ "$1" =~ ^[0-9a-f]{64}$ ]] || fail "Compose hash must be 64 lowercase hex characters"
+    [[ "$1" =~ ^[0-9a-f]{64}$ ]] || fail "hash must be 64 lowercase hex characters"
 }
 
 validate_rollout_binding() {
-    local expected_worker_hash="$1"
-    local expected_document_hash="$2"
-    local actual_worker_hash metadata
+    local expected_source_sha="$1"
+    local expected_worker_hash="$2"
+    local expected_validator_hash="$3"
+    local expected_document_hash="$4"
+    local actual_worker_hash actual_validator_hash metadata
+    validate_source_sha "${expected_source_sha}"
     validate_hash "${expected_worker_hash}"
+    validate_hash "${expected_validator_hash}"
     validate_hash "${expected_document_hash}"
     [[ -f "${BASH_SOURCE[0]}" && ! -L "${BASH_SOURCE[0]}" ]] \
         || fail "installed worker metadata is invalid"
@@ -94,28 +98,41 @@ validate_rollout_binding() {
         || fail "installed worker must be root:root, mode 0750, one regular link"
     actual_worker_hash="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
     [[ "${actual_worker_hash}" == "${expected_worker_hash}" ]] \
-        || fail "installed worker hash does not match the approved pair"
+        || fail "installed worker hash does not match the approved artifact set"
+    [[ -f "${VALIDATOR_PATH}" && ! -L "${VALIDATOR_PATH}" ]] \
+        || fail "installed validator metadata is invalid"
+    metadata="$(stat -c '%u:%g:%a:%h:%F' -- "${VALIDATOR_PATH}")" \
+        || fail "installed validator metadata is unavailable"
+    [[ "${metadata}" == "0:0:750:1:regular file" ]] \
+        || fail "installed validator must be root:root, mode 0750, one regular link"
+    actual_validator_hash="$(sha256sum "${VALIDATOR_PATH}" | cut -d' ' -f1)"
+    [[ "${actual_validator_hash}" == "${expected_validator_hash}" ]] \
+        || fail "installed validator hash does not match the approved artifact set"
     [[ -f "${ROLLOUT_BINDING_FILE}" && ! -L "${ROLLOUT_BINDING_FILE}" ]] \
         || fail "rollout binding marker is absent or invalid"
     metadata="$(stat -c '%u:%g:%a:%h:%F' -- "${ROLLOUT_BINDING_FILE}")" \
         || fail "rollout binding metadata is unavailable"
     [[ "${metadata}" == "0:0:600:1:regular file" ]] \
         || fail "rollout binding must be root:root, mode 0600, one regular link"
-    python3 - "${ROLLOUT_BINDING_FILE}" "${expected_worker_hash}" \
+    python3 - "${ROLLOUT_BINDING_FILE}" "${expected_source_sha}" \
+        "${expected_worker_hash}" "${expected_validator_hash}" \
         "${expected_document_hash}" <<'PY' \
-        || fail "rollout binding does not match the approved pair"
+        || fail "rollout binding does not match the approved artifact set"
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     binding = json.load(stream)
 expected_keys = {
-    "source_sha", "worker_sha256", "shadow_document_sha256", "rollout_attempt_id"
+    "source_sha", "worker_sha256", "validator_sha256",
+    "shadow_document_sha256", "rollout_attempt_id"
 }
 valid = (
     set(binding) == expected_keys
-    and binding.get("worker_sha256") == sys.argv[2]
-    and binding.get("shadow_document_sha256") == sys.argv[3]
+    and binding.get("source_sha") == sys.argv[2]
+    and binding.get("worker_sha256") == sys.argv[3]
+    and binding.get("validator_sha256") == sys.argv[4]
+    and binding.get("shadow_document_sha256") == sys.argv[5]
 )
 raise SystemExit(0 if valid else 1)
 PY
@@ -312,111 +329,14 @@ validate_safe_evidence() {
     local expected_source_sha="$3"
     local expected_image="$4"
     local expected_activation_id="$5"
-    python3 -c '
-import json, sys
-mode, event, source_sha, image, activation_id = sys.argv[1:]
-records = []
-for raw in sys.stdin:
-    line = raw.strip()
-    if not line.startswith("{"):
-        continue
-    try:
-        item = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if item.get("mode") == mode and item.get("event") == event:
-        records.append(item)
-if not records:
-    raise SystemExit("safe shadow evidence was not found")
-item = records[-1]
-if (
-    item.get("source_sha") != source_sha
-    or item.get("image_digest") != image
-    or item.get("activation_id") != activation_id
-):
-    raise SystemExit("shadow evidence activation tuple mismatch")
-side = item.get("side_effects")
-required = ("broker_orders", "account", "oauth_revoke", "slack", "gemini", "s3", "reports")
-if not isinstance(side, dict) or any(side.get(name) is not False for name in required):
-    raise SystemExit("shadow evidence side effects are unsafe")
-if item.get("resources_closed") is not True:
-    raise SystemExit("shadow evidence does not prove resource closure")
-if event == "cycle":
-    attempts = item.get("http_attempts")
-    counts = item.get("api_counts")
-    local_counts = item.get("local_counts")
-    expected_api = {"token": 1, "stock_basic": 1, "stock_chart_5m": 1, "proxy_chart_60m": 1, "stock_strength": 1, "stock_orderbook": 1}
-    expected_local_keys = {"status", "paper_buy", "paper_sell", "error", "critical"}
-    integer_fields = (item.get("schema_version"), item.get("cycle_index"), item.get("cycles"), attempts, item.get("db_reopens"))
-    local_valid = (
-        isinstance(local_counts, dict)
-        and set(local_counts) == expected_local_keys
-        and all(type(value) is int for value in local_counts.values())
-        and local_counts["status"] == 1
-        and local_counts["error"] == 0
-        and local_counts["critical"] == 0
-        and local_counts["paper_buy"] in (0, 1)
-        and local_counts["paper_sell"] in (0, 1)
-        and local_counts["paper_buy"] + local_counts["paper_sell"] <= 1
-    )
-    if (
-        any(type(value) is not int for value in integer_fields)
-        or item.get("schema_version") != 2
-        or item.get("status") != "PASS"
-        or item.get("cycle_index") != 1
-        or item.get("cycles") != 1
-        or attempts != 6
-        or item.get("db_identity") != "/var/lib/kiwoom/shadow-trades.db"
-        or not isinstance(counts, dict)
-        or set(counts) != set(expected_api)
-        or any(type(value) is not int for value in counts.values())
-        or counts != expected_api
-        or not local_valid
-        or item.get("interval_seconds") != 60.0
-        or type(item.get("cycle_start_elapsed_seconds")) is not float
-        or item.get("cycle_start_elapsed_seconds") < 0.0
-        or item.get("observed_interval_seconds") is not None
-        or item.get("db_reopened") is not False
-        or item.get("db_reopens") != 0
-    ):
-        raise SystemExit("first continuous tick is invalid")
-elif event == "terminal":
-    if (item.get("status"), item.get("reason")) not in {
-        ("STOPPED", "stop-requested"),
-        ("DEADLINE", "run-deadline"),
-    }:
-        raise SystemExit("continuous stop terminal evidence is invalid")
-    cycles = item.get("cycles")
-    db_reopens = item.get("db_reopens")
-    first_start = item.get("first_cycle_start_elapsed_seconds")
-    second_start = item.get("second_cycle_start_elapsed_seconds")
-    second_interval = item.get("second_cycle_interval_seconds")
-    minimum_interval = item.get("minimum_cycle_interval_seconds")
-    if (
-        item.get("schema_version") != 2
-        or type(cycles) is not int
-        or cycles < 1
-        or type(db_reopens) is not int
-        or db_reopens != cycles - 1
-        or type(first_start) is not float
-        or first_start < 0.0
-    ):
-        raise SystemExit("continuous terminal timing evidence is invalid")
-    if cycles == 1:
-        if any(value is not None for value in (second_start, second_interval, minimum_interval)):
-            raise SystemExit("single-cycle terminal timing evidence is invalid")
-    elif (
-        type(second_start) is not float
-        or second_start - first_start < 60.0
-        or type(second_interval) is not float
-        or second_interval < 60.0
-        or abs((second_start - first_start) - second_interval) > 0.000001
-        or type(minimum_interval) is not float
-        or minimum_interval < 60.0
-    ):
-        raise SystemExit("multi-cycle terminal timing evidence is invalid")
-print(json.dumps(item, sort_keys=True, separators=(",", ":")))
-' "${expected_mode}" "${expected_event}" "${expected_source_sha}" "${expected_image}" "${expected_activation_id}"
+    python3 "${VALIDATOR_PATH}" \
+        --mode "${expected_mode}" \
+        --event "${expected_event}" \
+        --source-sha "${expected_source_sha}" \
+        --image-digest "${expected_image}" \
+        --activation-id "${expected_activation_id}" \
+        --input-format json-lines \
+        --output accepted-record
 }
 
 validate_container_identity() {
@@ -507,7 +427,7 @@ run_shadow_once() {
     local source_sha="$2"
     local activation_id="$3"
     local compose_hash="$4"
-    local compose_file
+    local compose_file logs evidence
     WORK_DIR="$(mktemp -d "${RUNTIME_PARENT}/kiwoom-shadow.XXXXXX")"
     compose_file="${WORK_DIR}/${SHADOW_COMPOSE_NAME}"
     download_compose "${source_sha}" "${compose_hash}" "${WORK_DIR}"
@@ -539,6 +459,11 @@ run_shadow_once() {
             emit_runtime_failure_sentinel "$(docker logs "${CONTAINER_NAME}" 2>&1 || true)" || true
             fail "shadow-once container failed or timed out"
         }
+    logs="$(docker logs "${CONTAINER_NAME}" 2>&1)"
+    evidence="$(validate_safe_evidence shadow-once oneshot \
+        "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
+        || fail "shadow one-shot safe evidence is missing or invalid"
+    printf '%s\n' "${evidence}"
     cleanup || fail "shadow container cleanup failed"
     trap - EXIT TERM
     printf 'shadow-once passed: source_sha=%s image=%s activation_id=%s side_effects=none\n' \
@@ -644,10 +569,12 @@ usage() {
     cat >&2 <<'EOF'
 usage:
   kiwoom-shadow-worker --desired-state oneshot|continuous --image DIGEST --source-sha SHA --activation-id ID \
-    --compose-shadow-sha256 HASH --expected-worker-sha256 HASH --expected-shadow-document-sha256 HASH \
+    --compose-shadow-sha256 HASH --expected-worker-sha256 HASH --expected-validator-sha256 HASH \
+    --expected-shadow-document-sha256 HASH \
     --expected-instance-id INSTANCE --region REGION
   kiwoom-shadow-worker --desired-state stop --image DIGEST --source-sha SHA \
-    --activation-id ID --expected-worker-sha256 HASH --expected-shadow-document-sha256 HASH \
+    --activation-id ID --expected-worker-sha256 HASH --expected-validator-sha256 HASH \
+    --expected-shadow-document-sha256 HASH \
     --expected-instance-id INSTANCE --region REGION
   The fixed SSM wrapper additionally passes --inherited-lock-fd 9.
 EOF
@@ -656,7 +583,7 @@ EOF
 main() {
     local image="" source_sha="" activation_id="" compose_hash=""
     local expected_instance="" region="" desired_state=""
-    local expected_worker_hash="" expected_document_hash=""
+    local expected_worker_hash="" expected_validator_hash="" expected_document_hash=""
     local inherited_lock_fd=""
     while (( $# )); do
         case "$1" in
@@ -665,6 +592,7 @@ main() {
             --activation-id) activation_id="${2:-}"; shift 2 ;;
             --compose-shadow-sha256) compose_hash="${2:-}"; shift 2 ;;
             --expected-worker-sha256) expected_worker_hash="${2:-}"; shift 2 ;;
+            --expected-validator-sha256) expected_validator_hash="${2:-}"; shift 2 ;;
             --expected-shadow-document-sha256) expected_document_hash="${2:-}"; shift 2 ;;
             --inherited-lock-fd) inherited_lock_fd="${2:-}"; shift 2 ;;
             --expected-instance-id) expected_instance="${2:-}"; shift 2 ;;
@@ -681,7 +609,8 @@ main() {
     command -v docker >/dev/null || fail "Docker is unavailable"
     acquire_activation_lock "${inherited_lock_fd}"
     validate_instance_identity
-    validate_rollout_binding "${expected_worker_hash}" "${expected_document_hash}"
+    validate_rollout_binding "${source_sha}" "${expected_worker_hash}" \
+        "${expected_validator_hash}" "${expected_document_hash}"
     case "${desired_state}" in
       oneshot|continuous|stop) ;;
       *) fail "desired state must be exactly oneshot, continuous, or stop" ;;
