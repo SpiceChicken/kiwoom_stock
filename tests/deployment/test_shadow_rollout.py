@@ -19,6 +19,13 @@ WORKER = Path("deploy/ec2/shadow_worker_control.sh")
 VALIDATOR = Path("deploy/ec2/shadow_runtime_evidence.py")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_github_run_attempt(monkeypatch):
+    """Keep local fallback assertions independent of GitHub runner metadata."""
+
+    monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
+
+
 def _host_evidence(action, rollout, installed):
     present = bool(installed)
     return {
