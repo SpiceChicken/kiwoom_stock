@@ -21,6 +21,9 @@ SHADOW_ROLLOUT_WORKFLOW_PATH = Path(
 SHADOW_ACTIVATION_WORKFLOW_PATH = Path(
     ".github/workflows/cd-shadow-worker-activation.yml"
 )
+SHADOW_MIGRATION_WORKFLOW_PATH = Path(
+    ".github/workflows/cd-shadow-rollout-document-migration.yml"
+)
 DEPLOYMENT_BOUNDARY_DOC = Path("docs/operations/deployment-boundary.md")
 CONTAINER_DEPLOYMENT_DOC = Path(
     "docs/operations/github-ec2-container-deployment.md"
@@ -81,6 +84,35 @@ def test_shadow_rollout_cd_has_exact_protected_source_only_wiring():
     assert "github.ref == 'refs/heads/main'" in text
     assert "validator_sha256=" in text
     assert "compile(open(\"deploy/ec2/shadow_runtime_evidence.py\"" in text
+
+
+def test_shadow_migration_cd_is_separate_protected_and_always_audited():
+    workflow = yaml.safe_load(
+        SHADOW_MIGRATION_WORKFLOW_PATH.read_text(encoding="utf-8")
+    )
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers["workflow_dispatch"]["inputs"]) == {
+        "mode", "source_sha", "migration_attempt_id",
+        "expected_current_version", "expected_current_canonical_sha256",
+    }
+    assert workflow["concurrency"] == {
+        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "cancel-in-progress": False,
+    }
+    job = workflow["jobs"]["migrate"]
+    assert job["environment"] == "production-shadow"
+    assert job["if"] == "github.ref == 'refs/heads/main'"
+    steps = job["steps"]
+    text = SHADOW_MIGRATION_WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "vars.KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN" in text
+    assert "vars.KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN" not in text
+    assert '[[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]' in text
+    assert "git status --porcelain --untracked-files=all" in text
+    assert all("timeout-minutes" in step for step in steps)
+    uploads = [step for step in steps if step.get("uses") == UPLOAD_ARTIFACT_ACTION]
+    assert len(uploads) == 1
+    assert uploads[0]["if"] == "always()"
+    assert uploads[0]["with"]["retention-days"] == 14
 
 
 def test_shadow_activation_hashes_validator_before_oidc_and_uses_it_directly():

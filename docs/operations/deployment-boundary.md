@@ -252,6 +252,67 @@ read Kiwoom SecureString parameters. Registering that document, role, host
 script, and Environment is an external change and must be read back before the
 first activation.
 
+## Protected rollout-document migration boundary
+
+Rollout-document writes are isolated in
+`.github/workflows/cd-shadow-rollout-document-migration.yml`. The job is
+main-only, uses `production-shadow`, exact source checkout/clean provenance,
+and the same non-cancelling concurrency group as rollout and activation. It
+assumes only `KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN`; neither routine rollout nor
+activation role receives rollout-document migration or Parameter Store state
+authority.
+
+The migration role can read/update/default only
+`KiwoomStock-ShadowWorkerRollout` and can access only its fixed lease plus
+attempt-journal Parameter Store paths. It has no Create/DeleteDocument,
+SendCommand, EC2, Kiwoom credential, account, order, cancel, or revoke authority.
+The lease is create-only and has no stale takeover. Each attempt journal is
+bounded to 4KiB. Its immutable equality contract binds the stable account,
+exact IAM role fingerprint, source/attempt, approved prior version/hash, target
+hash, immutable VersionName, and executable/blob provenance. GitHub run/session
+names and assumed-role session fingerprints are deliberately excluded so a new
+protected run can reconcile the same attempt. Every run still exactly attests
+its STS account, assumed role, and expected session; only a redacted actor
+observation is updated in the journal and local artifact. Document bodies,
+credentials, raw ARN, and AWS stderr are never stored.
+
+Attempt ownership is journal-first. `apply` create-only writes an
+`attempt_created` journal before touching the lease. It then acquires/read-backs
+the fixed lease and durably advances to `lease_acquired`. `reconcile` first opens
+the existing journal read-only and verifies the stable contract, then acquires
+the lease and re-reads the journal to detect races. An existing apply journal or
+contract mismatch therefore creates no lock; a crash after journal creation but
+before lease acquisition can be resumed by the same attempt.
+
+Every update and cutover has a durable remote prewrite phase and a submit budget
+of one. Process or response loss is reconciled from authoritative
+SSM state and the same VersionName; uncertain state is never retried. Because
+UpdateDocumentDefaultVersion has no CAS, a prior default still observed after a
+submitting phase becomes manual-hold rather than inferred failure/success.
+Manual-hold retains the lease until a separately approved incident recovery.
+`complete` and `failed_safe` are explicit terminal phases that
+may release only an exact-owner lease; only `complete` exits zero. Release-only
+reconcile does not trust terminal journal status alone: complete re-proves the
+exact target and migrated VersionName, failed-safe proves the same-attempt
+candidate is absent on both immediate terminalization and later reconcile.
+SSM document versions are immutable, so this migration has no automatic rollback
+phase or prior-default write authority. After forward cutover, exact target state
+becomes complete; any third latest/default, name/status/content/ownership drift,
+malformed terminal
+evidence, or transiently unreadable state cannot produce PASS or release;
+authoritative drift becomes manual-hold and transient reads retain the phase. A global
+monotonic deadline starts before Git provenance. Its primary cutoff forbids
+ordinary progress, UpdateDocument, and cutover while a reserved terminal budget
+remains for durable manual-hold, terminal reconciliation/journal, and exact-owner lock
+release. Pagination, settling, AWS calls, and Git subprocesses all consume that
+same absolute budget.
+
+The approved Git blob is passed directly as `--content`, eliminating mutable
+`file://` rereads. Protected artifacts are redacted local summaries; the remote
+journal is recovery SSOT. Real IAM condition behavior, SSM visibility,
+cross-run lease ownership, and default transition remain C2/C4 validator work
+and are not proved by local mocks or the static checker.
+
 ## Protected shadow rollout boundary
 
 `.github/workflows/cd-shadow-worker-rollout.yml` has one required, no-default
@@ -264,9 +325,18 @@ role gains only the exact-document read-only attestation actions described above
 
 The rollout role additionally has read-only `DescribeDocument`/`GetDocument` on
 the exact rollout document. Before its first host command, every routine run
-requires rollout document `Status=Active`, default/latest/version `1`, exact
-semantic structure, and the deterministic canonical content hash derived from
-the checked-out source. Bootstrap attestation alone is not sufficient.
+requires rollout document `Status=Active`, numeric default/latest equality at
+any vN, exact semantic structure, and the deterministic canonical content hash
+derived from the checked-out source. The attestation returns that exact version
+and hash. Every `SendCommand`, response-loss acceptance-history match, and node
+invocation is bound to the same version. Immediately before each send the
+executor describes the document again; default/latest drift fails closed before
+a host command. The normal `SendCommand` response must return the same document,
+version, fixed instance, comment, and submitted parameter tuple. Every polled
+invocation must return the same command ID/document/version/instance, and its
+terminal host evidence binds the complete rollout tuple. Missing attestation
+fields and placeholder hashes are rejected. Bootstrap attestation alone is not
+sufficient.
 
 Only when the previous activation default differs from the checked-out
 pre-exec-lock document, the executor performs a one-time legacy transition
@@ -321,6 +391,9 @@ remains `skew=true`, and the audit deliberately leaves `host_final` unset becaus
 a late command cannot be proven absent. Audit records per-action command acceptance, ID,
 terminal status/response, host before/new/final, default reconciliation, and
 separate rollback failure category.
+History pages validate every command's positive document-version syntax, ignore
+unrelated commands from older valid versions, and reject an otherwise exact
+comment/parameter tuple if it names a different rollout-document version.
 
 Before any install backup, exact-SHA download, or publish, the host checks under
 that same lock whether the exact fixed name `kiwoom-shadow-once` exists in any

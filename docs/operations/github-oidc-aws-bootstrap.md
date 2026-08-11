@@ -227,8 +227,9 @@ python3 deploy/bootstrap_shadow_rollout.py --account-id <12_DIGIT_ACCOUNT_ID>
 ```
 
 도구는 role `kiwoom-stock-github-shadow-rollout`, exact inline policy,
-`KiwoomStock-ShadowWorkerRollout` v1만 생성한다. 기존 리소스가 exact하면 재사용하고
-drift나 v1 외 document는 overwrite하지 않는다. role/trust와 고정 rollout document를
+`KiwoomStock-ShadowWorkerRollout` v1을 신규 생성한다. 기존 document가 `Active`이고
+numeric default/latest가 같은 vN이며 현재 source와 exact하면 vN을 재사용한다. drift나
+default/latest 불일치는 overwrite하지 않고 아래 admin migration으로 넘긴다. role/trust와 고정 rollout document를
 먼저 생성·read-back하고, upsert인 inline policy 쓰기를 마지막 mutation으로 둔다.
 policy phase pre-read에 진입하기 전 실패만 이번 실행 소유가 확정된 document와 role을
 역순 제거한다. 기존 provider, Environment protection, activation role/document는
@@ -245,7 +246,7 @@ policy/trust/document exact final read-back만 PASS이며, 응답 유실 뒤 exa
 `ownership-uncertain`, absent/drift는 manual recovery가 필요한 FAIL이다. 다음
 idempotent 실행은 exact existing state를 재사용한다. 기존 exact policy는 mutation 없이
 final read-back한다. document는 bounded wait 안에
-`Active`, default/latest `1`, exact YAML content가 모두 보여야 한다. cleanup은 한 삭제
+`Active`, 같은 numeric default/latest, exact YAML content가 모두 보여야 한다. cleanup은 한 삭제
 실패가 뒤 role 정리를 막지 않도록 각 리소스를 독립 시도하고, original failure,
 journal, cleanup 결과와 orphan 목록을 함께 보존한다. final PASS는 role ARN뿐 아니라
 exact trust/policy/document를 모두 다시 읽은 뒤에만 출력한다.
@@ -264,19 +265,107 @@ Environment write는 AWS partial rollback과 원자적으로 묶을 수 없으�
 ARN을 등록한 다음 API/화면에서 byte-for-byte read-back한다. Kiwoom secret이나 장기
 AWS key는 등록하지 않는다. 이 read-back 전에는 rollout을 실행하지 않는다.
 
-일상 순서는 protected exact-main rollout → 14일 audit 검토 → 별도 protected activation
-승인이다. rollout audit에서 worker/validator/document SHA와 host validator의
-root:root `0750`, regular/non-symlink, link count 1 read-back을 모두 확인한다. 실패 또는
-`skew=true`면 activation을 중지하고 previous default 복원 뒤 attempt backup artifact
-set을 확인한다. generic `AWS-RunShellScript`, direct local
-`send-command`, arbitrary URL/path/command로 우회하지 않는다.
+## Shadow rollout document versioned migration
 
-fixed `kiwoom-shadow-once` container가 어떤 lifecycle 상태로든 존재하면 host rollout
-lock 아래 guard가 backup/download/publish 전에 rollout을 거부해야 한다. Docker inventory
-오류도 fail-closed한다. 먼저 기존 exact tuple로 stop/cleanup하고 container 부재를
-확인한 뒤 새 rollout을 dispatch한다. activation의 stop source는 임의 SHA가 아니라 OIDC
-전 authenticated GitHub compare에서 현재 workflow main SHA와 동일하거나 ancestor인
-commit만 허용한다.
+rollout document migration은
+`.github/workflows/cd-shadow-rollout-document-migration.yml`에서만 실행한다. 이
+workflow는 `production-shadow`, main-only, exact `source_sha == github.sha`, clean
+checkout, 기존 rollout/activation과 동일한 concurrency group 및
+`cancel-in-progress: false`를 사용한다. 입력은 `apply|reconcile`, positive attempt
+ID, 승인된 prior version/canonical hash로 제한된다. 로컬 admin migration과 routine
+rollout role의 document write는 금지한다.
+
+최초 한 번만 아래 create-only bootstrap을 승인된 admin 세션에서 실행한다. existing
+role/trust/policy가 exact하면 재사용하고, drift 또는 write 소유권 불확실이면 overwrite나
+자동 삭제 없이 중지한다. 출력 ARN은 `production-shadow` Environment variable
+`KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN`에 등록하고 exact read-back한다.
+`KIWOOM_AWS_ACCOUNT_ID`도 12자리 account ID로 등록한다. 실제 명령은 운영 승인
+단계에서만 실행하며 이 문서 작성/검증 과정에서는 실행하지 않는다.
+
+```bash
+PYTHONPATH=src .venv/bin/python deploy/bootstrap_shadow_rollout_migration.py \
+  --account-id "${ACCOUNT_ID}"
+```
+
+migration role은 exact rollout document의 Describe/Get/List/Update/Default와 다음
+Parameter Store resource만 허용한다.
+
+- fixed lease: `/kiwoom-stock/shadow-rollout-document-migration/lock`
+- journal: `/kiwoom-stock/shadow-rollout-document-migration/attempts/<attempt_id>`
+
+lease PutParameter는 IAM `ssm:Overwrite=false`와 CLI `--no-overwrite`가 함께
+강제한다. stale lease takeover는 없다. `complete`, `failed_safe`만 exact
+owner read-back 후 lease를 삭제할 수 있으며, exit 0은 `complete`뿐이다. uncertain
+update/cutover, 같은 stable contract의 malformed journal, concurrent
+default/latest 또는 unknown phase는 durable `manual_hold`이며 lease를 유지한다.
+contract mismatch에는 journal을 쓰지 않는다. 강제 lock 삭제는 CloudTrail과
+document/default read-back을 포함한 별도 사고 승인 없이는 금지한다.
+
+`apply`는 create-only `attempt_created` journal을 먼저 만들고 그 뒤에만 fixed lease를
+acquire/read-back하여 `lease_acquired`로 전이한다. journal 생성 뒤 lock 전 process loss는
+같은 attempt의 `reconcile`이 lock을 획득해 계속한다. `reconcile`은 기존 journal을 먼저
+read-only open하여 stable contract를 확인하고, lock 획득 뒤 journal을 다시 읽어 race와
+schema/evidence를 fail closed 검증한다. apply-existing/contract-mismatch는 새 lock을 만들지
+않고 unrelated lock도 변경하지 않는다. 기존 journal은 같은 contract와 `reconcile`로만
+연다. Standard Parameter 4KiB 한도를 코드가 강제하며 document body,
+credential, raw ARN, AWS stderr는 journal/artifact에 기록하지 않는다. update와 cutover는
+각각 durable `*_submitting` read-back 뒤 최대 한 번 submit한다. submitting
+phase에서 process가 유실되면 write를 반복하지 않고 immutable
+`ksr-<attempt>-<source_sha[0:12]>` VersionName 및 authoritative Describe/Get/List로
+판정한다. default API에는 CAS가 없으므로 bounded read-back으로 prior default가
+그대로이면 성공을 추정하지 않고 manual-hold한다.
+
+phase별 journal evidence는 exact audit key/version/status/hash/bool shape를 가져야 한다.
+`complete`는 exact prestate/candidate/final, `failed_safe`는 bounded failure와 candidate
+부재를 필수로 한다. malformed
+submit ordering은 conservative monotonic tuple로 정규화한 durable manual-hold가 된다.
+terminal reconcile은 journal만 믿지 않는다. complete는 current exact target과 migrated
+VersionName, failed-safe는 즉시 종료 경로와 재개 경로 모두에서 same-attempt VersionName
+부재를 다시 확인한 뒤에만 exact-owner lock을 해제한다. failed-safe release 직전에는
+현재 실행의 attested actor hash를 같은 terminal journal에 durable update/read-back한다.
+SSM document version은 immutable이므로 migration state machine에는 자동 rollback이나
+prior-default write authority가 없다. post-cutover exact target만 complete/release하며 third
+latest/default 또는 name/status/content/ownership drift는 추가 default write 없이
+manual-hold다. transient read는 기존 phase와 lock을 그대로 유지한다.
+
+workflow는 승인 commit의 document blob을 UTF-8 strict로 읽고 동일 문자열을
+`UpdateDocument --content` argv에 직접 전달한다. adapter constructor가 승인 본문과
+contract-derived VersionName을 받아 exact equality가 아닌 content/version-name argv를
+subprocess 전에 거부한다. `file://`와 mutable worktree 재읽기는 사용하지 않는다.
+stable attempt contract는 HEAD/clean/relevant blob provenance, migration/checker/
+workflow/document SHA-256, account와 exact IAM role fingerprint를 결속하지만 GitHub
+run/session 및 assumed-role session fingerprint는 포함하지 않는다. 따라서
+`run77-attempt1` 뒤 `run77-attempt2`나 `run88-attempt1`이 같은 stable 입력으로
+reconcile할 수 있다. 각 실행의 OIDC session은 STS에서 exact attest하고 redacted
+`actor_last` 관측값으로만 남긴다.
+
+process 시작과 Git provenance 전부터 하나의 monotonic 660초 absolute deadline을
+적용한다. primary cutoff는 마지막 120초 전에 ordinary journal, UpdateDocument,
+cutover를 닫는다. 남은 terminal reserve는 durable manual-hold, authoritative terminal
+reconciliation/journal과 exact-owner lock release에만 사용한다. operation class가 맞지 않는
+write는 runtime adapter와 checker가 거부한다. pagination 20 pages, page size 50,
+settle 8회보다 deadline이 우선한다. 모든 종료 경로에서 redacted local summary upload를
+시도하고 remote journal을 authoritative evidence로 취급한다.
+
+운영 순서는 다음과 같다.
+
+1. read-only로 current default/latest/status/version hash와 migration role/trust/policy,
+   Environment protection/variables를 exact 확인한다.
+2. 새 attempt는 protected workflow `apply`로 dispatch한다.
+3. runner/process loss 또는 manual-hold가 아닌 interrupted 상태만 같은 stable
+   account/role/source/attempt/prior/target/provenance 입력과 `reconcile`로 dispatch한다.
+   새 workflow run/session 이름은 허용되지만 STS attestation은 매번 exact해야 한다.
+4. artifact와 remote journal, VersionName, default/latest를 함께 read-back한다.
+5. `failed_safe`는 nonzero terminal로 분류하고 자동 재-apply하지 않는다.
+   manual-hold면 lock을 유지하고 직접 UpdateDocument/default/lock delete를 실행하지
+   않은 채 incident/architect 판단으로 넘긴다.
+6. PASS 뒤에만 별도 protected rollout, 그 evidence PASS 뒤에만 bounded activation을
+   승인한다.
+
+현재 알려진 old canonical hash는 참고값일 뿐이다. 매 실행의 prior version/hash는
+직전 authoritative read-back으로 별도 승인해야 한다. account admin과 GitHub
+Environment admin bypass는 SSM default API의 CAS 부재로 기술적으로 제거되지 않으므로
+정상 운영 금지 및 CloudTrail 감사 대상으로 남는다.
 
 ## 롤백
 

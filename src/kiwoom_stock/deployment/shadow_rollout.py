@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -63,6 +63,13 @@ HISTORY_ITEM_KEYS = {
     "TraceOutput", "StandardOutputUrl", "StandardErrorUrl", "CommandPlugins",
     "ServiceRole",
     "NotificationConfig", "CloudWatchOutputConfig",
+}
+INVOCATION_RESPONSE_KEYS = {
+    "CommandId", "InstanceId", "Comment", "DocumentName", "DocumentVersion",
+    "PluginName", "ResponseCode", "ExecutionStartDateTime",
+    "ExecutionElapsedTime", "ExecutionEndDateTime", "Status", "StatusDetails",
+    "StandardOutputContent", "StandardOutputUrl", "StandardErrorContent",
+    "StandardErrorUrl", "CloudWatchOutputConfig",
 }
 HOST_EVIDENCE_KEYS = {
     "action", "source_sha", "worker_sha256", "validator_sha256",
@@ -255,6 +262,8 @@ class RolloutTuple:
     shadow_document_raw_sha256: str
     rollout_document_sha256: str
     rollout_attempt_id: str
+    rollout_document_version: str = ""
+    rollout_document_canonical_sha256: str = ""
 
     def validate(self) -> None:
         if SOURCE_RE.fullmatch(self.source_sha) is None:
@@ -270,6 +279,21 @@ class RolloutTuple:
                 raise RolloutError("hash_invalid")
         if ID_RE.fullmatch(self.rollout_attempt_id) is None:
             raise RolloutError("rollout_attempt_id_invalid")
+        if re.fullmatch(r"[1-9][0-9]*", self.rollout_document_version) is None:
+            raise RolloutError("rollout_document_version_invalid")
+        if (
+            HASH_RE.fullmatch(self.rollout_document_canonical_sha256) is None
+            or self.rollout_document_canonical_sha256 == "0" * 64
+        ):
+            raise RolloutError("hash_invalid")
+
+
+@dataclass(frozen=True)
+class AttestedRolloutDocument:
+    """Exact active SSM document identity bound to one rollout execution."""
+
+    version: str
+    canonical_sha256: str
 
 
 def _with_optional_next_token(
@@ -289,10 +313,9 @@ def _valid_rollout_send(command: tuple[str, ...]) -> bool:
     if (
         len(command) != 18
         or command[:3] != ("ssm", "send-command", "--document-name")
-        or command[3:9] != (
-            ROLLOUT_DOCUMENT, "--document-version", "1",
-            "--instance-ids", INSTANCE_ID, "--comment",
-        )
+        or command[3:5] != (ROLLOUT_DOCUMENT, "--document-version")
+        or re.fullmatch(r"[1-9][0-9]*", command[5]) is None
+        or command[6:9] != ("--instance-ids", INSTANCE_ID, "--comment")
         or command[10] != "--parameters"
         or command[12:] != (
             "--timeout-seconds", "300", "--max-concurrency", "1",
@@ -477,17 +500,20 @@ class AwsCli:
     def send(
         self, action: str, rollout: RolloutTuple, *, expect_tuple: bool = False
     ) -> dict[str, object]:
+        rollout.validate()
+        self._attest_rollout_version_unchanged(rollout.rollout_document_version)
         comment = _rollout_comment(action, rollout)
         parameters = _rollout_parameters(action, rollout)
         record: dict[str, object] = {
             "action": action, "command_id": None, "accepted": "uncertain",
             "status": "unknown", "response_code": None, "comment": comment,
+            "document_version": rollout.rollout_document_version,
         }
         self.commands.append(record)
         response = self.call([
                 "ssm", "send-command",
                 "--document-name", ROLLOUT_DOCUMENT,
-                "--document-version", "1",
+                "--document-version", rollout.rollout_document_version,
                 "--instance-ids", INSTANCE_ID,
                 "--comment", comment,
                 "--parameters", json.dumps(parameters, separators=(",", ":")),
@@ -495,12 +521,10 @@ class AwsCli:
                 "--max-concurrency", "1",
                 "--max-errors", "0",
             ], write=True)
-        if not isinstance(response, dict) or not isinstance(response.get("Command"), dict):
-            raise RolloutError("send_response_invalid")
+        command_id = self._send_response_command_id(
+            response, comment, parameters, rollout.rollout_document_version
+        )
         record["accepted"] = True
-        command_id = response["Command"].get("CommandId")
-        if not isinstance(command_id, str) or COMMAND_RE.fullmatch(command_id) is None:
-            raise RolloutError("command_id_invalid")
         self.command_ids.append(command_id)
         record["command_id"] = command_id
         return self._finish_command(
@@ -516,7 +540,7 @@ class AwsCli:
         *,
         expect_tuple: bool,
     ) -> dict[str, object]:
-        invocation = self.poll(command_id)
+        invocation = self.poll(command_id, rollout)
         status = invocation.get("Status")
         response_code = invocation.get("ResponseCode")
         record["status"] = status if type(status) is str else "unknown"
@@ -560,6 +584,7 @@ class AwsCli:
     ) -> dict[str, object]:
         """Identify one response-lost command exactly, then await its terminal result."""
 
+        rollout.validate()
         comment = _rollout_comment(action, rollout)
         parameters = _rollout_parameters(action, rollout)
         record = next(
@@ -577,12 +602,18 @@ class AwsCli:
         if record is None:
             raise RolloutError("acceptance_record_missing")
         for scan in range(ACCEPTANCE_RECONCILIATION_SCANS):
-            matches = self._acceptance_commands(comment, parameters)
+            matches = self._acceptance_commands(
+                comment, parameters,
+                document_version=rollout.rollout_document_version,
+            )
             if len(matches) > 1:
                 raise RolloutError("acceptance_history_ambiguous")
             if matches:
                 command_id = matches[0]
-                if not self._acceptance_invocation_exists(command_id, comment):
+                if not self._acceptance_invocation_exists(
+                    command_id, comment,
+                    document_version=rollout.rollout_document_version,
+                ):
                     if scan + 1 < ACCEPTANCE_RECONCILIATION_SCANS:
                         sleeper(1)
                         continue
@@ -599,7 +630,7 @@ class AwsCli:
         raise RolloutError("acceptance_history_unresolved")
 
     def _acceptance_commands(
-        self, comment: str, parameters: Mapping[str, list[str]]
+        self, comment: str, parameters: Mapping[str, list[str]], *, document_version: str
     ) -> list[str]:
         matches: list[str] = []
         seen_commands: set[str] = set()
@@ -649,7 +680,10 @@ class AwsCli:
                     or command["DocumentName"] != ROLLOUT_DOCUMENT
                     or command["InstanceIds"] != [INSTANCE_ID]
                     or command.get("Targets", []) != []
-                    or command["DocumentVersion"] != "1"
+                    or type(command["DocumentVersion"]) is not str
+                    or re.fullmatch(
+                        r"[1-9][0-9]*", command["DocumentVersion"]
+                    ) is None
                     or type(status) is not str
                     or status not in ALL_STATUSES
                 ):
@@ -658,6 +692,8 @@ class AwsCli:
                 _utc_timestamp(command["RequestedDateTime"])
                 if command["Comment"] == comment:
                     if command["Parameters"] != parameters:
+                        raise RolloutError("acceptance_history_tuple_mismatch")
+                    if command["DocumentVersion"] != document_version:
                         raise RolloutError("acceptance_history_tuple_mismatch")
                     matches.append(command_id)
             token = response.get("NextToken")
@@ -673,7 +709,9 @@ class AwsCli:
             next_token = token
         raise RolloutError("acceptance_history_page_limit")
 
-    def _acceptance_invocation_exists(self, command_id: str, comment: str) -> bool:
+    def _acceptance_invocation_exists(
+        self, command_id: str, comment: str, *, document_version: str
+    ) -> bool:
         response = self.call([
             "ssm", "list-command-invocations", "--command-id", command_id,
             "--instance-id", INSTANCE_ID, "--details",
@@ -696,18 +734,65 @@ class AwsCli:
             or not set(invocation).issubset(HISTORY_ITEM_KEYS)
             or not {
                 "CommandId", "InstanceId", "Comment", "DocumentName",
-                "RequestedDateTime", "Status",
+                "DocumentVersion", "RequestedDateTime", "Status",
             }.issubset(invocation)
             or invocation["CommandId"] != command_id
             or invocation["InstanceId"] != INSTANCE_ID
             or invocation["Comment"] != comment
             or invocation["DocumentName"] != ROLLOUT_DOCUMENT
+            or invocation["DocumentVersion"] != document_version
             or type(invocation["Status"]) is not str
             or invocation["Status"] not in ALL_STATUSES
         ):
             raise RolloutError("acceptance_invocation_item_invalid")
         _utc_timestamp(invocation["RequestedDateTime"])
         return True
+
+    def _attest_rollout_version_unchanged(self, version: str) -> None:
+        document = _document_description(self.call([
+            "ssm", "describe-document", "--name", ROLLOUT_DOCUMENT,
+        ]), ROLLOUT_DOCUMENT)
+        if (
+            document.get("Status") != "Active"
+            or document.get("DefaultVersion") != version
+            or document.get("LatestVersion") != version
+        ):
+            raise RolloutError("rollout_document_pre_send_drift")
+
+    @staticmethod
+    def _send_response_command_id(
+        response: object,
+        comment: str,
+        parameters: Mapping[str, list[str]],
+        document_version: str,
+    ) -> str:
+        if not isinstance(response, dict) or set(response) != {"Command"}:
+            raise RolloutError("send_response_invalid")
+        command = response.get("Command")
+        if (
+            not isinstance(command, dict)
+            or not set(command).issubset(HISTORY_COMMAND_KEYS)
+            or not {
+                "CommandId", "DocumentName", "DocumentVersion", "Comment",
+                "Parameters", "InstanceIds", "Status",
+            }.issubset(command)
+        ):
+            raise RolloutError("send_response_invalid")
+        command_id = command["CommandId"]
+        if (
+            not isinstance(command_id, str)
+            or COMMAND_RE.fullmatch(command_id) is None
+            or command["DocumentName"] != ROLLOUT_DOCUMENT
+            or command["DocumentVersion"] != document_version
+            or command["Comment"] != comment
+            or command["Parameters"] != parameters
+            or command["InstanceIds"] != [INSTANCE_ID]
+            or command.get("Targets", []) != []
+            or not isinstance(command["Status"], str)
+            or command["Status"] not in ALL_STATUSES
+        ):
+            raise RolloutError("send_response_identity_mismatch")
+        return command_id
 
     @staticmethod
     def _host_evidence(invocation: Mapping[str, object]) -> dict[str, object]:
@@ -728,7 +813,7 @@ class AwsCli:
             raise RolloutError("host_evidence_missing")
         return records[-1]
 
-    def poll(self, command_id: str) -> dict[str, object]:
+    def poll(self, command_id: str, rollout: RolloutTuple) -> dict[str, object]:
         for attempt in range(60):
             try:
                 response = self.call([
@@ -740,10 +825,21 @@ class AwsCli:
                     time.sleep(2)
                     continue
                 raise
-            if not isinstance(response, dict):
+            if (
+                not isinstance(response, dict)
+                or not set(response).issubset(INVOCATION_RESPONSE_KEYS)
+            ):
                 raise RolloutError("invocation_invalid")
             status = response.get("Status")
-            if type(status) is not str or status not in ALL_STATUSES:
+            if (
+                type(status) is not str
+                or status not in ALL_STATUSES
+                or response.get("CommandId") != command_id
+                or response.get("InstanceId") != INSTANCE_ID
+                or response.get("DocumentName") != ROLLOUT_DOCUMENT
+                or response.get("DocumentVersion")
+                != rollout.rollout_document_version
+            ):
                 raise RolloutError("invocation_invalid")
             if status in TERMINAL_STATUSES:
                 return response
@@ -751,16 +847,30 @@ class AwsCli:
         raise RolloutError("host_action_timeout")
 
 
-def _document_content(response: object) -> tuple[object, bytes]:
+def _document_content(
+    response: object, expected_name: str, expected_version: str
+) -> tuple[object, bytes]:
     if not isinstance(response, dict) or not isinstance(response.get("Content"), str):
+        raise RolloutError("document_readback_invalid")
+    if expected_name == ROLLOUT_DOCUMENT and (
+        response.get("Name") != expected_name
+        or response.get("DocumentVersion") != expected_version
+        or response.get("DocumentFormat") != "JSON"
+        or response.get("Status") != "Active"
+    ):
         raise RolloutError("document_readback_invalid")
     raw = response["Content"].encode("utf-8")
     return strict_json(raw), raw
 
 
-def _document_description(response: object) -> dict[str, object]:
+def _document_description(response: object, expected_name: str) -> dict[str, object]:
     document = response.get("Document") if isinstance(response, dict) else None
     if not isinstance(document, dict):
+        raise RolloutError("document_description_invalid")
+    if expected_name == ROLLOUT_DOCUMENT and (
+        document.get("Name") != expected_name
+        or document.get("Status") != "Active"
+    ):
         raise RolloutError("document_description_invalid")
     return document
 
@@ -773,7 +883,7 @@ def attest_activation_document(expected_hash: str) -> str:
     aws = AwsCli(time.monotonic() + 90.0)
     document = _document_description(aws.call([
         "ssm", "describe-document", "--name", SHADOW_DOCUMENT,
-    ]))
+    ]), SHADOW_DOCUMENT)
     default = document.get("DefaultVersion")
     if (
         document.get("Status") != "Active"
@@ -784,7 +894,7 @@ def attest_activation_document(expected_hash: str) -> str:
     content, _ = _document_content(aws.call([
         "ssm", "get-document", "--name", SHADOW_DOCUMENT,
         "--document-version", default, "--document-format", "JSON",
-    ]))
+    ]), SHADOW_DOCUMENT, default)
     if sha256(_canonical_bytes(content)) != expected_hash:
         raise RolloutError("activation_document_hash_mismatch")
     return default
@@ -792,28 +902,31 @@ def attest_activation_document(expected_hash: str) -> str:
 
 def attest_rollout_document(
     aws: AwsCli, expected: Mapping[str, object]
-) -> str:
-    """Attest fixed v1/default/latest and semantic/canonical content."""
+) -> AttestedRolloutDocument:
+    """Attest one exact active numeric default/latest and its canonical hash."""
 
     document = _document_description(aws.call([
         "ssm", "describe-document", "--name", ROLLOUT_DOCUMENT,
-    ]))
-    if any((
-        document.get("Status") != "Active",
-        document.get("DefaultVersion") != "1",
-        document.get("LatestVersion") != "1",
-    )):
+    ]), ROLLOUT_DOCUMENT)
+    default = document.get("DefaultVersion")
+    latest = document.get("LatestVersion")
+    if (
+        document.get("Status") != "Active"
+        or not isinstance(default, str)
+        or re.fullmatch(r"[1-9][0-9]*", default) is None
+        or latest != default
+    ):
         raise RolloutError("rollout_document_version_invalid")
     actual, _ = _document_content(aws.call([
         "ssm", "get-document", "--name", ROLLOUT_DOCUMENT,
-        "--document-version", "1", "--document-format", "JSON",
-    ]))
+        "--document-version", default, "--document-format", "JSON",
+    ]), ROLLOUT_DOCUMENT, default)
     if actual != expected:
         raise RolloutError("rollout_document_semantic_mismatch")
     actual_hash = sha256(_canonical_bytes(actual))
     if actual_hash != sha256(_canonical_bytes(expected)):
         raise RolloutError("rollout_document_canonical_mismatch")
-    return actual_hash
+    return AttestedRolloutDocument(default, actual_hash)
 
 
 def _utc_timestamp(value: object) -> datetime:
@@ -1090,7 +1203,7 @@ def set_default_reconciled(aws: AwsCli, version: str) -> str:
         try:
             document = _document_description(aws.call([
                 "ssm", "describe-document", "--name", SHADOW_DOCUMENT,
-            ]))
+            ]), SHADOW_DOCUMENT)
             if document.get("DefaultVersion") == version:
                 return "response+readback" if response_seen else "ambiguous+readback"
         except RolloutError:
@@ -1205,7 +1318,6 @@ def execute(
         rollout_document_sha256=sha256(rollout_source),
         rollout_attempt_id=attempt_id,
     )
-    rollout.validate()
     started = time.monotonic()
     aws = AwsCli(started + 960.0)
     audit: dict[str, object] = {
@@ -1238,11 +1350,19 @@ def execute(
     install_started = False
     install_acceptance_uncertain = False
     try:
-        audit["rollout_document_canonical_sha256"] = attest_rollout_document(
-            aws, rollout_semantic
+        attested_rollout = attest_rollout_document(aws, rollout_semantic)
+        rollout = replace(
+            rollout,
+            rollout_document_version=attested_rollout.version,
+            rollout_document_canonical_sha256=attested_rollout.canonical_sha256,
+        )
+        rollout.validate()
+        audit["rollout_document_version"] = attested_rollout.version
+        audit["rollout_document_canonical_sha256"] = (
+            attested_rollout.canonical_sha256
         )
         described = aws.call(["ssm", "describe-document", "--name", SHADOW_DOCUMENT])
-        document = _document_description(described)
+        document = _document_description(described, SHADOW_DOCUMENT)
         default_value = document.get("DefaultVersion")
         if not isinstance(default_value, str):
             raise RolloutError("prestate_invalid")
@@ -1253,7 +1373,9 @@ def execute(
             "ssm", "get-document", "--name", SHADOW_DOCUMENT,
             "--document-version", previous_default, "--document-format", "JSON",
         ])
-        previous_object, _ = _document_content(previous)
+        previous_object, _ = _document_content(
+            previous, SHADOW_DOCUMENT, previous_default
+        )
         audit["previous_document_sha256"] = sha256(_canonical_bytes(previous_object))
         legacy_transition: dict[str, object] = {}
         audit["legacy_transition"] = legacy_transition
@@ -1347,14 +1469,16 @@ def execute(
                 try:
                     latest_desc = _document_description(aws.call([
                         "ssm", "describe-document", "--name", SHADOW_DOCUMENT,
-                    ]))
+                    ]), SHADOW_DOCUMENT)
                     candidate = latest_desc.get("LatestVersion")
                     if isinstance(candidate, str):
                         latest = aws.call([
                             "ssm", "get-document", "--name", SHADOW_DOCUMENT,
                             "--document-version", candidate, "--document-format", "JSON",
                         ])
-                        latest_object, _ = _document_content(latest)
+                        latest_object, _ = _document_content(
+                            latest, SHADOW_DOCUMENT, candidate
+                        )
                         if latest_object == shadow_object:
                             reconciled_version = candidate
                             break
@@ -1372,7 +1496,9 @@ def execute(
         transitions.append({"to": new_version, "reconciliation": transition})
         final = aws.call(["ssm", "get-document", "--name", SHADOW_DOCUMENT,
                           "--document-version", new_version, "--document-format", "JSON"])
-        final_object, final_raw = _document_content(final)
+        final_object, final_raw = _document_content(
+            final, SHADOW_DOCUMENT, new_version
+        )
         final_desc = aws.call(["ssm", "describe-document", "--name", SHADOW_DOCUMENT])
         final_document = final_desc.get("Document") if isinstance(final_desc, dict) else None
         audit["semantic_readback"] = final_object == shadow_object

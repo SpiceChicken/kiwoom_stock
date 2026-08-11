@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from collections.abc import Mapping
+import json
 from pathlib import Path
 import re
 import shlex
@@ -22,6 +23,12 @@ ROLLOUT_DOCUMENT = Path("deploy/ssm/shadow-worker-rollout-document.yaml")
 WORKER = Path("deploy/ec2/shadow_worker_control.sh")
 VALIDATOR = Path("deploy/ec2/shadow_runtime_evidence.py")
 ROLLOUT_EXECUTOR = Path("src/kiwoom_stock/deployment/shadow_rollout.py")
+ROLLOUT_MIGRATION = Path("deploy/migrate_shadow_rollout_document.py")
+MIGRATION_BOOTSTRAP = Path("deploy/bootstrap_shadow_rollout_migration.py")
+MIGRATION_WORKFLOW = Path(".github/workflows/cd-shadow-rollout-document-migration.yml")
+MIGRATION_TRUST = Path("deploy/iam/github-shadow-migration-trust.json.example")
+MIGRATION_POLICY = Path("deploy/iam/github-shadow-migration-policy.json.example")
+ROLLOUT_POLICY = Path("deploy/iam/github-shadow-rollout-policy.json.example")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 
 REGION = "ap-northeast-2"
@@ -919,7 +926,8 @@ def _verify_rollout_executor(source: str) -> None:
         (
             "AwsCli.send", "self.call",
             "['ssm', 'send-command', '--document-name', ROLLOUT_DOCUMENT, "
-            "'--document-version', '1', '--instance-ids', INSTANCE_ID, "
+            "'--document-version', rollout.rollout_document_version, "
+            "'--instance-ids', INSTANCE_ID, "
             "'--comment', comment, '--parameters', json.dumps(parameters, "
             "separators=(',', ':')), '--timeout-seconds', '300', "
             "'--max-concurrency', '1', '--max-errors', '0']", "True",
@@ -930,6 +938,10 @@ def _verify_rollout_executor(source: str) -> None:
             "['ssm', 'list-command-invocations', '--command-id', command_id, "
             "'--instance-id', INSTANCE_ID, '--details', '--max-results', "
             "str(LEGACY_HISTORY_PAGE_SIZE), '--no-paginate']", "read",
+        ): 1,
+        (
+            "AwsCli._attest_rollout_version_unchanged", "self.call",
+            "['ssm', 'describe-document', '--name', ROLLOUT_DOCUMENT]", "read",
         ): 1,
         (
             "AwsCli.poll", "self.call",
@@ -952,7 +964,7 @@ def _verify_rollout_executor(source: str) -> None:
         (
             "attest_rollout_document", "aws.call",
             "['ssm', 'get-document', '--name', ROLLOUT_DOCUMENT, "
-            "'--document-version', '1', '--document-format', 'JSON']", "read",
+            "'--document-version', default, '--document-format', 'JSON']", "read",
         ): 1,
         ("_scan_legacy_commands", "aws.call", "args", "read"): 1,
         ("_scan_legacy_invocations", "aws.call", "args", "read"): 1,
@@ -1215,6 +1227,326 @@ def _verify_rollout_executor(source: str) -> None:
     } if main else set()
     if parser_flags != {"--source-sha", "--rollout-attempt-id", "--audit"}:
         raise ContractMismatch("rollout.executor.cli")
+
+
+def _verify_rollout_migration(source: str) -> None:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        raise ContractMismatch("rollout.migration.syntax") from error
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    classes = {
+        node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
+    }
+    required_functions = {
+        "_classify_admin_command", "approved_sources", "_put_lock",
+        "_release_lock", "_release_failed_safe", "_settle_candidate",
+        "_verify_candidate_binding",
+        "_valid_audit", "_validate_journal", "_verify_cutover_state",
+        "_update_response_version", "execute", "main",
+    }
+    if (
+        not required_functions <= set(functions)
+        or not {"Deadline", "AdminAwsCli", "RemoteJournal"} <= set(classes)
+    ):
+        raise ContractMismatch("rollout.migration.positive_contract")
+    required_literals = (
+        'LOCK_PARAMETER = "/kiwoom-stock/shadow-rollout-document-migration/lock"',
+        'JOURNAL_PREFIX = "/kiwoom-stock/shadow-rollout-document-migration/attempts/"',
+        '"--version-name", version_name, "--content", source_text',
+        '"--version-name", approved_version_name, "--content", approved_content',
+        '"update_submitting",',
+        '"cutover_submitting",',
+        '"attempt_created",',
+        '"cutover_uncertain_no_cas"',
+        'status="MANUAL_HOLD"',
+        '"status", "--porcelain", "--untracked-files=all"',
+        'command == ("sts", "get-caller-identity")',
+        'TERMINAL_RESERVE_SECONDS = 120.0',
+        'TERMINAL_PHASES = frozenset({"complete", "failed_safe", "manual_hold"})',
+    )
+    if any(value not in source for value in required_literals):
+        raise ContractMismatch("rollout.migration.positive_contract")
+    forbidden = (
+        "create-document", "delete-document", "send-command",
+        "ec2", "--profile", "shell=True", "Overwrite=true",
+    )
+    if (
+        any(value in source for value in forbidden)
+        or "rollback" in source
+        or source.count("file://") < 2
+    ):
+        raise ContractMismatch("rollout.migration.forbidden_authority")
+
+    failed_safe_release = functions["_release_failed_safe"]
+    release_calls = sorted(
+        (node for node in ast.walk(failed_safe_release) if isinstance(node, ast.Call)),
+        key=lambda node: node.lineno,
+    )
+    absence = [
+        call for call in release_calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "_require_candidate_absent"
+    ]
+    updates = [
+        call for call in release_calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "journal"
+        and call.func.attr == "update"
+    ]
+    releases = [
+        call for call in release_calls
+        if isinstance(call.func, ast.Name) and call.func.id == "_release_lock"
+    ]
+    if (
+        len(absence) != 1
+        or len(updates) != 1
+        or len(releases) != 1
+        or not (absence[0].lineno < updates[0].lineno < releases[0].lineno)
+        or ast.unparse(updates[0].args[0]) != "'failed_safe'"
+        or {
+            keyword.arg: ast.unparse(keyword.value)
+            for keyword in updates[0].keywords
+        } != {
+            "operation": "'terminal'",
+            "status": "'FAIL'",
+            "actor_last": "actor",
+        }
+    ):
+        raise ContractMismatch("rollout.migration.failed_safe_actor_audit")
+
+    contract = functions["_contract"]
+    contract_args = [argument.arg for argument in contract.args.args]
+    if contract_args != [
+        "account", "role_arn", "source_sha", "attempt", "prior_version",
+        "prior_hash", "target_hash", "provenance",
+    ] or any(
+        isinstance(node, ast.Constant) and node.value == "session"
+        for node in ast.walk(contract)
+    ):
+        raise ContractMismatch("rollout.migration.stable_contract")
+
+    admin = classes["AdminAwsCli"]
+    admin_methods = {
+        node.name: node for node in admin.body if isinstance(node, ast.FunctionDef)
+    }
+    constructor = admin_methods.get("__init__")
+    if constructor is None or [argument.arg for argument in constructor.args.args] != [
+        "self", "deadline", "approved_content", "approved_version_name",
+        "prior_version",
+    ]:
+        raise ContractMismatch("rollout.migration.adapter_contract")
+    classify = functions["_classify_admin_command"]
+    classify_names = [argument.arg for argument in classify.args.kwonlyargs]
+    if classify_names != [
+        "approved_content", "approved_version_name", "candidate_version",
+    ]:
+        raise ContractMismatch("rollout.migration.adapter_contract")
+    classify_text = ast.unparse(classify)
+    if (
+        "approved_content" not in classify_text
+        or "approved_version_name" not in classify_text
+        or "frozenset({'primary'})" not in classify_text
+        or "frozenset({'terminal'})" not in classify_text
+    ):
+        raise ContractMismatch("rollout.migration.adapter_contract")
+
+    execute = functions["execute"]
+    journal_phase_operations = {
+        "failed_safe": "terminal", "complete": "terminal",
+        "lease_acquired": "primary", "prestate_verified": "primary",
+        "update_submitting": "primary", "candidate_verified": "primary",
+        "cutover_submitting": "primary", "cutover_reconciled": "terminal",
+    }
+    for call in ast.walk(execute):
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in {"aws", "journal"}
+            and call.func.attr in {"call", "update"}
+        ):
+            operations = [
+                keyword.value for keyword in call.keywords
+                if keyword.arg == "operation"
+            ]
+            if (
+                len(operations) != 1
+                or not isinstance(operations[0], ast.Constant)
+                or operations[0].value not in {"primary", "terminal"}
+            ):
+                raise ContractMismatch("rollout.migration.operation_class")
+            operation = cast(str, operations[0].value)
+            if call.func.value.id == "aws" and call.func.attr == "call":
+                command_text = ast.unparse(call.args[0]) if call.args else ""
+                if "'update-document'" in command_text and operation != "primary":
+                    raise ContractMismatch("rollout.migration.operation_class")
+            if (
+                call.func.value.id == "journal"
+                and call.func.attr == "update"
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and (
+                    call.args[0].value not in journal_phase_operations
+                    or operation != journal_phase_operations[
+                        cast(str, call.args[0].value)
+                    ]
+                )
+            ):
+                raise ContractMismatch("rollout.migration.operation_class")
+    default_calls = [
+        call for call in ast.walk(execute)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_default_submit"
+    ]
+    default_contract = {
+        (ast.unparse(call.args[1]), next(
+            ast.literal_eval(keyword.value) for keyword in call.keywords
+            if keyword.arg == "operation"
+        ))
+        for call in default_calls if len(call.args) == 2
+        and any(keyword.arg == "operation" for keyword in call.keywords)
+    }
+    if default_contract != {("candidate", "primary")}:
+        raise ContractMismatch("rollout.migration.operation_class")
+
+    execute_calls = [
+        call for call in ast.walk(execute) if isinstance(call, ast.Call)
+    ]
+    create_lines = [
+        call.lineno for call in execute_calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "RemoteJournal"
+        and call.func.attr == "create"
+    ]
+    open_lines = [
+        call.lineno for call in execute_calls
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "RemoteJournal"
+        and call.func.attr == "open"
+    ]
+    lock_lines = [
+        call.lineno for call in execute_calls
+        if isinstance(call.func, ast.Name) and call.func.id == "_put_lock"
+    ]
+    if (
+        len(create_lines) != 1
+        or len(open_lines) != 2
+        or len(lock_lines) != 1
+        or create_lines[0] >= lock_lines[0]
+        or min(open_lines) >= lock_lines[0]
+        or max(open_lines) <= lock_lines[0]
+    ):
+        raise ContractMismatch("rollout.migration.journal_first")
+
+    main = functions.get("main")
+    if (
+        main is None
+        or not main.body
+        or not isinstance(main.body[0], ast.Assign)
+        or ast.unparse(main.body[0].value) != "Deadline.start()"
+    ):
+        raise ContractMismatch("rollout.migration.global_deadline")
+    parser_flags = {
+        ast.literal_eval(call.args[0])
+        for call in ast.walk(main) if isinstance(call, ast.Call) and call.args
+        and isinstance(call.func, ast.Attribute) and call.func.attr == "add_argument"
+        and isinstance(call.args[0], ast.Constant)
+        and any(keyword.arg == "required" and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True for keyword in call.keywords)
+    } if main else set()
+    if parser_flags != {
+        "--mode", "--account-id", "--expected-role-arn",
+        "--expected-session-name", "--source-sha", "--migration-attempt-id",
+        "--expected-current-version", "--expected-current-canonical-sha256",
+        "--audit-path",
+    }:
+        raise ContractMismatch("rollout.migration.cli")
+
+
+def _verify_migration_boundary(
+    workflow: Mapping[str, Any], trust_source: str, policy_source: str,
+    rollout_policy_source: str, bootstrap_source: str,
+) -> None:
+    inputs = set(_dispatch_inputs(workflow, "migration.workflow"))
+    if inputs != {
+        "mode", "source_sha", "migration_attempt_id", "expected_current_version",
+        "expected_current_canonical_sha256",
+    }:
+        raise ContractMismatch("migration.workflow.inputs")
+    if workflow.get("concurrency") != {
+        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "cancel-in-progress": False,
+    }:
+        raise ContractMismatch("migration.workflow.concurrency")
+    text = yaml.safe_dump(workflow)
+    run_text = "\n".join(
+        cast(str, step.get("run", ""))
+        for step in _steps(workflow, "migration.workflow")
+        if isinstance(step.get("run", ""), str)
+    )
+    required = (
+        "production-shadow", "KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN",
+        "refs/heads/main",
+        "if: always()", "retention-days: 14", "--mode",
+    )
+    if (
+        any(value not in text for value in required)
+        or "git status --porcelain --untracked-files=all" not in run_text
+    ):
+        raise ContractMismatch("migration.workflow.contract")
+    if any(value in text for value in ("secrets.", "SendCommand", "KIWOOM_APP_KEY")):
+        raise ContractMismatch("migration.workflow.forbidden")
+
+    try:
+        trust = json.loads(trust_source)
+        policy = json.loads(policy_source)
+        rollout_policy = json.loads(rollout_policy_source)
+    except json.JSONDecodeError as error:
+        raise ContractMismatch("migration.iam.json") from error
+    if "production-shadow" not in _canonical_text(trust):
+        raise ContractMismatch("migration.iam.trust")
+    policy_text = _canonical_text(policy)
+    for allowed in (
+        "ssm:DescribeDocument", "ssm:GetDocument", "ssm:ListDocumentVersions",
+        "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion",
+        "ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter",
+        '"ssm:Overwrite":"false"',
+    ):
+        if allowed not in policy_text:
+            raise ContractMismatch("migration.iam.minimum")
+    for forbidden_action in (
+        "ssm:CreateDocument", "ssm:DeleteDocument", "ssm:SendCommand", "ec2:",
+    ):
+        if forbidden_action in policy_text:
+            raise ContractMismatch("migration.iam.forbidden")
+    rollout_text = _canonical_text(rollout_policy)
+    rollout_resource = (
+        "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
+        "KiwoomStock-ShadowWorkerRollout"
+    )
+    for statement in rollout_policy.get("Statement", []):
+        if isinstance(statement, dict) and statement.get("Resource") == rollout_resource:
+            actions = statement.get("Action", [])
+            values = {actions} if isinstance(actions, str) else set(actions)
+            if values - {"ssm:GetDocument", "ssm:DescribeDocument", "ssm:SendCommand"}:
+                raise ContractMismatch("migration.iam.routine_authority")
+    if not rollout_text:
+        raise ContractMismatch("migration.iam.routine_authority")
+    if any(value not in bootstrap_source for value in (
+        "create-role", "put-role-policy", "refusing overwrite", "get-role-policy",
+    )) or any(value in bootstrap_source for value in ("update-assume-role-policy", "delete-role")):
+        raise ContractMismatch("migration.bootstrap.create_only")
+
+
+def _canonical_text(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _verify_rollout_workflow(workflow: Mapping[str, Any]) -> None:
@@ -1538,6 +1870,10 @@ def check(root: Path) -> tuple[int, int, int]:
         _read(root, ROLLOUT_WORKFLOW, "rollout.workflow.unreadable"),
         "rollout.workflow",
     )
+    migration_workflow = _load_yaml(
+        _read(root, MIGRATION_WORKFLOW, "migration.workflow.unreadable"),
+        "migration.workflow",
+    )
     activation_document = _load_yaml(
         _read(root, ACTIVATION_DOCUMENT, "activation.document.unreadable"),
         "activation.document",
@@ -1549,6 +1885,13 @@ def check(root: Path) -> tuple[int, int, int]:
     worker = _read(root, WORKER, "activation.worker.unreadable")
     validator = _read(root, VALIDATOR, "activation.validator.unreadable")
     executor = _read(root, ROLLOUT_EXECUTOR, "rollout.executor.unreadable")
+    migration = _read(root, ROLLOUT_MIGRATION, "rollout.migration.unreadable")
+    migration_bootstrap = _read(
+        root, MIGRATION_BOOTSTRAP, "migration.bootstrap.unreadable"
+    )
+    migration_trust = _read(root, MIGRATION_TRUST, "migration.trust.unreadable")
+    migration_policy = _read(root, MIGRATION_POLICY, "migration.policy.unreadable")
+    rollout_policy = _read(root, ROLLOUT_POLICY, "rollout.policy.unreadable")
     ci = _load_yaml(_read(root, CI_WORKFLOW, "ci.unreadable"), "ci")
 
     _verify_activation_workflow(activation_workflow)
@@ -1556,6 +1899,11 @@ def check(root: Path) -> tuple[int, int, int]:
     _verify_validator(validator)
     _verify_rollout_workflow(rollout_workflow)
     _verify_rollout_executor(executor)
+    _verify_rollout_migration(migration)
+    _verify_migration_boundary(
+        migration_workflow, migration_trust, migration_policy,
+        rollout_policy, migration_bootstrap,
+    )
     _verify_rollout_document(rollout_document)
     _verify_ci(ci)
     return 2, len(ACTIVATION_PARAMETER_SCHEMA), len(ROLLOUT_PARAMETER_SCHEMA)

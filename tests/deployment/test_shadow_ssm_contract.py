@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,10 +19,18 @@ ROLLOUT_DOCUMENT = Path("deploy/ssm/shadow-worker-rollout-document.yaml")
 WORKER = Path("deploy/ec2/shadow_worker_control.sh")
 VALIDATOR = Path("deploy/ec2/shadow_runtime_evidence.py")
 ROLLOUT_EXECUTOR = Path("src/kiwoom_stock/deployment/shadow_rollout.py")
+ROLLOUT_MIGRATION = Path("deploy/migrate_shadow_rollout_document.py")
+MIGRATION_BOOTSTRAP = Path("deploy/bootstrap_shadow_rollout_migration.py")
+MIGRATION_WORKFLOW = Path(".github/workflows/cd-shadow-rollout-document-migration.yml")
+MIGRATION_TRUST = Path("deploy/iam/github-shadow-migration-trust.json.example")
+MIGRATION_POLICY = Path("deploy/iam/github-shadow-migration-policy.json.example")
+ROLLOUT_POLICY = Path("deploy/iam/github-shadow-rollout-policy.json.example")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 CONTRACT_FILES = (
     ACTIVATION_WORKFLOW, ROLLOUT_WORKFLOW, ACTIVATION_DOCUMENT, ROLLOUT_DOCUMENT,
-    WORKER, VALIDATOR, ROLLOUT_EXECUTOR, CI_WORKFLOW,
+    WORKER, VALIDATOR, ROLLOUT_EXECUTOR, ROLLOUT_MIGRATION,
+    MIGRATION_BOOTSTRAP, MIGRATION_WORKFLOW, MIGRATION_TRUST,
+    MIGRATION_POLICY, ROLLOUT_POLICY, CI_WORKFLOW,
 )
 
 
@@ -408,7 +417,66 @@ def test_rollout_executor_extra_send_site_fails_closed(contract_root: Path):
     )
 
 
-def test_rollout_executor_non_ssm_write_fails_closed(contract_root: Path):
+@pytest.mark.parametrize(
+    ("old", "new", "category"),
+    [
+        (
+            '"--version-name", version_name, "--content", source_text',
+            '"--version-name", version_name, "--content", "file:///tmp/mutable"',
+            "rollout.migration.positive_contract",
+        ),
+        (
+            '        submits["update"] = 1\n        try:\n            journal.update(\n                "update_submitting",',
+            '        submits["update"] = 1\n        try:\n            journal.update(\n                "update_ready",',
+            "rollout.migration.operation_class",
+        ),
+        (
+            '"status", "--porcelain", "--untracked-files=all"',
+            '"status", "--short"',
+            "rollout.migration.positive_contract",
+        ),
+        (
+            'command == ("sts", "get-caller-identity")',
+            'command == ("sts", "get-session-token")',
+            "rollout.migration.positive_contract",
+        ),
+    ],
+)
+def test_rollout_migration_positive_and_negative_contracts_fail_closed(
+    contract_root: Path, old: str, new: str, category: str,
+):
+    replace_once(contract_root, ROLLOUT_MIGRATION, old, new)
+    assert_failure(run_checker(contract_root), 1, category)
+
+
+def test_migration_workflow_concurrency_drift_fails_closed(contract_root: Path):
+    replace_once(
+        contract_root, MIGRATION_WORKFLOW,
+        "  group: kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "  group: unsafe-independent-migration",
+    )
+    assert_failure(run_checker(contract_root), 1, "migration.workflow.concurrency")
+
+
+def test_migration_iam_forbidden_send_command_fails_closed(contract_root: Path):
+    replace_once(
+        contract_root, MIGRATION_POLICY,
+        '"ssm:UpdateDocumentDefaultVersion"',
+        '"ssm:UpdateDocumentDefaultVersion","ssm:SendCommand"',
+    )
+    assert_failure(run_checker(contract_root), 1, "migration.iam.forbidden")
+
+
+def test_migration_bootstrap_overwrite_authority_fails_closed(contract_root: Path):
+    replace_once(
+        contract_root, MIGRATION_BOOTSTRAP,
+        '"iam", "create-role"',
+        '"iam", "update-assume-role-policy"',
+    )
+    assert_failure(run_checker(contract_root), 1, "migration.bootstrap.create_only")
+
+
+def test_rollout_executor_extra_iam_call_fails_closed(contract_root: Path):
     replace_once(
         contract_root, ROLLOUT_EXECUTOR,
         'response = self.call([\n                "ssm", "send-command",',
@@ -418,6 +486,118 @@ def test_rollout_executor_non_ssm_write_fails_closed(contract_root: Path):
 
     assert_failure(
         run_checker(contract_root), 1, "rollout.executor.call_allowlist"
+    )
+
+
+def test_migration_adapter_approved_content_binding_fails_closed(
+    contract_root: Path,
+):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        '"--version-name", approved_version_name, "--content", approved_content',
+        '"--version-name", approved_version_name, "--content", "arbitrary"',
+    )
+    assert_failure(
+        run_checker(contract_root), 1, "rollout.migration.positive_contract"
+    )
+
+
+def test_migration_adapter_constructor_binding_fails_closed(contract_root: Path):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        "        approved_content: str,\n        approved_version_name: str,",
+        "        approved_version_name: str,",
+    )
+    assert_failure(
+        run_checker(contract_root), 1, "rollout.migration.adapter_contract"
+    )
+
+
+def test_migration_session_in_stable_contract_fails_closed(contract_root: Path):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        '        "account": account,',
+        '        "account": account, "session": "unstable",',
+    )
+    assert_failure(
+        run_checker(contract_root), 1, "rollout.migration.stable_contract"
+    )
+
+
+def test_migration_update_terminal_budget_spoof_fails_closed(contract_root: Path):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        '            ], operation="primary")\n            response_version =',
+        '            ], operation="terminal")\n            response_version =',
+    )
+    assert_failure(
+        run_checker(contract_root), 1, "rollout.migration.operation_class"
+    )
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ["cutover_uncertain_no_cas"],
+)
+def test_migration_uncertain_cas_literals_are_independently_required(
+    contract_root: Path, literal: str,
+):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        f'"{literal}"', f'"{literal}_removed"',
+    )
+    assert_failure(
+        run_checker(contract_root), 1, "rollout.migration.positive_contract"
+    )
+
+
+def test_migration_checker_keeps_uncertain_cas_literals_as_distinct_items():
+    tree = ast.parse(CHECKER.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_verify_rollout_migration"
+    )
+    assignment = next(
+        node for node in function.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "required_literals"
+            for target in node.targets
+        )
+    )
+    required_literals = ast.literal_eval(assignment.value)
+    assert required_literals.count('"cutover_uncertain_no_cas"') == 1
+    assert required_literals.count('status="MANUAL_HOLD"') == 1
+    assert not any("rollback" in literal for literal in required_literals)
+
+
+def test_migration_failed_safe_current_actor_update_is_required(
+    contract_root: Path,
+):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        "        actor_last=actor,\n    )\n"
+        "    phase_hook(\"failed_safe_release\")",
+        "        actor_last=\"0\" * 64,\n    )\n"
+        "    phase_hook(\"failed_safe_release\")",
+    )
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.migration.failed_safe_actor_audit",
+    )
+
+
+def test_migration_journal_post_lock_reread_is_required(contract_root: Path):
+    replace_once(
+        contract_root, ROLLOUT_MIGRATION,
+        "    _put_lock(aws, lock_value)\n"
+        "    journal = RemoteJournal.open(aws, journal_name)",
+        "    _put_lock(aws, lock_value)\n"
+        "    journal = journal",
+    )
+    assert_failure(
+        run_checker(contract_root), 1, "rollout.migration.journal_first"
     )
 
 
@@ -439,8 +619,8 @@ def test_rollout_executor_write_keyword_omission_fails_closed(
 ):
     replace_once(
         contract_root, ROLLOUT_EXECUTOR,
-        '            ], write=True)\n        if not isinstance(response, dict)',
-        '            ])\n        if not isinstance(response, dict)',
+        '            ], write=True)\n        command_id = self._send_response_command_id(',
+        '            ])\n        command_id = self._send_response_command_id(',
     )
 
     assert_failure(
