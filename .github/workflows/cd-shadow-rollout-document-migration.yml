@@ -1,0 +1,151 @@
+name: Shadow rollout document migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: New apply or same-attempt reconcile
+        required: true
+        type: choice
+        options: [apply, reconcile]
+      source_sha:
+        description: Exact approved 40-character main SHA
+        required: true
+        type: string
+      migration_attempt_id:
+        description: Positive immutable attempt ID
+        required: true
+        type: string
+      expected_current_version:
+        description: Approved active default/latest numeric version
+        required: true
+        type: string
+      expected_current_canonical_sha256:
+        description: Approved prior canonical SHA256
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: kiwoom-stock-shadow-i-02cb0a404794bd43a
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  AUDIT_PATH: ${{ runner.temp }}/shadow-rollout-document-migration.json
+
+jobs:
+  migrate:
+    name: protected rollout document migration
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    environment: production-shadow
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Initialize bounded redacted evidence
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' '{"status":"FAIL","category":"workflow_interrupted"}' >"${AUDIT_PATH}"
+
+      - name: Checkout exact trusted migration executor
+        timeout-minutes: 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate immutable migration source before OIDC
+        timeout-minutes: 1
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TRIGGER_SHA: ${{ github.sha }}
+          MODE: ${{ inputs.mode }}
+          ATTEMPT_ID: ${{ inputs.migration_attempt_id }}
+          PRIOR_VERSION: ${{ inputs.expected_current_version }}
+          PRIOR_SHA256: ${{ inputs.expected_current_canonical_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == refs/heads/main ]]
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+          [[ "${MODE}" == apply || "${MODE}" == reconcile ]]
+          [[ "${ATTEMPT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${PRIOR_VERSION}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRIOR_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          python3 - <<'PY'
+          for path in (
+              "deploy/migrate_shadow_rollout_document.py",
+              "deploy/check_shadow_ssm_contract.py",
+          ):
+              compile(open(path, encoding="utf-8").read(), path, "exec")
+          PY
+
+      - name: Configure exact migration role with OIDC
+        id: oidc
+        timeout-minutes: 1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: kiwoom-shadow-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          output-credentials: true
+          output-env-credentials: false
+          unset-current-credentials: true
+
+      - name: Execute authoritative migration state machine
+        timeout-minutes: 12
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.oidc.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.oidc.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.oidc.outputs.aws-session-token }}
+          EXPECTED_ROLE_ARN: ${{ vars.KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.KIWOOM_AWS_ACCOUNT_ID }}
+          EXPECTED_SESSION_NAME: kiwoom-shadow-migration-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+          python3 deploy/migrate_shadow_rollout_document.py \
+            --mode "${{ inputs.mode }}" \
+            --account-id "${EXPECTED_ACCOUNT_ID}" \
+            --expected-role-arn "${EXPECTED_ROLE_ARN}" \
+            --expected-session-name "${EXPECTED_SESSION_NAME}" \
+            --source-sha "${{ inputs.source_sha }}" \
+            --migration-attempt-id "${{ inputs.migration_attempt_id }}" \
+            --expected-current-version "${{ inputs.expected_current_version }}" \
+            --expected-current-canonical-sha256 "${{ inputs.expected_current_canonical_sha256 }}" \
+            --audit-path "${AUDIT_PATH}"
+
+      - name: Clear OIDC credentials before evidence upload
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          {
+            echo 'AWS_ACCESS_KEY_ID='
+            echo 'AWS_SECRET_ACCESS_KEY='
+            echo 'AWS_SESSION_TOKEN='
+            echo 'AWS_REGION='
+            echo 'AWS_DEFAULT_REGION='
+          } >>"${GITHUB_ENV}"
+
+      - name: Upload bounded migration evidence
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: shadow-rollout-document-migration-${{ inputs.migration_attempt_id }}-${{ github.run_id }}
+          path: ${{ env.AUDIT_PATH }}
+          if-no-files-found: error
+          retention-days: 14

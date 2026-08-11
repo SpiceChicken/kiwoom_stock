@@ -95,21 +95,24 @@ def _wait_document(
     for attempt in range(8):
         try:
             value = _document_once()
-            if value is not None and all((
-                value.get("Status") == "Active",
-                value.get("DefaultVersion") == "1",
-                value.get("LatestVersion") == "1",
-            )):
+            version = value.get("DefaultVersion") if value is not None else None
+            if (
+                value is not None
+                and value.get("Status") == "Active"
+                and isinstance(version, str)
+                and re.fullmatch(r"[1-9][0-9]*", version) is not None
+                and value.get("LatestVersion") == version
+            ):
                 response = _run([
                     "ssm", "get-document", "--name", DOCUMENT_NAME,
-                    "--document-version", "1", "--document-format", "YAML",
+                    "--document-version", str(version), "--document-format", "YAML",
                 ])
                 content = response.get("Content") if isinstance(response, dict) else None
                 if content == expected:
                     return value
                 last_category = "document_content_mismatch"
             else:
-                last_category = "document_not_active_v1"
+                last_category = "document_not_active_exact_default_latest"
         except BootstrapError:
             last_category = "document_readback_failed"
         if attempt < 7:

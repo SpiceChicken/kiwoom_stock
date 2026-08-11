@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -50,6 +51,29 @@ def _host_evidence(action, rollout, installed):
     }
 
 
+def _poll_response(rollout, command_id, **values):
+    return {
+        "CommandId": command_id,
+        "InstanceId": shadow_rollout.INSTANCE_ID,
+        "DocumentName": shadow_rollout.ROLLOUT_DOCUMENT,
+        "DocumentVersion": rollout.rollout_document_version or "1",
+        **values,
+    }
+
+
+def _send_response(rollout, command_id, action="install"):
+    return {"Command": {
+        "CommandId": command_id,
+        "DocumentName": shadow_rollout.ROLLOUT_DOCUMENT,
+        "DocumentVersion": rollout.rollout_document_version,
+        "Comment": shadow_rollout._rollout_comment(action, rollout),
+        "Parameters": shadow_rollout._rollout_parameters(action, rollout),
+        "InstanceIds": [shadow_rollout.INSTANCE_ID],
+        "Targets": [],
+        "Status": "Pending",
+    }}
+
+
 def test_rollout_tuple_and_strict_canonical_json_fail_closed():
     value, encoded = shadow_rollout.canonical_json(b'{"b":2,"a":1}')
     assert value == {"a": 1, "b": 2}
@@ -66,6 +90,7 @@ def test_rollout_comment_distinguishes_workflow_reruns(monkeypatch):
         validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
     )
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
     first = shadow_rollout._rollout_comment("install", rollout)
@@ -521,15 +546,24 @@ def test_aws_send_records_acceptance_terminal_status_and_exact_argv(monkeypatch)
         shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
     )
     command_id = "00000000-0000-0000-0000-000000000001"
     evidence = _host_evidence("install", rollout, True)
     responses = iter([
-        subprocess.CompletedProcess([], 0, json.dumps({"Command": {"CommandId": command_id}}), ""),
-        subprocess.CompletedProcess([], 0, json.dumps({
-            "Status": "Success", "ResponseCode": 0,
-            "StandardOutputContent": json.dumps(evidence),
-        }), ""),
+        subprocess.CompletedProcess([], 0, json.dumps({"Document": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "Status": "Active", "DefaultVersion": "2", "LatestVersion": "2",
+        }}), ""),
+        subprocess.CompletedProcess([], 0, json.dumps(_send_response(
+            rollout, command_id
+        )), ""),
+        subprocess.CompletedProcess([], 0, json.dumps(_poll_response(
+            rollout, command_id,
+            Status="Success", ResponseCode=0,
+            StandardOutputContent=json.dumps(evidence),
+        )), ""),
     ])
     calls = []
     def fake_run(argv, **kwargs):
@@ -538,18 +572,20 @@ def test_aws_send_records_acceptance_terminal_status_and_exact_argv(monkeypatch)
     monkeypatch.setattr(shadow_rollout.subprocess, "run", fake_run)
     adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
     assert adapter.send("install", rollout, expect_tuple=True) == evidence
-    assert calls[0][0][0:3] == ["aws", "ssm", "send-command"]
-    assert calls[0][1]["AWS_MAX_ATTEMPTS"] == "1"
-    assert calls[0][0][calls[0][0].index("--comment") + 1] == (
+    assert calls[1][0][0:3] == ["aws", "ssm", "send-command"]
+    assert calls[1][0][calls[1][0].index("--document-version") + 1] == "2"
+    assert calls[1][1]["AWS_MAX_ATTEMPTS"] == "1"
+    assert calls[1][0][calls[1][0].index("--comment") + 1] == (
         "kiwoom-shadow-rollout/123/local/install"
     )
     assert json.loads(
-        calls[0][0][calls[0][0].index("--parameters") + 1]
+        calls[1][0][calls[1][0].index("--parameters") + 1]
     ) == shadow_rollout._rollout_parameters("install", rollout)
     assert adapter.commands == [{
         "action": "install", "command_id": command_id, "accepted": True,
         "status": "Success", "response_code": 0,
         "comment": "kiwoom-shadow-rollout/123/local/install",
+        "document_version": "2",
     }]
 
 
@@ -612,14 +648,17 @@ def test_finish_command_waits_through_nonterminal_to_true_terminal(
         validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
     )
     evidence = _host_evidence("install", rollout, True)
+    command_id = "00000000-0000-0000-0000-000000000001"
     responses = iter([
-        {"Status": nonterminal},
-        {
-            "Status": terminal, "ResponseCode": response_code,
-            "StandardOutputContent": json.dumps(evidence),
-        },
+        _poll_response(rollout, command_id, Status=nonterminal),
+        _poll_response(
+            rollout, command_id, Status=terminal, ResponseCode=response_code,
+            StandardOutputContent=json.dumps(evidence),
+        ),
     ])
     calls = []
     adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
@@ -634,13 +673,13 @@ def test_finish_command_waits_through_nonterminal_to_true_terminal(
     if succeeds:
         assert adapter._finish_command(
             "install", rollout, record,
-            "00000000-0000-0000-0000-000000000001", expect_tuple=True,
+            command_id, expect_tuple=True,
         ) == evidence
     else:
         with pytest.raises(shadow_rollout.RolloutError, match="host_action_failed"):
             adapter._finish_command(
                 "install", rollout, record,
-                "00000000-0000-0000-0000-000000000001", expect_tuple=True,
+                command_id, expect_tuple=True,
             )
     assert len(calls) == 2
     assert record["status"] == terminal
@@ -656,20 +695,21 @@ def test_finish_command_rejects_non_exact_integer_response_code(
         validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
     )
-    invocation = {
-        "Status": "Success", "ResponseCode": response_code,
-        "StandardOutputContent": json.dumps(
-            _host_evidence("install", rollout, True)
-        ),
-    }
+    command_id = "00000000-0000-0000-0000-000000000001"
+    invocation = _poll_response(
+        rollout, command_id, Status="Success", ResponseCode=response_code,
+        StandardOutputContent=json.dumps(_host_evidence("install", rollout, True)),
+    )
     adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
-    monkeypatch.setattr(adapter, "poll", lambda command_id: invocation)
+    monkeypatch.setattr(adapter, "poll", lambda command_id, rollout: invocation)
     record = {}
     with pytest.raises(shadow_rollout.RolloutError, match="host_action_failed"):
         adapter._finish_command(
             "install", rollout, record,
-            "00000000-0000-0000-0000-000000000001", expect_tuple=True,
+            command_id, expect_tuple=True,
         )
     assert record["status"] == "Success"
     assert record["response_code"] == response_code
@@ -679,7 +719,7 @@ def _acceptance_command(rollout, command_id, *, parameters=None):
     return {
         "CommandId": command_id,
         "DocumentName": shadow_rollout.ROLLOUT_DOCUMENT,
-        "DocumentVersion": "1",
+        "DocumentVersion": rollout.rollout_document_version or "1",
         "Comment": "kiwoom-shadow-rollout/123/local/install",
         "Parameters": parameters or shadow_rollout._rollout_parameters(
             "install", rollout
@@ -691,12 +731,13 @@ def _acceptance_command(rollout, command_id, *, parameters=None):
     }
 
 
-def _acceptance_invocation(command_id):
+def _acceptance_invocation(command_id, version="1"):
     return {
         "CommandId": command_id,
         "InstanceId": shadow_rollout.INSTANCE_ID,
         "Comment": "kiwoom-shadow-rollout/123/local/install",
         "DocumentName": shadow_rollout.ROLLOUT_DOCUMENT,
+        "DocumentVersion": version,
         "RequestedDateTime": "2026-08-09T12:00:00+00:00",
         "Status": "InProgress",
         "CommandPlugins": [],
@@ -709,22 +750,28 @@ def test_response_lost_send_reconciles_one_exact_command_without_resend(monkeypa
         validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
     )
     command_id = "00000000-0000-0000-0000-000000000001"
     evidence = _host_evidence("install", rollout, True)
     responses = iter([
+        subprocess.CompletedProcess([], 0, json.dumps({"Document": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "Status": "Active", "DefaultVersion": "2", "LatestVersion": "2",
+        }}), ""),
         subprocess.CompletedProcess([], 1, "", "response lost"),
         subprocess.CompletedProcess([], 0, json.dumps({"Commands": []}), ""),
         subprocess.CompletedProcess([], 0, json.dumps({
             "Commands": [_acceptance_command(rollout, command_id)],
         }), ""),
         subprocess.CompletedProcess([], 0, json.dumps({
-            "CommandInvocations": [_acceptance_invocation(command_id)],
+            "CommandInvocations": [_acceptance_invocation(command_id, "2")],
         }), ""),
-        subprocess.CompletedProcess([], 0, json.dumps({
-            "Status": "Success", "ResponseCode": 0,
-            "StandardOutputContent": json.dumps(evidence),
-        }), ""),
+        subprocess.CompletedProcess([], 0, json.dumps(_poll_response(
+            rollout, command_id, Status="Success", ResponseCode=0,
+            StandardOutputContent=json.dumps(evidence),
+        )), ""),
     ])
     calls = []
 
@@ -778,11 +825,123 @@ def test_acceptance_history_finds_one_exact_command_on_first_or_later_page(
     assert adapter._acceptance_commands(
         rollout_comment,
         shadow_rollout._rollout_parameters("install", rollout),
+        document_version="1",
     ) == [exact_id]
     assert rollout_comment == "kiwoom-shadow-rollout/123/local/install"
     assert "--no-paginate" in calls[0]
     assert "--next-token" not in calls[0]
     assert calls[1][calls[1].index("--next-token") + 1] == "p2"
+
+
+@pytest.mark.parametrize("split_pages", [False, True])
+def test_acceptance_history_ignores_unrelated_v1_and_finds_exact_vn(
+    monkeypatch, split_pages,
+):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    exact_id = "00000000-0000-0000-0000-000000000011"
+    old_id = "00000000-0000-0000-0000-000000000012"
+    exact = _acceptance_command(rollout, exact_id)
+    old = {
+        **_acceptance_command(rollout, old_id),
+        "DocumentVersion": "1",
+        "Comment": "unrelated-historical-command",
+    }
+    pages = (
+        [{"Commands": [old], "NextToken": "p2"}, {"Commands": [exact]}]
+        if split_pages else [{"Commands": [old, exact]}]
+    )
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    responses = iter(pages)
+    monkeypatch.setattr(adapter, "call", lambda args, write=False: next(responses))
+
+    assert adapter._acceptance_commands(
+        shadow_rollout._rollout_comment("install", rollout),
+        shadow_rollout._rollout_parameters("install", rollout),
+        document_version="2",
+    ) == [exact_id]
+
+
+@pytest.mark.parametrize("split_pages", [False, True])
+def test_acceptance_history_rejects_exact_tuple_on_wrong_version(
+    monkeypatch, split_pages,
+):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    wrong = {
+        **_acceptance_command(
+            rollout, "00000000-0000-0000-0000-000000000021"
+        ),
+        "DocumentVersion": "1",
+    }
+    unrelated = {
+        **_acceptance_command(
+            rollout, "00000000-0000-0000-0000-000000000022"
+        ),
+        "Comment": "unrelated-current-command",
+    }
+    pages = (
+        [{"Commands": [unrelated], "NextToken": "p2"}, {"Commands": [wrong]}]
+        if split_pages else [{"Commands": [unrelated, wrong]}]
+    )
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    responses = iter(pages)
+    monkeypatch.setattr(adapter, "call", lambda args, write=False: next(responses))
+
+    with pytest.raises(
+        shadow_rollout.RolloutError, match="acceptance_history_tuple_mismatch"
+    ):
+        adapter._acceptance_commands(
+            shadow_rollout._rollout_comment("install", rollout),
+            shadow_rollout._rollout_parameters("install", rollout),
+            document_version="2",
+        )
+
+
+@pytest.mark.parametrize("invalid_version", [None, 0, "0", "01"])
+def test_acceptance_history_rejects_invalid_unrelated_document_version(
+    monkeypatch, invalid_version,
+):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    command = {
+        **_acceptance_command(
+            rollout, "00000000-0000-0000-0000-000000000031"
+        ),
+        "DocumentVersion": invalid_version,
+        "Comment": "unrelated-historical-command",
+    }
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    monkeypatch.setattr(
+        adapter, "call", lambda args, write=False: {"Commands": [command]}
+    )
+
+    with pytest.raises(
+        shadow_rollout.RolloutError, match="acceptance_history_item_invalid"
+    ):
+        adapter._acceptance_commands(
+            shadow_rollout._rollout_comment("install", rollout),
+            shadow_rollout._rollout_parameters("install", rollout),
+            document_version="2",
+        )
 
 
 def test_acceptance_history_rejects_exact_matches_split_across_pages(monkeypatch):
@@ -791,6 +950,8 @@ def test_acceptance_history_rejects_exact_matches_split_across_pages(monkeypatch
         validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="1",
+        rollout_document_canonical_sha256="9" * 64,
     )
     pages = iter([
         {"Commands": [_acceptance_command(
@@ -836,6 +997,7 @@ def test_acceptance_history_rejects_duplicate_command_id_across_pages(monkeypatc
         adapter._acceptance_commands(
             shadow_rollout._rollout_comment("install", rollout),
             shadow_rollout._rollout_parameters("install", rollout),
+            document_version="1",
         )
 
 
@@ -869,6 +1031,7 @@ def test_acceptance_history_rejects_repeated_or_invalid_next_token(
         adapter._acceptance_commands(
             shadow_rollout._rollout_comment("install", rollout),
             shadow_rollout._rollout_parameters("install", rollout),
+            document_version="1",
         )
 
 
@@ -891,6 +1054,7 @@ def test_acceptance_history_rejects_extra_response_key_and_oversized_page(
         adapter._acceptance_commands(
             shadow_rollout._rollout_comment("install", rollout),
             shadow_rollout._rollout_parameters("install", rollout),
+            document_version="1",
         )
     monkeypatch.setattr(shadow_rollout, "ACCEPTANCE_HISTORY_PAGE_SIZE", 1)
     monkeypatch.setattr(adapter, "call", lambda args, write=False: {
@@ -909,6 +1073,7 @@ def test_acceptance_history_rejects_extra_response_key_and_oversized_page(
         adapter._acceptance_commands(
             shadow_rollout._rollout_comment("install", rollout),
             shadow_rollout._rollout_parameters("install", rollout),
+            document_version="1",
         )
 
 
@@ -949,6 +1114,7 @@ def test_acceptance_history_rejects_page_limit_or_total_command_cap(
         adapter._acceptance_commands(
             shadow_rollout._rollout_comment("install", rollout),
             shadow_rollout._rollout_parameters("install", rollout),
+            document_version="1",
         )
 
 
@@ -969,6 +1135,8 @@ def test_acceptance_reconciliation_rejects_malformed_ambiguous_or_wrong_tuple(
         validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="1",
+        rollout_document_canonical_sha256="9" * 64,
     )
     first = "00000000-0000-0000-0000-000000000001"
     if commands == "multiple":
@@ -1007,11 +1175,18 @@ def test_aws_send_response_loss_preserves_uncertain_acceptance(monkeypatch):
         shadow_document_sha256="c" * 64,
         shadow_document_raw_sha256="d" * 64,
         rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="1",
+        rollout_document_canonical_sha256="9" * 64,
     )
-    monkeypatch.setattr(
-        shadow_rollout.subprocess, "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess([], 1, "", "timeout"),
-    )
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["ssm", "describe-document"]:
+            return subprocess.CompletedProcess([], 0, json.dumps({"Document": {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "Status": "Active", "DefaultVersion": "1", "LatestVersion": "1",
+            }}), "")
+        return subprocess.CompletedProcess([], 1, "", "timeout")
+
+    monkeypatch.setattr(shadow_rollout.subprocess, "run", fake_run)
     adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
     with pytest.raises(shadow_rollout.RolloutError, match="aws_command_failed"):
         adapter.send("install", rollout)
@@ -1019,11 +1194,12 @@ def test_aws_send_response_loss_preserves_uncertain_acceptance(monkeypatch):
         "action": "install", "command_id": None, "accepted": "uncertain",
         "status": "unknown", "response_code": None,
         "comment": "kiwoom-shadow-rollout/123/local/install",
+        "document_version": "1",
     }]
 
 
 class _FakeAws:
-    instances = []
+    instances: list[object] = []
 
     def __init__(self, deadline):
         self.calls = []
@@ -1048,12 +1224,20 @@ class _FakeAws:
         if args[:2] == ["ssm", "describe-document"]:
             name = args[args.index("--name") + 1]
             if name == shadow_rollout.ROLLOUT_DOCUMENT:
-                return {"Document": {"DefaultVersion": "1", "LatestVersion": "1", "Status": "Active"}}
+                return {"Document": {
+                    "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                    "DefaultVersion": "1", "LatestVersion": "1", "Status": "Active",
+                }}
             return {"Document": {"DefaultVersion": self.default, "LatestVersion": "2", "Status": "Active"}}
         if args[:2] == ["ssm", "get-document"]:
             name = args[args.index("--name") + 1]
             if name == shadow_rollout.ROLLOUT_DOCUMENT:
-                return {"Content": json.dumps(shadow_rollout.expected_rollout_document())}
+                return {
+                    "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                    "DocumentVersion": "1", "DocumentFormat": "JSON",
+                    "Status": "Active",
+                    "Content": json.dumps(shadow_rollout.expected_rollout_document()),
+                }
             raw = Path("deploy/ssm/shadow-worker-document.yaml").read_bytes()
             _, canonical = shadow_rollout.canonical_json(raw)
             return {"Content": canonical.decode()}
@@ -1577,17 +1761,17 @@ def test_activation_attests_default_even_when_latest_differs(monkeypatch):
     ("status", "default", "latest"),
     [
         ("Creating", "1", "1"),
-        ("Active", "2", "2"),
         ("Active", "1", "2"),
     ],
 )
-def test_rollout_attestation_rejects_non_active_or_non_v1_document(
+def test_rollout_attestation_rejects_non_active_or_mismatched_document(
     status, default, latest
 ):
     class DriftedRolloutAws:
         def call(self, args, write=False):
             assert args[:2] == ["ssm", "describe-document"]
             return {"Document": {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
                 "Status": status,
                 "DefaultVersion": default,
                 "LatestVersion": latest,
@@ -1595,11 +1779,96 @@ def test_rollout_attestation_rejects_non_active_or_non_v1_document(
 
     with pytest.raises(
         shadow_rollout.RolloutError,
-        match="rollout_document_version_invalid",
+        match="document_description_invalid|rollout_document_version_invalid",
     ):
         shadow_rollout.attest_rollout_document(
             DriftedRolloutAws(), shadow_rollout.expected_rollout_document()
         )
+
+
+def test_rollout_attestation_accepts_exact_active_v2_and_returns_binding():
+    expected = shadow_rollout.expected_rollout_document()
+
+    class ExactV2Aws:
+        def call(self, args, write=False):
+            if args[:2] == ["ssm", "describe-document"]:
+                return {"Document": {
+                    "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                    "Status": "Active", "DefaultVersion": "2", "LatestVersion": "2",
+                }}
+            assert args[args.index("--document-version") + 1] == "2"
+            return {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "DocumentVersion": "2", "DocumentFormat": "JSON",
+                "Status": "Active", "Content": json.dumps(expected),
+            }
+
+    attested = shadow_rollout.attest_rollout_document(ExactV2Aws(), expected)
+    assert attested.version == "2"
+    assert attested.canonical_sha256 == shadow_rollout.sha256(
+        shadow_rollout._canonical_bytes(expected)
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Name", "wrong"),
+        ("DocumentVersion", "3"),
+        ("DocumentFormat", "YAML"),
+        ("Status", "Creating"),
+    ],
+)
+def test_rollout_attestation_rejects_wrong_get_identity_before_host(field, value):
+    expected = shadow_rollout.expected_rollout_document()
+
+    class WrongGetAws:
+        def call(self, args, write=False):
+            if args[:2] == ["ssm", "describe-document"]:
+                return {"Document": {
+                    "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                    "Status": "Active", "DefaultVersion": "2", "LatestVersion": "2",
+                }}
+            response = {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "DocumentVersion": "2", "DocumentFormat": "JSON",
+                "Status": "Active", "Content": json.dumps(expected),
+            }
+            response[field] = value
+            return response
+
+    with pytest.raises(shadow_rollout.RolloutError, match="document_readback_invalid"):
+        shadow_rollout.attest_rollout_document(WrongGetAws(), expected)
+
+
+def test_pre_send_rollout_version_drift_fails_before_host_command(monkeypatch):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    calls = []
+
+    def call(args, write=False):
+        calls.append((args, write))
+        return {"Document": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "Status": "Active", "DefaultVersion": "3", "LatestVersion": "3",
+        }}
+
+    monkeypatch.setattr(adapter, "call", call)
+    with pytest.raises(
+        shadow_rollout.RolloutError, match="rollout_document_pre_send_drift"
+    ):
+        adapter.send("install", rollout)
+    assert calls == [([
+        "ssm", "describe-document", "--name", shadow_rollout.ROLLOUT_DOCUMENT,
+    ], False)]
+    assert adapter.commands == []
 
 
 def test_default_write_response_loss_is_authoritatively_reconciled():
@@ -1624,6 +1893,1516 @@ def _load_bootstrap_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_migration_module():
+    spec = importlib.util.spec_from_file_location(
+        "migrate_shadow_rollout_document_test",
+        "deploy/migrate_shadow_rollout_document.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_migration_bootstrap_module():
+    spec = importlib.util.spec_from_file_location(
+        "bootstrap_shadow_rollout_migration_test",
+        "deploy/bootstrap_shadow_rollout_migration.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _ImmutableVersionStore(dict):
+    def __setitem__(self, version, content):
+        if version in self:
+            raise AssertionError("SSM document versions are immutable")
+        super().__setitem__(version, content)
+
+
+class _PriorContentOverrides(dict):
+    def __setitem__(self, version, content):
+        if version != "1":
+            raise AssertionError("candidate version content is immutable")
+        super().__setitem__(version, content)
+
+
+class _MigrationAws:
+    def __init__(self, module):
+        self.module = module
+        self.expected = shadow_rollout.expected_rollout_document()
+        self.legacy = {"schemaVersion": "2.2", "description": "legacy"}
+        self.versions = _ImmutableVersionStore({"1": self.legacy})
+        self.content_overrides = _PriorContentOverrides()
+        self.names = {"1": None}
+        self.default = "1"
+        self.parameters = {}
+        self.calls = []
+        self.lose = set()
+        self.clock = 0.0
+        self.account = "123456789012"
+        self.role_name = "kiwoom-stock-github-shadow-migration"
+        self.session_name = "kiwoom-shadow-migration-77-1"
+        self.authorized_candidate = None
+        self.deadline = None
+        self.latest_override = None
+        self.document_status = "Active"
+        self.version_status = {"1": "Active"}
+        self.transient_once = set()
+        self.update_response_override = None
+
+    @property
+    def latest(self):
+        return self.latest_override or str(max(map(int, self.versions)))
+
+    def remaining(self, operation="primary"):
+        if self.deadline is not None:
+            return self.deadline.remaining(operation)
+        return 999.0
+
+    def authorize_candidate(self, version):
+        if self.authorized_candidate not in (None, version):
+            raise self.module.MigrationError("candidate_authority_changed")
+        self.authorized_candidate = version
+
+    def call(self, args, operation="primary"):
+        self.remaining(operation)
+        self.calls.append((tuple(args), operation))
+        command = tuple(args[:2])
+        if command in self.transient_once:
+            self.transient_once.remove(command)
+            raise self.module.MigrationError("aws_read_failed")
+        if command == ("sts", "get-caller-identity"):
+            return {
+                "Account": self.account,
+                "Arn": (
+                    f"arn:aws:sts::{self.account}:assumed-role/"
+                    f"{self.role_name}/{self.session_name}"
+                ),
+                "UserId": f"AROATEST:{self.session_name}",
+            }
+        if command == ("ssm", "get-parameter"):
+            name = args[args.index("--name") + 1]
+            if name not in self.parameters:
+                raise self.module.MigrationError("parameter_not_found")
+            return {"Parameter": {"Value": self.parameters[name]}}
+        if command == ("ssm", "put-parameter"):
+            name = args[args.index("--name") + 1]
+            value = args[args.index("--value") + 1]
+            if "--no-overwrite" in args and name in self.parameters:
+                raise self.module.MigrationError("parameter_exists")
+            self.parameters[name] = value
+            return {"Version": 1}
+        if command == ("ssm", "delete-parameter"):
+            self.parameters.pop(self.module.LOCK_PARAMETER, None)
+            return {}
+        if command == ("ssm", "describe-document"):
+            return {"Document": {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "Status": self.document_status,
+                "DefaultVersion": self.default, "LatestVersion": self.latest,
+            }}
+        if command == ("ssm", "get-document"):
+            version = args[args.index("--document-version") + 1]
+            return {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "DocumentVersion": version, "DocumentFormat": "JSON",
+                "Status": self.version_status.get(version, "Active"),
+                "Content": json.dumps(
+                    self.content_overrides.get(version, self.versions[version])
+                ),
+            }
+        if command == ("ssm", "list-document-versions"):
+            return {"DocumentVersions": [
+                {
+                    "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                    "DocumentVersion": version, "VersionName": self.names[version],
+                    "Status": self.version_status.get(version, "Active"),
+                    "IsDefaultVersion": version == self.default,
+                }
+                for version in sorted(self.versions, key=int)
+            ]}
+        if command == ("ssm", "update-document"):
+            version = str(int(self.latest) + 1)
+            self.versions[version] = yaml.safe_load(args[args.index("--content") + 1])
+            self.names[version] = args[args.index("--version-name") + 1]
+            self.version_status[version] = "Active"
+            if "update" in self.lose:
+                raise self.module.MigrationError("aws_write_response_lost")
+            if self.update_response_override is not None:
+                return self.update_response_override
+            return {"DocumentDescription": {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "VersionName": self.names[version],
+                "DocumentVersion": version, "Status": "Active",
+            }}
+        if command == ("ssm", "update-document-default-version"):
+            self.default = args[args.index("--document-version") + 1]
+            if "default" in self.lose:
+                raise self.module.MigrationError("aws_write_response_lost")
+            return {"Description": {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "DefaultVersion": self.default,
+            }}
+        raise AssertionError(args)
+
+
+def _migration_kwargs(
+    module, aws, mode="apply", *, session_name="kiwoom-shadow-migration-77-1",
+    account="123456789012", role_name="kiwoom-stock-github-shadow-migration",
+    source_sha=None,
+):
+    aws.session_name = session_name
+    aws.account = account
+    aws.role_name = role_name
+    source = Path(module.DOCUMENT_PATH).read_bytes()
+    legacy_hash = shadow_rollout.sha256(
+        shadow_rollout._canonical_bytes(aws.legacy)
+    )
+    return {
+        "mode": mode,
+        "account": account,
+        "role_arn": (
+            f"arn:aws:iam::{account}:role/{role_name}"
+        ),
+        "session_name": session_name,
+        "source_sha": source_sha or "a" * 40,
+        "source_blob": source,
+        "provenance": {path: "b" * 64 for path in module.RELEVANT_PATHS},
+        "attempt": "77",
+        "prior_version": "1",
+        "prior_hash": legacy_hash,
+        "sleeper": lambda _: None,
+    }
+
+
+def test_migration_fake_models_document_version_content_as_immutable():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    with pytest.raises(AssertionError, match="document versions are immutable"):
+        aws.versions["1"] = dict(aws.expected)
+    with pytest.raises(AssertionError, match="candidate version content is immutable"):
+        aws.content_overrides["2"] = dict(aws.expected)
+
+
+def test_migration_apply_uses_direct_content_version_name_and_single_writes():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    result = module.execute(aws, **_migration_kwargs(module, aws))
+
+    assert result["status"] == "PASS"
+    writes = [call for call, _operation in aws.calls if call[0] == "ssm" and call[1] in {
+        "put-parameter", "delete-parameter", "update-document",
+        "update-document-default-version",
+    }]
+    update = [call for call in writes if call[:2] == ("ssm", "update-document")]
+    defaults = [
+        call for call in writes
+        if call[:2] == ("ssm", "update-document-default-version")
+    ]
+    assert len(update) == len(defaults) == 1
+    assert update[0][update[0].index("--version-name") + 1] == (
+        "ksr-77-" + "a" * 12
+    )
+    content = update[0][update[0].index("--content") + 1]
+    assert not content.startswith("file://")
+    assert content == Path(module.DOCUMENT_PATH).read_text(encoding="utf-8")
+    assert module.LOCK_PARAMETER not in aws.parameters
+
+
+@pytest.mark.parametrize("lost", ["update", "default"])
+def test_migration_response_loss_reconciles_without_write_retry(lost):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.lose.add(lost)
+
+    if lost == "default":
+        result = module.execute(aws, **_migration_kwargs(module, aws))
+        assert result["status"] == "PASS"
+    else:
+        result = module.execute(aws, **_migration_kwargs(module, aws))
+        assert result["status"] == "PASS"
+    operations = [call[:2] for call, _operation in aws.calls]
+    assert operations.count(("ssm", "update-document")) == 1
+    assert operations.count(("ssm", "update-document-default-version")) == 1
+
+
+def test_migration_invalid_update_response_reconciles_without_write_retry():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.update_response_override = {
+        "DocumentDescription": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "VersionName": "wrong",
+            "DocumentVersion": "2",
+            "Status": "Active",
+        }
+    }
+    result = module.execute(aws, **_migration_kwargs(module, aws))
+    assert result["status"] == "PASS"
+    assert sum(
+        call[:2] == ("ssm", "update-document") for call, _operation in aws.calls
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    ("crash_phase", "expected_phase"),
+    [
+        ("update_submitting", "update_submitting"),
+        ("candidate_verified", "candidate_verified"),
+        ("cutover_submitting", "cutover_submitting"),
+    ],
+)
+def test_migration_same_attempt_crash_resume_never_repeats_submit(
+    crash_phase, expected_phase,
+):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == crash_phase:
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError, match="process loss"):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    journal_name = module.JOURNAL_PREFIX + "77"
+    journal = json.loads(aws.parameters[journal_name])
+    assert journal["phase"] == expected_phase
+    before = [call[:2] for call, _operation in aws.calls]
+    try:
+        result = module.execute(
+            aws, **_migration_kwargs(module, aws, mode="reconcile")
+        )
+    except module.MigrationError as error:
+        assert error.category in {"update_uncertain", "cutover_uncertain_no_cas"}
+    else:
+        assert result["status"] == "PASS"
+    after = [call[:2] for call, _operation in aws.calls]
+    assert after.count(("ssm", "update-document")) <= 1
+    assert after.count(("ssm", "update-document-default-version")) <= 1
+    if journal["phase"].endswith("submitting") and (
+        crash_phase in {"update_submitting", "cutover_submitting"}
+    ):
+        assert before.count(("ssm", "update-document")) <= 1
+
+
+def test_migration_journal_created_before_lock_resumes_same_attempt():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "attempt_created":
+            raise RuntimeError("process loss before lock")
+
+    with pytest.raises(RuntimeError, match="before lock"):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    journal_name = module.JOURNAL_PREFIX + "77"
+    assert json.loads(aws.parameters[journal_name])["phase"] == "attempt_created"
+    assert module.LOCK_PARAMETER not in aws.parameters
+
+    result = module.execute(
+        aws,
+        **_migration_kwargs(
+            module, aws, mode="reconcile",
+            session_name="kiwoom-shadow-migration-77-2",
+        ),
+    )
+    assert result["status"] == "PASS"
+    assert module.LOCK_PARAMETER not in aws.parameters
+
+
+def test_migration_post_lock_journal_race_closes_in_manual_hold(monkeypatch):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    original = module._put_lock
+
+    def racing_put_lock(adapter, encoded):
+        original(adapter, encoded)
+        name = module.JOURNAL_PREFIX + "77"
+        raced = json.loads(adapter.parameters[name])
+        raced["actor_last"] = "d" * 64
+        adapter.parameters[name] = module._canonical_json(raced)
+
+    monkeypatch.setattr(module, "_put_lock", racing_put_lock)
+    with pytest.raises(module.MigrationError, match="journal_changed_during_lock"):
+        module.execute(aws, **_migration_kwargs(module, aws))
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "manual_hold"
+    assert module._validate_journal(journal) is None
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+@pytest.mark.parametrize("drift", ["default", "latest", "status", "hash"])
+def test_migration_prestate_resume_drift_holds_before_document_write(drift):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "prestate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    if drift in {"default", "latest"}:
+        aws.versions["2"] = dict(aws.legacy)
+        aws.names["2"] = None
+        aws.version_status["2"] = "Active"
+    if drift == "default":
+        aws.default = "2"
+        aws.latest_override = "1"
+    elif drift == "latest":
+        aws.latest_override = "2"
+    elif drift == "status":
+        aws.document_status = "Failed"
+    else:
+        aws.content_overrides["1"] = {
+            "schemaVersion": "2.2", "description": "drift"
+        }
+    marker = len(aws.calls)
+    with pytest.raises(module.MigrationError, match="unknown_prestate"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    after = aws.calls[marker:]
+    assert not any(
+        call[:2] in {
+            ("ssm", "update-document"),
+            ("ssm", "update-document-default-version"),
+        }
+        for call, _operation in after
+    )
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "manual_hold"
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+def test_migration_stable_attempt_allows_cross_run_sessions():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "candidate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError, match="process loss"):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    original = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    result = module.execute(
+        aws,
+        **_migration_kwargs(
+            module, aws, mode="reconcile",
+            session_name="kiwoom-shadow-migration-77-2",
+        ),
+    )
+    assert result["status"] == "PASS"
+    assert result["contract"] == original["contract"]
+    second_actor = result["actor_last"]
+
+    result = module.execute(
+        aws,
+        **_migration_kwargs(
+            module, aws, mode="reconcile",
+            session_name="kiwoom-shadow-migration-88-1",
+        ),
+    )
+    assert result["status"] == "PASS"
+    assert result["contract"] == original["contract"]
+    assert result["actor_last"] != second_actor
+    assert "session" not in result["contract"]
+    assert set(json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])[
+        "contract"
+    ]) == {
+        "schema", "account", "role_arn_sha256", "source_sha", "attempt",
+        "prior_version", "prior_sha256", "target_sha256", "version_name",
+        "provenance",
+    }
+
+
+@pytest.mark.parametrize("changed", ["role", "account", "source"])
+def test_migration_stable_attempt_rejects_changed_authority_or_source(changed):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "prestate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    journal_name = module.JOURNAL_PREFIX + "77"
+    journal_before = aws.parameters[journal_name]
+    options = {
+        "session_name": "kiwoom-shadow-migration-77-2",
+        "role_name": (
+            "different-shadow-migration" if changed == "role"
+            else "kiwoom-stock-github-shadow-migration"
+        ),
+        "account": "210987654321" if changed == "account" else "123456789012",
+        "source_sha": "b" * 40 if changed == "source" else "a" * 40,
+    }
+    lock_before = aws.parameters[module.LOCK_PARAMETER]
+    with pytest.raises(module.MigrationError, match="journal_contract_mismatch"):
+        module.execute(
+            aws, **_migration_kwargs(module, aws, mode="reconcile", **options)
+        )
+    assert aws.parameters[journal_name] == journal_before
+    assert aws.parameters[module.LOCK_PARAMETER] == lock_before
+
+
+def test_migration_contract_equality_has_no_session_fingerprint():
+    module = _load_migration_module()
+    values = (
+        "123456789012",
+        "arn:aws:iam::123456789012:role/kiwoom-stock-github-shadow-migration",
+        "a" * 40, "77", "1", "b" * 64, "c" * 64,
+        {path: "d" * 64 for path in module.RELEVANT_PATHS},
+    )
+    c1 = module._contract(*values)
+    c2 = module._contract(*values)
+    assert c1 == c2
+    assert "session" not in c1
+
+
+def test_migration_apply_existing_journal_requires_reconcile_and_keeps_lock():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    kwargs = _migration_kwargs(module, aws)
+    contract = module._contract(
+        kwargs["account"], kwargs["role_arn"], kwargs["source_sha"],
+        kwargs["attempt"], kwargs["prior_version"],
+        kwargs["prior_hash"],
+        shadow_rollout.sha256(shadow_rollout._canonical_bytes(aws.expected)),
+        kwargs["provenance"],
+    )
+    aws.parameters[module.JOURNAL_PREFIX + "77"] = module._canonical_json({
+        "schema": 2, "status": "IN_PROGRESS", "phase": "lease_acquired",
+        "contract": contract, "candidate": None,
+        "submits": {"update": 0, "cutover": 0},
+    })
+    with pytest.raises(module.MigrationError, match="apply_requires_reconcile"):
+        module.execute(aws, **kwargs)
+    assert module.LOCK_PARAMETER not in aws.parameters
+
+
+def test_migration_reconcile_contract_mismatch_keeps_lock_and_writes_no_document():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.parameters[module.JOURNAL_PREFIX + "77"] = module._canonical_json({
+        "schema": 2, "status": "IN_PROGRESS", "phase": "lease_acquired",
+        "contract": {"source_sha": "wrong"}, "candidate": None,
+        "submits": {"update": 0, "cutover": 0},
+    })
+    with pytest.raises(module.MigrationError, match="journal_contract_mismatch"):
+        module.execute(
+            aws, **_migration_kwargs(module, aws, mode="reconcile")
+        )
+    assert module.LOCK_PARAMETER not in aws.parameters
+    assert not any(
+        call[:2] == ("ssm", "update-document") for call, _ in aws.calls
+    )
+
+
+@pytest.mark.parametrize("mode", ["apply", "reconcile"])
+def test_migration_incompatible_completed_journal_never_creates_lock(mode):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    result = module.execute(aws, **_migration_kwargs(module, aws))
+    assert result["phase"] == "complete"
+    journal_name = module.JOURNAL_PREFIX + "77"
+    journal_before = aws.parameters[journal_name]
+    assert module.LOCK_PARAMETER not in aws.parameters
+
+    kwargs = _migration_kwargs(
+        module, aws, mode=mode, source_sha="b" * 40,
+        session_name="kiwoom-shadow-migration-77-2",
+    )
+    category = (
+        "apply_requires_reconcile" if mode == "apply"
+        else "journal_contract_mismatch"
+    )
+    with pytest.raises(module.MigrationError, match=category):
+        module.execute(aws, **kwargs)
+    assert aws.parameters[journal_name] == journal_before
+    assert module.LOCK_PARAMETER not in aws.parameters
+
+
+def test_migration_contract_mismatch_does_not_change_unrelated_lock():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    kwargs = _migration_kwargs(module, aws)
+    contract = module._contract(
+        kwargs["account"], kwargs["role_arn"], "b" * 40,
+        kwargs["attempt"], kwargs["prior_version"], kwargs["prior_hash"],
+        shadow_rollout.sha256(shadow_rollout._canonical_bytes(aws.expected)),
+        kwargs["provenance"],
+    )
+    journal = module._new_journal(contract, "c" * 64)
+    aws.parameters[module.JOURNAL_PREFIX + "77"] = module._canonical_json(journal)
+    aws.parameters[module.LOCK_PARAMETER] = "unrelated-owner"
+    with pytest.raises(module.MigrationError, match="journal_contract_mismatch"):
+        module.execute(
+            aws, **_migration_kwargs(module, aws, mode="reconcile")
+        )
+    assert aws.parameters[module.LOCK_PARAMETER] == "unrelated-owner"
+
+
+def test_migration_conflicting_or_malformed_lock_never_writes_document():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.parameters[module.LOCK_PARAMETER] = "not-this-owner"
+    with pytest.raises(module.MigrationError, match="lease_conflict"):
+        module.execute(aws, **_migration_kwargs(module, aws))
+    assert not any(
+        call[:2] in {
+            ("ssm", "update-document"),
+            ("ssm", "update-document-default-version"),
+        }
+        for call, _ in aws.calls
+    )
+
+
+def test_migration_release_requires_exact_owner():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.parameters[module.LOCK_PARAMETER] = "different-owner"
+    with pytest.raises(module.MigrationError, match="lease_owner_changed"):
+        module._release_lock(aws, "expected-owner")
+    assert aws.parameters[module.LOCK_PARAMETER] == "different-owner"
+
+
+def test_migration_journal_enforces_standard_parameter_limit():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    with pytest.raises(module.MigrationError, match="journal_oversize"):
+        module._put_parameter(
+            aws, module.JOURNAL_PREFIX + "77",
+            "x" * (module.JOURNAL_LIMIT + 1), overwrite=False,
+            operation="primary",
+        )
+
+
+def test_migration_deadline_blocks_write_before_subprocess(monkeypatch):
+    module = _load_migration_module()
+    adapter = module.AdminAwsCli(
+        module.Deadline(50.0, 100.0, clock=lambda: 100.0),
+        "approved", "ksr-77-" + "a" * 12, "1",
+    )
+    invoked = False
+
+    def forbidden(*args, **kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("subprocess must not run")
+
+    monkeypatch.setattr(module.subprocess, "run", forbidden)
+    with pytest.raises(module.MigrationError, match="execution_deadline_exhausted"):
+        adapter.call(
+            ["ssm", "delete-parameter", "--name", module.LOCK_PARAMETER],
+            operation="terminal",
+        )
+    assert invoked is False
+
+
+def test_migration_adapter_rejects_arbitrary_direct_content_before_subprocess(
+    monkeypatch,
+):
+    module = _load_migration_module()
+    approved = "approved immutable yaml"
+    version_name = "ksr-77-" + "a" * 12
+    adapter = module.AdminAwsCli(
+        module.Deadline(100.0, 200.0, clock=lambda: 0.0),
+        approved, version_name, "1",
+    )
+    invoked = False
+
+    def forbidden(*args, **kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("subprocess must not run")
+
+    monkeypatch.setattr(module.subprocess, "run", forbidden)
+    with pytest.raises(module.MigrationError, match="admin_command_not_allowed"):
+        adapter.call([
+            "ssm", "update-document", "--name",
+            shadow_rollout.ROLLOUT_DOCUMENT,
+            "--document-version", "$LATEST", "--document-format", "YAML",
+            "--version-name", version_name, "--content", "arbitrary yaml",
+        ], operation="primary")
+    assert invoked is False
+
+
+@pytest.mark.parametrize(
+    ("args_factory", "operation"),
+    [
+        (
+            lambda module, content, name: [
+                "ssm", "update-document", "--name",
+                shadow_rollout.ROLLOUT_DOCUMENT,
+                "--document-version", "$LATEST", "--document-format", "YAML",
+                "--version-name", name, "--content", content,
+            ],
+            "terminal",
+        ),
+        (
+            lambda module, content, name: [
+                "ssm", "delete-parameter", "--name", module.LOCK_PARAMETER,
+            ],
+            "primary",
+        ),
+        (
+            lambda module, content, name: [
+                "ssm", "put-parameter", "--name", module.JOURNAL_PREFIX + "77",
+                "--type", "String", "--value",
+                json.dumps({"phase": "manual_hold"}), "--overwrite",
+            ],
+            "primary",
+        ),
+    ],
+)
+def test_migration_adapter_rejects_operation_class_mismatch(
+    monkeypatch, args_factory, operation,
+):
+    module = _load_migration_module()
+    approved = "approved immutable yaml"
+    version_name = "ksr-77-" + "a" * 12
+    adapter = module.AdminAwsCli(
+        module.Deadline(100.0, 200.0, clock=lambda: 0.0),
+        approved, version_name, "1",
+    )
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("subprocess must not run"),
+    )
+    with pytest.raises(
+        module.MigrationError, match="admin_command_operation_mismatch"
+    ):
+        adapter.call(
+            args_factory(module, approved, version_name), operation=operation
+        )
+
+
+def test_migration_provenance_uses_process_deadline_before_subprocess(monkeypatch):
+    module = _load_migration_module()
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("subprocess must not run"),
+    )
+    with pytest.raises(module.MigrationError, match="execution_deadline_exhausted"):
+        module._git(
+            ["rev-parse", "HEAD"],
+            module.Deadline(10.0, 20.0, clock=lambda: 10.0),
+            text=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["ssm", "create-document"],
+        ["ssm", "delete-document", "--name", shadow_rollout.ROLLOUT_DOCUMENT],
+        ["ssm", "send-command"],
+        ["ec2", "describe-instances"],
+        [
+            "ssm", "update-document", "--name", shadow_rollout.ROLLOUT_DOCUMENT,
+            "--document-version", "$LATEST", "--document-format", "YAML",
+            "--version-name", "ksr-77-" + "a" * 12,
+            "--content", "file:///tmp/mutable",
+        ],
+        [
+            "ssm", "update-document-default-version", "--name",
+            shadow_rollout.ROLLOUT_DOCUMENT, "--document-version", "1",
+        ],
+    ],
+)
+def test_migration_runtime_classifier_rejects_forbidden_authority(args):
+    module = _load_migration_module()
+    with pytest.raises(module.MigrationError, match="admin_command_not_allowed"):
+        module._classify_admin_command(
+            args,
+            approved_content="approved",
+            approved_version_name="ksr-77-" + "a" * 12,
+            candidate_version="2",
+        )
+
+
+def test_migration_approved_sources_binds_head_clean_and_exact_blobs(monkeypatch):
+    module = _load_migration_module()
+    calls = []
+
+    def fake_git(args, deadline, text=False):
+        calls.append((tuple(args), text))
+        if args == ["rev-parse", "HEAD"]:
+            return "a" * 40 + "\n"
+        if args[0] == "status":
+            return ""
+        return ("blob:" + args[1].split(":", 1)[1]).encode()
+
+    monkeypatch.setattr(module, "_git", fake_git)
+    source, provenance = module.approved_sources(
+        "a" * 40, module.Deadline(100.0, 200.0, clock=lambda: 0.0)
+    )
+    assert source == ("blob:" + module.DOCUMENT_PATH).encode()
+    assert set(provenance) == set(module.RELEVANT_PATHS)
+    assert calls[0][0] == ("rev-parse", "HEAD")
+    assert calls[1][0] == (
+        "status", "--porcelain", "--untracked-files=all",
+    )
+    assert all(call[0][0] == "show" for call in calls[2:])
+
+
+def test_migration_versions_rejects_duplicate_and_bad_pagination():
+    module = _load_migration_module()
+
+    class Pages:
+        def __init__(self):
+            self.count = 0
+
+        def call(self, args, operation="primary"):
+            self.count += 1
+            item = {
+                "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+                "DocumentVersion": "1", "VersionName": None,
+                "Status": "Active", "IsDefaultVersion": True,
+            }
+            if self.count == 1:
+                return {"DocumentVersions": [item], "NextToken": "again"}
+            return {"DocumentVersions": [item]}
+
+    with pytest.raises(module.MigrationError, match="document_versions_duplicate"):
+        module._versions(Pages(), operation="primary")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"DocumentDescription": {}, "unexpected": {}},
+        {"DocumentDescription": {
+            "Name": "wrong", "VersionName": "ksr-77-" + "a" * 12,
+            "DocumentVersion": "2", "Status": "Active",
+        }},
+        {"DocumentDescription": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT, "VersionName": "wrong",
+            "DocumentVersion": "2", "Status": "Active",
+        }},
+        {"DocumentDescription": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "VersionName": "ksr-77-" + "a" * 12,
+            "DocumentVersion": "not-numeric", "Status": "Active",
+        }},
+        {"DocumentDescription": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "VersionName": "ksr-77-" + "a" * 12,
+            "DocumentVersion": "2", "Status": "Failed",
+        }},
+        {"DocumentDescription": {
+            "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+            "VersionName": "ksr-77-" + "a" * 12,
+            "DocumentVersion": "2", "Status": "Active", "Unknown": "x",
+        }},
+    ],
+)
+def test_migration_update_response_contract_rejects_invalid_shape(response):
+    module = _load_migration_module()
+    with pytest.raises(module.MigrationError, match="update_response_invalid"):
+        module._update_response_version(response, "ksr-77-" + "a" * 12)
+
+
+def test_migration_update_response_contract_accepts_exact_bound_description():
+    module = _load_migration_module()
+    response = {"DocumentDescription": {
+        "Name": shadow_rollout.ROLLOUT_DOCUMENT,
+        "VersionName": "ksr-77-" + "a" * 12,
+        "DocumentVersion": "2", "Status": "Active",
+    }}
+    assert module._update_response_version(
+        response, "ksr-77-" + "a" * 12
+    ) == "2"
+
+
+def test_migration_malformed_matching_journal_closes_in_manual_hold():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "prestate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    journal_name = module.JOURNAL_PREFIX + "77"
+    malformed = json.loads(aws.parameters[journal_name])
+    malformed["submits"] = {"update": 0}
+    aws.parameters[journal_name] = module._canonical_json(malformed)
+    with pytest.raises(module.MigrationError, match="journal_schema_invalid"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    closed = json.loads(aws.parameters[journal_name])
+    assert closed["phase"] == "manual_hold"
+    assert closed["status"] == "MANUAL_HOLD"
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+def test_migration_invalid_submit_order_normalizes_to_stable_manual_hold():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "prestate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    journal_name = module.JOURNAL_PREFIX + "77"
+    malformed = json.loads(aws.parameters[journal_name])
+    malformed["submits"] = {"update": 0, "cutover": 1}
+    aws.parameters[journal_name] = module._canonical_json(malformed)
+    with pytest.raises(
+        module.MigrationError, match="journal_submit_invariant_invalid"
+    ):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    closed = json.loads(aws.parameters[journal_name])
+    assert closed["submits"] == {"update": 1, "cutover": 1}
+    assert module._validate_journal(closed) is None
+    with pytest.raises(module.MigrationError, match="manual_hold"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-88-1",
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("candidate", None), ("final", None), ("prestate", None),
+        ("response_version", "3"),
+    ],
+)
+def test_migration_incomplete_complete_journal_never_passes_or_releases(
+    field, value,
+):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    result = module.execute(aws, **_migration_kwargs(module, aws))
+    assert result["phase"] == "complete"
+    journal_name = module.JOURNAL_PREFIX + "77"
+    forged = json.loads(aws.parameters[journal_name])
+    forged[field] = value
+    aws.parameters[journal_name] = module._canonical_json(forged)
+    with pytest.raises(module.MigrationError, match="journal_phase_evidence_invalid"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    closed = json.loads(aws.parameters[journal_name])
+    assert closed["phase"] == "manual_hold"
+    assert closed["status"] == "MANUAL_HOLD"
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+def test_migration_valid_complete_reconcile_authoritatively_reads_before_pass():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    assert module.execute(
+        aws, **_migration_kwargs(module, aws)
+    )["phase"] == "complete"
+    marker = len(aws.calls)
+    result = module.execute(
+        aws,
+        **_migration_kwargs(
+            module, aws, mode="reconcile",
+            session_name="kiwoom-shadow-migration-77-2",
+        ),
+    )
+    assert result["status"] == "PASS"
+    commands = [call[:2] for call, _operation in aws.calls[marker:]]
+    assert ("ssm", "describe-document") in commands
+    assert ("ssm", "get-document") in commands
+    assert ("ssm", "list-document-versions") in commands
+
+
+def test_migration_terminal_complete_transient_read_retains_phase_and_lock():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    assert module.execute(
+        aws, **_migration_kwargs(module, aws)
+    )["phase"] == "complete"
+    aws.transient_once.add(("ssm", "describe-document"))
+    with pytest.raises(module.MigrationError, match="aws_read_failed"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "complete"
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+def test_migration_transient_authoritative_read_keeps_phase():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "candidate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    journal_name = module.JOURNAL_PREFIX + "77"
+    aws.transient_once.add(("ssm", "list-document-versions"))
+    with pytest.raises(module.MigrationError, match="aws_read_failed"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    assert json.loads(aws.parameters[journal_name])["phase"] == (
+        "candidate_verified"
+    )
+
+
+@pytest.mark.parametrize("drift", ["version_name", "status", "default", "latest"])
+def test_migration_authoritative_candidate_drift_is_durable_manual_hold(drift):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "candidate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    if drift == "version_name":
+        aws.names["2"] = "wrong"
+    elif drift == "status":
+        aws.version_status["2"] = "Failed"
+    elif drift == "default":
+        aws.default = "2"
+    else:
+        aws.latest_override = "1"
+    journal_name = module.JOURNAL_PREFIX + "77"
+    with pytest.raises(module.MigrationError):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    closed = json.loads(aws.parameters[journal_name])
+    assert closed["phase"] == "manual_hold"
+    assert closed["status"] == "MANUAL_HOLD"
+
+
+def test_migration_primary_cutoff_allows_terminal_manual_hold_without_write():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "candidate_verified":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    marker = len(aws.calls)
+    aws.deadline = module.Deadline(10.0, 100.0, clock=lambda: 20.0)
+    with pytest.raises(module.MigrationError, match="primary_deadline_exhausted"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    after = aws.calls[marker:]
+    assert not any(
+        operation == "primary" and call[:2] in {
+            ("ssm", "update-document"),
+            ("ssm", "update-document-default-version"),
+        }
+        for call, operation in after
+    )
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "manual_hold"
+    assert any(
+        operation == "terminal" and call[:2] == ("ssm", "put-parameter")
+        for call, operation in after
+    )
+
+
+def test_migration_terminal_reserve_post_cutover_drift_holds_without_write():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "cutover_reconciled":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    aws.versions["3"] = dict(aws.expected)
+    aws.names["3"] = None
+    aws.version_status["3"] = "Active"
+    marker = len(aws.calls)
+    aws.deadline = module.Deadline(10.0, 100.0, clock=lambda: 20.0)
+    with pytest.raises(module.MigrationError, match="cutover_state_drift"):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    assert module.LOCK_PARAMETER in aws.parameters
+    after = aws.calls[marker:]
+    assert all(operation == "terminal" for _call, operation in after)
+    assert not any(
+        call[:2] == ("ssm", "update-document-default-version")
+        for call, _operation in after
+    )
+    assert not any(
+        call[:2] == ("ssm", "delete-parameter")
+        for call, _operation in after
+    )
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "manual_hold"
+    assert journal["status"] == "MANUAL_HOLD"
+
+
+@pytest.mark.parametrize("drift", ["latest", "default", "name", "status"])
+def test_migration_post_cutover_drift_never_submits_another_default_write(drift):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+
+    def crash(phase):
+        if phase == "cutover_reconciled":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(
+            aws, **_migration_kwargs(module, aws), phase_hook=crash
+        )
+    if drift == "latest":
+        aws.versions["3"] = dict(aws.expected)
+        aws.names["3"] = None
+        aws.version_status["3"] = "Active"
+    elif drift == "default":
+        aws.default = "1"
+    elif drift == "name":
+        aws.names["2"] = "wrong"
+    elif drift == "status":
+        aws.document_status = "Failed"
+    marker = len(aws.calls)
+    with pytest.raises(module.MigrationError):
+        module.execute(
+            aws,
+            **_migration_kwargs(
+                module, aws, mode="reconcile",
+                session_name="kiwoom-shadow-migration-77-2",
+            ),
+        )
+    after = aws.calls[marker:]
+    assert not any(
+        call[:2] == ("ssm", "update-document-default-version")
+        for call, _operation in after
+    )
+    assert json.loads(
+        aws.parameters[module.JOURNAL_PREFIX + "77"]
+    )["phase"] == "manual_hold"
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+def test_migration_failed_safe_crash_reconcile_is_release_only_fail():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    kwargs = _migration_kwargs(module, aws)
+    kwargs["prior_hash"] = "f" * 64
+
+    def crash(phase):
+        if phase == "failed_safe":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(aws, **kwargs, phase_hook=crash)
+    journal_name = module.JOURNAL_PREFIX + "77"
+    first_actor = json.loads(aws.parameters[journal_name])["actor_last"]
+    marker = len(aws.calls)
+    kwargs = _migration_kwargs(
+        module, aws, mode="reconcile",
+        session_name="kiwoom-shadow-migration-77-2",
+    )
+    kwargs["prior_hash"] = "f" * 64
+    result = module.execute(aws, **kwargs)
+    current_actor = module.sha256((
+        "arn:aws:sts::123456789012:assumed-role/"
+        "kiwoom-stock-github-shadow-migration/"
+        "kiwoom-shadow-migration-77-2"
+    ).encode())
+    remote = json.loads(aws.parameters[journal_name])
+    assert result["phase"] == "failed_safe"
+    assert result["status"] == "FAIL"
+    assert first_actor != current_actor
+    assert remote["actor_last"] == current_actor
+    assert result["actor_last"] == current_actor
+    assert module.LOCK_PARAMETER not in aws.parameters
+    release_calls = aws.calls[marker:]
+    journal_update = next(
+        index for index, (call, _operation) in enumerate(release_calls)
+        if call[:2] == ("ssm", "put-parameter")
+        and call[call.index("--name") + 1] == journal_name
+    )
+    lock_delete = next(
+        index for index, (call, _operation) in enumerate(release_calls)
+        if call[:2] == ("ssm", "delete-parameter")
+    )
+    assert journal_update < lock_delete
+    assert not any(
+        call[:2] in {
+            ("ssm", "update-document"),
+            ("ssm", "update-document-default-version"),
+        }
+        for call, _operation in aws.calls[marker:]
+    )
+
+
+@pytest.mark.parametrize("failure_point", ["update", "readback"])
+def test_migration_failed_safe_actor_audit_failure_retains_lock(failure_point):
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    kwargs = _migration_kwargs(module, aws)
+    kwargs["prior_hash"] = "f" * 64
+
+    def crash(phase):
+        if phase == "failed_safe":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(aws, **kwargs, phase_hook=crash)
+    journal_name = module.JOURNAL_PREFIX + "77"
+    original_call = aws.call
+    release_update_written = False
+
+    def fail_actor_audit(args, operation="primary"):
+        nonlocal release_update_written
+        command = tuple(args[:2])
+        name = args[args.index("--name") + 1] if "--name" in args else None
+        is_journal_update = (
+            command == ("ssm", "put-parameter")
+            and name == journal_name
+            and "--overwrite" in args
+        )
+        if failure_point == "update" and is_journal_update:
+            raise module.MigrationError("aws_read_failed")
+        if (
+            failure_point == "readback"
+            and release_update_written
+            and command == ("ssm", "get-parameter")
+            and name == journal_name
+        ):
+            raise module.MigrationError("aws_read_failed")
+        result = original_call(args, operation=operation)
+        if is_journal_update:
+            release_update_written = True
+        return result
+
+    aws.call = fail_actor_audit
+    kwargs = _migration_kwargs(
+        module, aws, mode="reconcile",
+        session_name="kiwoom-shadow-migration-77-2",
+    )
+    kwargs["prior_hash"] = "f" * 64
+    with pytest.raises(module.MigrationError, match="aws_read_failed"):
+        module.execute(aws, **kwargs)
+    assert module.LOCK_PARAMETER in aws.parameters
+    assert json.loads(aws.parameters[journal_name])["phase"] == "failed_safe"
+    assert not any(
+        call[:2] == ("ssm", "delete-parameter")
+        for call, _operation in aws.calls
+    )
+
+
+def test_migration_failed_safe_terminal_candidate_presence_holds_lock():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    kwargs = _migration_kwargs(module, aws)
+    kwargs["prior_hash"] = "f" * 64
+
+    def crash(phase):
+        if phase == "failed_safe":
+            raise RuntimeError("process loss")
+
+    with pytest.raises(RuntimeError):
+        module.execute(aws, **kwargs, phase_hook=crash)
+    aws.versions["2"] = dict(aws.expected)
+    aws.names["2"] = "ksr-77-" + "a" * 12
+    aws.version_status["2"] = "Active"
+    kwargs = _migration_kwargs(
+        module, aws, mode="reconcile",
+        session_name="kiwoom-shadow-migration-77-2",
+    )
+    kwargs["prior_hash"] = "f" * 64
+    with pytest.raises(
+        module.MigrationError, match="failed_safe_candidate_present"
+    ):
+        module.execute(aws, **kwargs)
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "manual_hold"
+    assert module.LOCK_PARAMETER in aws.parameters
+
+
+def test_migration_immediate_failed_safe_proves_absence_before_release():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    kwargs = _migration_kwargs(module, aws)
+    kwargs["prior_hash"] = "f" * 64
+
+    result = module.execute(aws, **kwargs)
+
+    assert result["phase"] == "failed_safe"
+    assert result["status"] == "FAIL"
+    assert module.LOCK_PARAMETER not in aws.parameters
+    calls = [call[:2] for call, _operation in aws.calls]
+    assert ("ssm", "list-document-versions") in calls
+    assert calls.index(("ssm", "list-document-versions")) < calls.index(
+        ("ssm", "delete-parameter")
+    )
+
+
+def test_migration_immediate_failed_safe_candidate_presence_holds_lock():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.versions["2"] = dict(aws.expected)
+    aws.names["2"] = "ksr-77-" + "a" * 12
+    aws.version_status["2"] = "Active"
+
+    with pytest.raises(
+        module.MigrationError, match="failed_safe_candidate_present"
+    ):
+        module.execute(aws, **_migration_kwargs(module, aws))
+
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "manual_hold"
+    assert module.LOCK_PARAMETER in aws.parameters
+    assert not any(
+        call[:2] == ("ssm", "delete-parameter")
+        for call, _operation in aws.calls
+    )
+
+
+def test_migration_immediate_failed_safe_transient_read_retains_lock():
+    module = _load_migration_module()
+    aws = _MigrationAws(module)
+    aws.transient_once.add(("ssm", "list-document-versions"))
+    kwargs = _migration_kwargs(module, aws)
+    kwargs["prior_hash"] = "f" * 64
+
+    with pytest.raises(module.MigrationError, match="aws_read_failed"):
+        module.execute(aws, **kwargs)
+
+    journal = json.loads(aws.parameters[module.JOURNAL_PREFIX + "77"])
+    assert journal["phase"] == "failed_safe"
+    assert journal["status"] == "FAIL"
+    assert module.LOCK_PARAMETER in aws.parameters
+    assert not any(
+        call[:2] == ("ssm", "delete-parameter")
+        for call, _operation in aws.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "phase", "expected"),
+    [("PASS", "complete", 0), ("FAIL", "failed_safe", 1),
+     ("MANUAL_HOLD", "manual_hold", 1)],
+)
+def test_migration_main_only_complete_exits_zero(
+    monkeypatch, tmp_path, status, phase, expected,
+):
+    module = _load_migration_module()
+    source = Path(module.DOCUMENT_PATH).read_bytes()
+    provenance = {path: "b" * 64 for path in module.RELEVANT_PATHS}
+    monkeypatch.setattr(
+        module, "approved_sources", lambda source_sha, deadline: (source, provenance)
+    )
+    monkeypatch.setattr(
+        module, "execute", lambda aws, **kwargs: {
+            "status": status, "phase": phase, "actor_last": "c" * 64,
+        },
+    )
+    result = module.main([
+        "--mode", "reconcile",
+        "--account-id", "123456789012",
+        "--expected-role-arn",
+        "arn:aws:iam::123456789012:role/kiwoom-stock-github-shadow-migration",
+        "--expected-session-name", "kiwoom-shadow-migration-77-1",
+        "--source-sha", "a" * 40,
+        "--migration-attempt-id", "77",
+        "--expected-current-version", "1",
+        "--expected-current-canonical-sha256", "d" * 64,
+        "--audit-path", str(tmp_path / "audit.json"),
+    ])
+    assert result == expected
+    audit = json.loads((tmp_path / "audit.json").read_text(encoding="utf-8"))
+    assert audit["actor_session_sha256"] == "c" * 64
+
+
+def test_migration_bootstrap_reuses_exact_and_refuses_trust_drift(monkeypatch):
+    module = _load_migration_bootstrap_module()
+    trust, _ = module._render(module.TRUST, "123456789012")
+    policy, _ = module._render(module.POLICY, "123456789012")
+    role = {
+        "Arn": "arn:aws:iam::123456789012:role/" + module.ROLE_NAME,
+        "AssumeRolePolicyDocument": trust,
+    }
+
+    def exact_run(args, missing=None):
+        if args[:2] == ["accessanalyzer", "validate-policy"]:
+            return {"findings": []}
+        if args[:2] == ["iam", "get-role"]:
+            return {"Role": role}
+        if args[:2] == ["iam", "get-role-policy"]:
+            return {"PolicyDocument": policy}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module, "_run", exact_run)
+    assert module.bootstrap("123456789012")["role_created"] is False
+    role["AssumeRolePolicyDocument"] = {"Version": "drift"}
+    with pytest.raises(module.BootstrapError, match="trust drift"):
+        module.bootstrap("123456789012")
+
+
+def test_routine_rejects_unattested_tuple_before_aws(monkeypatch):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+    )
+    invoked = False
+
+    def forbidden(*args, **kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("AWS must not run")
+
+    monkeypatch.setattr(shadow_rollout.subprocess, "run", forbidden)
+    with pytest.raises(
+        shadow_rollout.RolloutError, match="rollout_document_version_invalid"
+    ):
+        shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10).send(
+            "install", rollout
+        )
+    assert invoked is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("DocumentName", "wrong"),
+        ("DocumentVersion", "3"),
+        ("InstanceIds", ["i-wrong"]),
+        ("Parameters", {}),
+        ("CommandId", "bad"),
+    ],
+)
+def test_routine_send_response_binds_exact_identity(field, value):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    command_id = "00000000-0000-0000-0000-000000000001"
+    response = _send_response(rollout, command_id)
+    response["Command"][field] = value
+    with pytest.raises(
+        shadow_rollout.RolloutError, match="send_response_identity_mismatch"
+    ):
+        shadow_rollout.AwsCli._send_response_command_id(
+            response, shadow_rollout._rollout_comment("install", rollout),
+            shadow_rollout._rollout_parameters("install", rollout), "2",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("CommandId", "00000000-0000-0000-0000-000000000099"),
+        ("DocumentName", "wrong"),
+        ("DocumentVersion", "3"),
+        ("InstanceId", "i-wrong"),
+    ],
+)
+def test_routine_poll_binds_exact_invocation_identity(monkeypatch, field, value):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    command_id = "00000000-0000-0000-0000-000000000001"
+    response = _poll_response(rollout, command_id, Status="Success")
+    response[field] = value
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    monkeypatch.setattr(adapter, "call", lambda args, write=False: response)
+    with pytest.raises(shadow_rollout.RolloutError, match="invocation_invalid"):
+        adapter.poll(command_id, rollout)
 
 
 def test_bootstrap_ambiguous_exact_creator_is_never_deleted_and_next_run_reuses(monkeypatch):

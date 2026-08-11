@@ -1,0 +1,10 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid":"ReadAndVersionExactRolloutDocument","Effect":"Allow","Action":["ssm:DescribeDocument","ssm:GetDocument","ssm:ListDocumentVersions","ssm:UpdateDocument","ssm:UpdateDocumentDefaultVersion"],"Resource":"arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/KiwoomStock-ShadowWorkerRollout"},
+    {"Sid":"ReadExactMigrationState","Effect":"Allow","Action":"ssm:GetParameter","Resource":["arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:parameter/kiwoom-stock/shadow-rollout-document-migration/lock","arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:parameter/kiwoom-stock/shadow-rollout-document-migration/attempts/*"]},
+    {"Sid":"CreateOnlyExactMigrationLease","Effect":"Allow","Action":"ssm:PutParameter","Resource":"arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:parameter/kiwoom-stock/shadow-rollout-document-migration/lock","Condition":{"Bool":{"ssm:Overwrite":"false"}}},
+    {"Sid":"WriteBoundedAttemptJournals","Effect":"Allow","Action":"ssm:PutParameter","Resource":"arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:parameter/kiwoom-stock/shadow-rollout-document-migration/attempts/*"},
+    {"Sid":"ReleaseExactMigrationLease","Effect":"Allow","Action":"ssm:DeleteParameter","Resource":"arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:parameter/kiwoom-stock/shadow-rollout-document-migration/lock"}
+  ]
+}
