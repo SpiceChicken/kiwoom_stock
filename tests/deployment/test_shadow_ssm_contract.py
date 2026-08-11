@@ -458,6 +458,18 @@ def test_migration_workflow_concurrency_drift_fails_closed(contract_root: Path):
     assert_failure(run_checker(contract_root), 1, "migration.workflow.concurrency")
 
 
+def test_migration_workflow_top_level_runner_context_fails_closed(
+    contract_root: Path,
+):
+    replace_once(
+        contract_root, MIGRATION_WORKFLOW,
+        "  AWS_REGION: ap-northeast-2",
+        "  AWS_REGION: ap-northeast-2\n"
+        "  AUDIT_PATH: ${{ runner.temp }}/unsafe.json",
+    )
+    assert_failure(run_checker(contract_root), 1, "migration.workflow.forbidden")
+
+
 def test_migration_iam_forbidden_send_command_fails_closed(contract_root: Path):
     replace_once(
         contract_root, MIGRATION_POLICY,

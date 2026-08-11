@@ -1495,14 +1495,19 @@ def _verify_migration_boundary(
         "production-shadow", "KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN",
         "refs/heads/main",
         "if: always()", "retention-days: 14", "--mode",
+        "steps.audit.outputs.path",
     )
+    if any(value in text for value in (
+        "secrets.", "SendCommand", "KIWOOM_APP_KEY", "runner.temp",
+    )):
+        raise ContractMismatch("migration.workflow.forbidden")
     if (
         any(value not in text for value in required)
         or "git status --porcelain --untracked-files=all" not in run_text
+        or '${RUNNER_TEMP}/shadow-rollout-document-migration.json' not in run_text
+        or '>>"${GITHUB_OUTPUT}"' not in run_text
     ):
         raise ContractMismatch("migration.workflow.contract")
-    if any(value in text for value in ("secrets.", "SendCommand", "KIWOOM_APP_KEY")):
-        raise ContractMismatch("migration.workflow.forbidden")
 
     try:
         trust = json.loads(trust_source)
