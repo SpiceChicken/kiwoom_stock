@@ -33,7 +33,6 @@ concurrency:
 
 env:
   AWS_REGION: ap-northeast-2
-  AUDIT_PATH: ${{ runner.temp }}/shadow-rollout-document-migration.json
 
 jobs:
   migrate:
@@ -47,12 +46,15 @@ jobs:
       id-token: write
     steps:
       - name: Initialize bounded redacted evidence
+        id: audit
         timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' '{"status":"FAIL","category":"workflow_interrupted"}' >"${AUDIT_PATH}"
+          audit_path="${RUNNER_TEMP}/shadow-rollout-document-migration.json"
+          printf '%s\n' '{"status":"FAIL","category":"workflow_interrupted"}' >"${audit_path}"
+          printf 'path=%s\n' "${audit_path}" >>"${GITHUB_OUTPUT}"
 
       - name: Checkout exact trusted migration executor
         timeout-minutes: 1
@@ -112,6 +114,7 @@ jobs:
           EXPECTED_ROLE_ARN: ${{ vars.KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN }}
           EXPECTED_ACCOUNT_ID: ${{ vars.KIWOOM_AWS_ACCOUNT_ID }}
           EXPECTED_SESSION_NAME: kiwoom-shadow-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          AUDIT_PATH: ${{ steps.audit.outputs.path }}
         shell: bash
         run: |
           set -euo pipefail
@@ -146,6 +149,6 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: shadow-rollout-document-migration-${{ inputs.migration_attempt_id }}-${{ github.run_id }}
-          path: ${{ env.AUDIT_PATH }}
+          path: ${{ steps.audit.outputs.path }}
           if-no-files-found: error
           retention-days: 14

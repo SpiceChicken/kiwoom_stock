@@ -104,15 +104,23 @@ def test_shadow_migration_cd_is_separate_protected_and_always_audited():
     assert job["if"] == "github.ref == 'refs/heads/main'"
     steps = job["steps"]
     text = SHADOW_MIGRATION_WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert workflow["env"] == {"AWS_REGION": "ap-northeast-2"}
+    assert "runner.temp" not in text
     assert "vars.KIWOOM_AWS_SHADOW_MIGRATION_ROLE_ARN" in text
     assert "vars.KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN" not in text
     assert '[[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]' in text
     assert "git status --porcelain --untracked-files=all" in text
     assert all("timeout-minutes" in step for step in steps)
+    audit = steps[0]
+    assert audit["id"] == "audit"
+    assert '${RUNNER_TEMP}/shadow-rollout-document-migration.json' in audit["run"]
+    execute = next(step for step in steps if step["name"].startswith("Execute"))
+    assert execute["env"]["AUDIT_PATH"] == "${{ steps.audit.outputs.path }}"
     uploads = [step for step in steps if step.get("uses") == UPLOAD_ARTIFACT_ACTION]
     assert len(uploads) == 1
     assert uploads[0]["if"] == "always()"
     assert uploads[0]["with"]["retention-days"] == 14
+    assert uploads[0]["with"]["path"] == "${{ steps.audit.outputs.path }}"
 
 
 def test_shadow_activation_hashes_validator_before_oidc_and_uses_it_directly():
