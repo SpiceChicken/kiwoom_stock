@@ -501,21 +501,40 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
         raise ContractMismatch("activation.workflow.global_env")
     steps = _steps(workflow, "activation.workflow")
     names = [step.get("name") for step in steps]
+    helper_checkout_name = "Checkout exact current control-plane helpers"
     expected_notification_steps = {
         "Preflight protected Slack status boundary",
         "Notify protected shadow status",
         "Clear OIDC credentials before evidence upload",
         "Upload bounded shadow evidence",
     }
-    if not expected_notification_steps.issubset(set(names)):
+    if (
+        helper_checkout_name not in names
+        or not expected_notification_steps.issubset(set(names))
+    ):
         raise ContractMismatch("activation.workflow.notification_steps")
+    helper_checkout_index = names.index(helper_checkout_name)
+    source_validation_index = names.index(
+        "Validate immutable shadow tuple and candidate run"
+    )
     preflight_index = names.index("Preflight protected Slack status boundary")
     oidc_index = names.index("Configure exact shadow activation role with OIDC")
     clear_index = names.index("Clear OIDC credentials before evidence upload")
     notify_index = names.index("Notify protected shadow status")
     upload_index = names.index("Upload bounded shadow evidence")
-    if not (preflight_index < oidc_index < clear_index < notify_index < upload_index):
+    if not (
+        helper_checkout_index < source_validation_index < preflight_index
+        < oidc_index < clear_index < notify_index < upload_index
+    ):
         raise ContractMismatch("activation.workflow.notification_order")
+    helper_checkout = steps[helper_checkout_index]
+    if helper_checkout.get("with") != {
+        "ref": "${{ github.sha }}",
+        "path": ".shadow-control-plane",
+        "fetch-depth": 1,
+        "persist-credentials": False,
+    }:
+        raise ContractMismatch("activation.workflow.control_plane_checkout")
     notification_steps = [
         step for step in steps if step.get("name") in expected_notification_steps
     ]
@@ -532,6 +551,20 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
             "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": secret_reference,
         }:
             raise ContractMismatch("activation.workflow.notification_secret")
+    preflight = next(
+        step for step in notification_steps
+        if step.get("name") == "Preflight protected Slack status boundary"
+    )
+    notify = next(
+        step for step in notification_steps
+        if step.get("name") == "Notify protected shadow status"
+    )
+    if ".shadow-control-plane/deploy/notify_shadow_status.py" not in str(
+        preflight.get("run", "")
+    ) or ".shadow-control-plane/deploy/notify_shadow_status.py" not in str(
+        notify.get("run", "")
+    ):
+        raise ContractMismatch("activation.workflow.control_plane_notifier")
     workflow_text = json.dumps(workflow, sort_keys=True)
     if (
         workflow_text.count("secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL") != 2
@@ -560,6 +593,11 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
     script = step.get("run")
     if not isinstance(script, str):
         raise ContractMismatch("activation.workflow.execute_run")
+    if (
+        "python3 .shadow-control-plane/deploy/ec2/"
+        "shadow_invocation_diagnostic.py" not in script
+    ):
+        raise ContractMismatch("activation.workflow.control_plane_diagnostic")
     tokens = aws_units[0][1]
     flags = _flags(tokens, ["aws", "ssm", "send-command"], "activation.workflow.send_flags")
     expected_flags = {
