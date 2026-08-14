@@ -190,6 +190,11 @@ promotion path:
   rejects duplicate/non-finite JSON, noncanonical dates, unknown/missing
   event-specific fields, and unknown/missing side-effect keys, and emits only a
   canonical projection of validated safe fields;
+- Docker pull and Compose orchestration progress is redirected away from SSM
+  stdout. That channel carries only the host's canonical validator projection
+  and fixed non-JSON status markers, so untrusted progress such as `[+]` cannot
+  be mistaken for a truncated or malformed evidence record by the workflow's
+  second validation pass;
 - the shadow named volume is never removed by the executor, and the command
   reports only redacted tuple/status evidence.
 
