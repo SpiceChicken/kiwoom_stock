@@ -476,19 +476,69 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
     expected_inputs = {
         "desired_state", "source_sha", "image_digest", "build_run_id",
         "compose_shadow_sha256", "activation_id", "worker_sha256",
-        "validator_sha256", "shadow_document_sha256",
+        "validator_sha256", "shadow_document_sha256", "status_notification",
     }
-    if set(_dispatch_inputs(workflow, "activation.workflow")) != expected_inputs:
+    dispatch_inputs = _dispatch_inputs(workflow, "activation.workflow")
+    if set(dispatch_inputs) != expected_inputs:
         raise ContractMismatch("activation.workflow.dispatch_input_set")
+    if dispatch_inputs.get("status_notification") != {
+        "description": "Protected control-plane status notification",
+        "required": True,
+        "default": "slack",
+        "type": "choice",
+        "options": ["slack", "disabled"],
+    }:
+        raise ContractMismatch("activation.workflow.notification_input")
     env = _mapping(workflow.get("env"), "activation.workflow.global_env")
     if env != {
         "AWS_REGION": REGION,
         "EC2_INSTANCE_ID": INSTANCE_ID,
         "SHADOW_DOCUMENT_NAME": ACTIVATION_DOCUMENT_NAME,
         "EVIDENCE_FILENAME": "shadow-worker-evidence.json",
+        "DIAGNOSTIC_FILENAME": "shadow-worker-diagnostic.json",
+        "NOTIFICATION_RECEIPT_FILENAME": "shadow-status-notification.json",
     }:
         raise ContractMismatch("activation.workflow.global_env")
     steps = _steps(workflow, "activation.workflow")
+    names = [step.get("name") for step in steps]
+    expected_notification_steps = {
+        "Preflight protected Slack status boundary",
+        "Notify protected shadow status",
+        "Clear OIDC credentials before evidence upload",
+        "Upload bounded shadow evidence",
+    }
+    if not expected_notification_steps.issubset(set(names)):
+        raise ContractMismatch("activation.workflow.notification_steps")
+    preflight_index = names.index("Preflight protected Slack status boundary")
+    oidc_index = names.index("Configure exact shadow activation role with OIDC")
+    clear_index = names.index("Clear OIDC credentials before evidence upload")
+    notify_index = names.index("Notify protected shadow status")
+    upload_index = names.index("Upload bounded shadow evidence")
+    if not (preflight_index < oidc_index < clear_index < notify_index < upload_index):
+        raise ContractMismatch("activation.workflow.notification_order")
+    notification_steps = [
+        step for step in steps if step.get("name") in expected_notification_steps
+    ]
+    secret_reference = "${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}"
+    for notification_name in (
+        "Preflight protected Slack status boundary",
+        "Notify protected shadow status",
+    ):
+        notification_step = next(
+            step for step in notification_steps
+            if step.get("name") == notification_name
+        )
+        if notification_step.get("env") != {
+            "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": secret_reference,
+        }:
+            raise ContractMismatch("activation.workflow.notification_secret")
+    workflow_text = json.dumps(workflow, sort_keys=True)
+    if (
+        workflow_text.count("secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL") != 2
+        or "secrets.CONFIG_JSON" in workflow_text
+        or "secrets.STRATEGY_CONFIG_JSON" in workflow_text
+    ):
+        raise ContractMismatch("activation.workflow.notification_secret_scope")
     aws_units = _aws_cli_units(steps, "activation.workflow.aws_command")
     _verify_activation_launcher_surface(steps)
     if len(aws_units) != 3:

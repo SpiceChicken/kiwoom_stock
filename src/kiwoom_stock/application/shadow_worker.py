@@ -30,7 +30,10 @@ from kiwoom_stock.application.shadow_lifecycle import (
     check_lifecycle,
     signal_stop_event,
 )
-from kiwoom_stock.domain.models import PhysicalContinuityEvidence
+from kiwoom_stock.domain.models import (
+    PhysicalContinuityEvidence,
+    ShadowDecisionTelemetry,
+)
 from kiwoom_stock.utils.market_cal import (
     KrxCalendarError,
     is_krx_session,
@@ -120,6 +123,7 @@ class ShadowExecutionReceipt:
     resources_closed: bool
     local_counts: Mapping[str, int]
     continuity: PhysicalContinuityEvidence | None = None
+    decision_telemetry: ShadowDecisionTelemetry | None = None
 
 
 class ShadowRuntimePort(Protocol):
@@ -196,6 +200,7 @@ class ShadowRunResult:
     side_effects: Mapping[str, bool]
     local_counts: Mapping[str, int]
     continuity: PhysicalContinuityEvidence | None = None
+    decision_telemetry: ShadowDecisionTelemetry | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -219,6 +224,11 @@ class ShadowRunResult:
             "continuity": (
                 self.continuity.to_safe_dict()
                 if self.continuity is not None
+                else None
+            ),
+            "decision_telemetry": (
+                self.decision_telemetry.to_safe_dict()
+                if self.decision_telemetry is not None
                 else None
             ),
         }
@@ -352,6 +362,7 @@ def run_shadow_once(
             resources_closed=True,
             side_effects=_zero_external_side_effects(),
             local_counts={},
+            decision_telemetry=None,
             **common,
         )
 
@@ -416,6 +427,8 @@ def run_shadow_once(
         raise ShadowWorkerError("shadow HTTP attempt budget was exceeded")
     if not isinstance(receipt.continuity, PhysicalContinuityEvidence):
         raise ShadowWorkerError("shadow runtime omitted continuity evidence")
+    if not isinstance(receipt.decision_telemetry, ShadowDecisionTelemetry):
+        raise ShadowWorkerError("shadow runtime omitted decision telemetry")
     return ShadowRunResult(
         status="PASS",
         cycles=1,
@@ -426,6 +439,7 @@ def run_shadow_once(
         side_effects=_zero_external_side_effects(),
         local_counts=receipt.local_counts,
         continuity=receipt.continuity,
+        decision_telemetry=receipt.decision_telemetry,
         **common,
     )
 

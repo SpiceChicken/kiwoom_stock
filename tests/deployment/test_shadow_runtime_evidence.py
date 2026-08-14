@@ -39,6 +39,24 @@ def _base():
     }
 
 
+def _decision_telemetry():
+    return {
+        "market_regime": "NEUTRAL",
+        "strategy_reason_code": "JERK_NON_POSITIVE",
+        "strategy_intent": "NO_ENTRY_SIGNAL",
+        "paper_action": "HOLD",
+        "position_before": "FLAT",
+        "trading_window": "OPEN",
+        "session_phase": "ENTRY",
+        "net_force_band": "POSITIVE",
+        "current_velocity_band": "POSITIVE",
+        "jerk_band": "NEUTRAL",
+        "strength_band": "ABOVE_100",
+        "trend_rsi_band": "NEUTRAL",
+        "price_vwap_relation": "ABOVE",
+    }
+
+
 def _oneshot():
     return {
         **_base(), "schema_version": 2, "status": "PASS",
@@ -55,6 +73,7 @@ def _oneshot():
         },
         "db_identity": "/var/lib/kiwoom/shadow-trades.db",
         "continuity": _continuity(),
+        "decision_telemetry": _decision_telemetry(),
     }
 
 
@@ -158,7 +177,7 @@ def test_closed_one_shot_and_single_cycle_terminal_remain_exactly_supported():
     closed.update({
         "status": "CLOSED", "calendar": "CLOSED", "cycles": 0,
         "http_attempts": 0, "api_counts": {}, "local_counts": {},
-        "db_identity": None, "continuity": None,
+        "db_identity": None, "continuity": None, "decision_telemetry": None,
     })
     terminal = _terminal()
     terminal.update({
@@ -171,6 +190,119 @@ def test_closed_one_shot_and_single_cycle_terminal_remain_exactly_supported():
     assert _run(
         terminal, mode="shadow-continuous", event="terminal"
     ).returncode == 0
+
+
+def test_failed_terminal_is_diagnostic_only_and_never_activation_success():
+    failed = _terminal()
+    failed.update({
+        "status": "FAILED",
+        "reason": "failure",
+        "error_type": "ReadOnlyBoundaryError",
+    })
+    operational = _run(
+        failed, mode="shadow-continuous", event="terminal"
+    )
+    diagnostic = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--mode",
+            "shadow-continuous",
+            "--event",
+            "terminal",
+            "--source-sha",
+            SOURCE_SHA,
+            "--image-digest",
+            IMAGE,
+            "--activation-id",
+            ACTIVATION_ID,
+            "--input-format",
+            "json-lines",
+            "--output",
+            "accepted-record",
+            "--terminal-policy",
+            "diagnostic",
+        ],
+        input=json.dumps(failed),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert operational.returncode == 1
+    assert diagnostic.returncode == 0, diagnostic.stderr
+    assert json.loads(diagnostic.stdout) == failed
+
+
+def test_zero_cycle_failed_terminal_is_valid_only_for_diagnostics():
+    failed = _terminal()
+    failed.update({
+        "status": "FAILED",
+        "reason": "failure",
+        "cycles": 0,
+        "db_reopens": 0,
+        "first_cycle_start_elapsed_seconds": None,
+        "second_cycle_start_elapsed_seconds": None,
+        "second_cycle_interval_seconds": None,
+        "minimum_cycle_interval_seconds": None,
+    })
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--mode",
+            "shadow-continuous",
+            "--event",
+            "terminal",
+            "--source-sha",
+            SOURCE_SHA,
+            "--image-digest",
+            IMAGE,
+            "--activation-id",
+            ACTIVATION_ID,
+            "--input-format",
+            "json-lines",
+            "--output",
+            "accepted-record",
+            "--terminal-policy",
+            "diagnostic",
+        ],
+        input=json.dumps(failed),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"strategy_intent": "ENTRY_SIGNAL"},
+        {
+            "strategy_reason_code": "UPTREND_ENTRY",
+            "strategy_intent": "ENTRY_SIGNAL",
+            "jerk_band": "NEUTRAL",
+        },
+        {
+            "strategy_reason_code": "UPTREND_ENTRY",
+            "strategy_intent": "ENTRY_SIGNAL",
+            "jerk_band": "POSITIVE",
+            "net_force_band": "NEGATIVE",
+        },
+        {"strategy_reason_code": "NET_FORCE_NEGATIVE"},
+        {"paper_action": "BUY"},
+        {"paper_action": "SELL", "position_before": "FLAT"},
+    ],
+)
+def test_decision_telemetry_cross_field_contradictions_fail_closed(updates):
+    value = _oneshot()
+    value["decision_telemetry"] = {
+        **value["decision_telemetry"],
+        **updates,
+    }
+    completed = _run(value)
+    assert completed.returncode == 1
+    assert completed.stderr == "shadow evidence invalid: oneshot_contract_invalid\n"
 
 
 @pytest.mark.parametrize(

@@ -235,6 +235,110 @@ class MarketRegime(Enum):
     UNKNOWN = "Unknown"
 
 
+@dataclass(frozen=True)
+class ShadowDecisionTelemetry:
+    """Categorical, public-market-only evidence for one shadow decision."""
+
+    market_regime: str
+    strategy_reason_code: str
+    strategy_intent: str
+    paper_action: str
+    position_before: str
+    trading_window: str
+    session_phase: str
+    net_force_band: str
+    current_velocity_band: str
+    jerk_band: str
+    strength_band: str
+    trend_rsi_band: str
+    price_vwap_relation: str
+
+    def __post_init__(self) -> None:
+        contracts = {
+            "market_regime": {
+                "STABLE_BULL", "VOLATILE_BULL", "QUIET_BEAR",
+                "PANIC_BEAR", "NEUTRAL",
+            },
+            "strategy_intent": {"ENTRY_SIGNAL", "NO_ENTRY_SIGNAL"},
+            "strategy_reason_code": {
+                "VI_WAIT", "CLIMAX_SHIELD", "BREAKOUT_OVERRIDE",
+                "THRUST_LOW", "NET_FORCE_NEGATIVE", "STALL_SHIELD",
+                "LOW_QUALITY_TREND", "VOLUME_EXHAUSTED", "UPTREND_ENTRY",
+                "REVERSAL_ENTRY", "WARMING_UP", "JERK_NON_POSITIVE",
+            },
+            "paper_action": {"BUY", "SELL", "HOLD"},
+            "position_before": {"FLAT", "OPEN", "OVERNIGHT"},
+            "trading_window": {"OPEN", "CLOSED"},
+            "session_phase": {"ENTRY", "EXIT_ONLY", "CLOSED"},
+            "net_force_band": {
+                "STRONG_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE",
+                "STRONG_POSITIVE",
+            },
+            "current_velocity_band": {
+                "STRONG_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE",
+                "STRONG_POSITIVE",
+            },
+            "jerk_band": {"NEGATIVE", "NEUTRAL", "POSITIVE"},
+            "strength_band": {"BELOW_100", "AT_100", "ABOVE_100"},
+            "trend_rsi_band": {"OVERSOLD", "NEUTRAL", "OVERBOUGHT"},
+            "price_vwap_relation": {"BELOW", "AT", "ABOVE"},
+        }
+        for name, allowed in contracts.items():
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"invalid shadow decision telemetry: {name}")
+        entry_reasons = {
+            "BREAKOUT_OVERRIDE", "UPTREND_ENTRY", "REVERSAL_ENTRY",
+        }
+        if (self.strategy_reason_code in entry_reasons) != (
+            self.strategy_intent == "ENTRY_SIGNAL"
+        ):
+            raise ValueError("shadow telemetry intent/reason mismatch")
+        if self.strategy_intent == "ENTRY_SIGNAL" and self.jerk_band != "POSITIVE":
+            raise ValueError("shadow entry telemetry requires positive jerk")
+        if (
+            self.strategy_reason_code in {"UPTREND_ENTRY", "REVERSAL_ENTRY"}
+            and self.net_force_band in {"STRONG_NEGATIVE", "NEGATIVE"}
+        ):
+            raise ValueError("standard shadow entry requires nonnegative force")
+        if (
+            self.strategy_reason_code == "NET_FORCE_NEGATIVE"
+            and self.net_force_band not in {"STRONG_NEGATIVE", "NEGATIVE"}
+        ):
+            raise ValueError("net-force reason requires negative force")
+        if (
+            self.strategy_reason_code == "JERK_NON_POSITIVE"
+            and self.jerk_band == "POSITIVE"
+        ):
+            raise ValueError("jerk reason requires nonpositive jerk")
+        if self.paper_action == "BUY" and (
+            self.position_before != "FLAT"
+            or self.strategy_intent != "ENTRY_SIGNAL"
+            or self.trading_window != "OPEN"
+        ):
+            raise ValueError("shadow BUY telemetry violates admission rules")
+        if self.paper_action == "SELL" and self.position_before != "OPEN":
+            raise ValueError("shadow SELL telemetry requires an open position")
+        if (self.trading_window == "OPEN") != (self.session_phase == "ENTRY"):
+            raise ValueError("shadow telemetry session phase is inconsistent")
+
+    def to_safe_dict(self) -> Dict[str, str]:
+        return {
+            "market_regime": self.market_regime,
+            "strategy_reason_code": self.strategy_reason_code,
+            "strategy_intent": self.strategy_intent,
+            "paper_action": self.paper_action,
+            "position_before": self.position_before,
+            "trading_window": self.trading_window,
+            "session_phase": self.session_phase,
+            "net_force_band": self.net_force_band,
+            "current_velocity_band": self.current_velocity_band,
+            "jerk_band": self.jerk_band,
+            "strength_band": self.strength_band,
+            "trend_rsi_band": self.trend_rsi_band,
+            "price_vwap_relation": self.price_vwap_relation,
+        }
+
+
 class PositionStatus(str, Enum):
     """Durable paper-position lifecycle states."""
 

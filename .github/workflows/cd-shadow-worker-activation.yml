@@ -40,6 +40,12 @@ on:
         description: Exact canonical activation document SHA256 from rollout evidence
         required: true
         type: string
+      status_notification:
+        description: Protected control-plane status notification
+        required: true
+        default: slack
+        type: choice
+        options: [slack, disabled]
 
 permissions: {}
 
@@ -52,6 +58,8 @@ env:
   EC2_INSTANCE_ID: i-02cb0a404794bd43a
   SHADOW_DOCUMENT_NAME: KiwoomStock-ShadowWorker
   EVIDENCE_FILENAME: shadow-worker-evidence.json
+  DIAGNOSTIC_FILENAME: shadow-worker-diagnostic.json
+  NOTIFICATION_RECEIPT_FILENAME: shadow-status-notification.json
 
 jobs:
   activate:
@@ -150,6 +158,14 @@ jobs:
           [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Config.User}}')" == "10001:10001" ]]
           [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{json .Config.Entrypoint}}')" == '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]' ]]
 
+      - name: Preflight protected Slack status boundary
+        if: inputs.status_notification == 'slack'
+        timeout-minutes: 1
+        env:
+          KIWOOM_SHADOW_SLACK_WEBHOOK_URL: ${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}
+        run: |
+          python3 deploy/notify_shadow_status.py --check-webhook
+
       - name: Configure exact shadow activation role with OIDC
         timeout-minutes: 1
         id: oidc
@@ -221,6 +237,12 @@ jobs:
           invocation_file="${RUNNER_TEMP}/shadow-invocation.json"
           aws ssm get-command-invocation --command-id "${command_id}" \
             --instance-id "${EC2_INSTANCE_ID}" --output json >"${invocation_file}"
+          python3 deploy/ec2/shadow_invocation_diagnostic.py \
+            --source-sha "${SOURCE_SHA}" \
+            --image-digest "${IMAGE_DIGEST}" \
+            --activation-id "${ACTIVATION_ID}" \
+            --desired-state "${DESIRED_STATE}" --command-id "${command_id}" \
+            <"${invocation_file}" >"${DIAGNOSTIC_FILENAME}"
           runtime_evidence="$(python3 deploy/ec2/shadow_runtime_evidence.py \
             --mode "${validator_mode}" --event "${validator_event}" \
             --source-sha "${SOURCE_SHA}" --image-digest "${IMAGE_DIGEST}" \
@@ -269,12 +291,30 @@ jobs:
             echo 'AWS_DEFAULT_REGION='
           } >>"${GITHUB_ENV}"
 
+      - name: Notify protected shadow status
+        timeout-minutes: 1
+        if: always() && inputs.status_notification == 'slack'
+        env:
+          KIWOOM_SHADOW_SLACK_WEBHOOK_URL: ${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}
+        run: |
+          python3 deploy/notify_shadow_status.py \
+            --evidence "${EVIDENCE_FILENAME}" \
+            --diagnostic "${DIAGNOSTIC_FILENAME}" \
+            --receipt "${NOTIFICATION_RECEIPT_FILENAME}" \
+            --source-sha "${{ inputs.source_sha }}" \
+            --image-digest "${{ inputs.image_digest }}" \
+            --activation-id "${{ inputs.activation_id }}" \
+            --desired-state "${{ inputs.desired_state }}"
+
       - name: Upload bounded shadow evidence
         timeout-minutes: 1
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: shadow-worker-${{ inputs.source_sha }}-${{ inputs.activation_id }}
-          path: ${{ env.EVIDENCE_FILENAME }}
+          path: |
+            ${{ env.EVIDENCE_FILENAME }}
+            ${{ env.DIAGNOSTIC_FILENAME }}
+            ${{ env.NOTIFICATION_RECEIPT_FILENAME }}
           if-no-files-found: ignore
           retention-days: 14

@@ -38,7 +38,7 @@ ONESHOT_KEYS = {
     "schema_version", "status", "mode", "kst_date", "calendar", "source_sha",
     "image_digest", "activation_id", "stock_code", "proxy_code", "cycles",
     "http_attempts", "api_counts", "db_identity", "resources_closed",
-    "side_effects", "local_counts", "continuity",
+    "side_effects", "local_counts", "continuity", "decision_telemetry",
 }
 CYCLE_KEYS = ONESHOT_KEYS | {
     "event", "cycle_index", "elapsed_seconds", "interval_seconds",
@@ -53,6 +53,19 @@ TERMINAL_KEYS = {
     "db_reopens", "resources_closed", "side_effects", "reason",
 }
 TERMINAL_OPTIONAL_KEYS = {"error_type"}
+DECISION_TELEMETRY_KEYS = {
+    "market_regime", "strategy_reason_code", "strategy_intent", "paper_action",
+    "position_before", "trading_window", "session_phase", "net_force_band",
+    "current_velocity_band", "jerk_band", "strength_band", "trend_rsi_band",
+    "price_vwap_relation",
+}
+DIAGNOSTIC_TERMINAL_OUTCOMES = {
+    ("FAILED", "failure"),
+    ("FAILED", "shutdown-deadline"),
+    ("FAILED", "stop-requested"),
+    ("FAILED", "run-deadline"),
+    ("CLOSED", "calendar-closed"),
+}
 
 
 class EvidenceError(ValueError):
@@ -181,6 +194,85 @@ def _valid_continuity(value: object) -> bool:
     )
 
 
+def _valid_decision_consistency(value: dict[str, object]) -> bool:
+    reason = value.get("strategy_reason_code")
+    intent = value.get("strategy_intent")
+    entry_reasons = {
+        "BREAKOUT_OVERRIDE", "UPTREND_ENTRY", "REVERSAL_ENTRY",
+    }
+    if (reason in entry_reasons) != (intent == "ENTRY_SIGNAL"):
+        return False
+    if intent == "ENTRY_SIGNAL" and value.get("jerk_band") != "POSITIVE":
+        return False
+    if (
+        reason in {"UPTREND_ENTRY", "REVERSAL_ENTRY"}
+        and value.get("net_force_band") in {"STRONG_NEGATIVE", "NEGATIVE"}
+    ):
+        return False
+    if (
+        reason == "NET_FORCE_NEGATIVE"
+        and value.get("net_force_band") not in {"STRONG_NEGATIVE", "NEGATIVE"}
+    ):
+        return False
+    if reason == "JERK_NON_POSITIVE" and value.get("jerk_band") == "POSITIVE":
+        return False
+    if value.get("paper_action") == "BUY" and (
+        value.get("position_before") != "FLAT"
+        or intent != "ENTRY_SIGNAL"
+        or value.get("trading_window") != "OPEN"
+    ):
+        return False
+    if (value.get("trading_window") == "OPEN") != (
+        value.get("session_phase") == "ENTRY"
+    ):
+        return False
+    return not (
+        value.get("paper_action") == "SELL"
+        and value.get("position_before") != "OPEN"
+    )
+
+
+def _valid_decision_telemetry(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == DECISION_TELEMETRY_KEYS
+        and value.get("market_regime") in {
+            "STABLE_BULL", "VOLATILE_BULL", "QUIET_BEAR", "PANIC_BEAR",
+            "NEUTRAL",
+        }
+        and value.get("strategy_intent") in {
+            "ENTRY_SIGNAL", "NO_ENTRY_SIGNAL",
+        }
+        and value.get("strategy_reason_code") in {
+            "VI_WAIT", "CLIMAX_SHIELD", "BREAKOUT_OVERRIDE", "THRUST_LOW",
+            "NET_FORCE_NEGATIVE", "STALL_SHIELD", "LOW_QUALITY_TREND",
+            "VOLUME_EXHAUSTED", "UPTREND_ENTRY", "REVERSAL_ENTRY",
+            "WARMING_UP", "JERK_NON_POSITIVE",
+        }
+        and value.get("paper_action") in {"BUY", "SELL", "HOLD"}
+        and value.get("position_before") in {"FLAT", "OPEN", "OVERNIGHT"}
+        and value.get("trading_window") in {"OPEN", "CLOSED"}
+        and value.get("session_phase") in {"ENTRY", "EXIT_ONLY", "CLOSED"}
+        and value.get("net_force_band") in {
+            "STRONG_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE",
+            "STRONG_POSITIVE",
+        }
+        and value.get("current_velocity_band") in {
+            "STRONG_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE",
+            "STRONG_POSITIVE",
+        }
+        and value.get("jerk_band") in {"NEGATIVE", "NEUTRAL", "POSITIVE"}
+        and value.get("strength_band") in {
+            "BELOW_100", "AT_100", "ABOVE_100",
+        }
+        and value.get("trend_rsi_band") in {
+            "OVERSOLD", "NEUTRAL", "OVERBOUGHT",
+        }
+        and value.get("price_vwap_relation") in {"BELOW", "AT", "ABOVE"}
+        and _valid_decision_consistency(value)
+    )
+
+
 def _valid_local_counts(value: object) -> bool:
     return (
         isinstance(value, dict)
@@ -246,6 +338,7 @@ def _validate_oneshot(item: dict[str, object]) -> None:
         and _valid_api_counts(counts)
         and _valid_local_counts(local_counts)
         and _valid_continuity(item.get("continuity"))
+        and _valid_decision_telemetry(item.get("decision_telemetry"))
     )
     closed = (
         item.get("status") == "CLOSED"
@@ -258,6 +351,7 @@ def _validate_oneshot(item: dict[str, object]) -> None:
         and local_counts == {}
         and item.get("db_identity") is None
         and item.get("continuity") is None
+        and item.get("decision_telemetry") is None
     )
     if not common or not (passed or closed):
         raise EvidenceError("oneshot_contract_invalid")
@@ -288,11 +382,12 @@ def _validate_cycle(item: dict[str, object]) -> None:
         or item.get("db_reopened") is not False
         or item.get("db_reopens") != 0
         or not _valid_continuity(item.get("continuity"))
+        or not _valid_decision_telemetry(item.get("decision_telemetry"))
     ):
         raise EvidenceError("cycle_contract_invalid")
 
 
-def _validate_terminal(item: dict[str, object]) -> None:
+def _validate_terminal_shape(item: dict[str, object]) -> None:
     keys = set(item)
     if keys not in (TERMINAL_KEYS, TERMINAL_KEYS | TERMINAL_OPTIONAL_KEYS):
         raise EvidenceError("terminal_keys_invalid")
@@ -302,25 +397,29 @@ def _validate_terminal(item: dict[str, object]) -> None:
         or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", error_type) is None
     ):
         raise EvidenceError("terminal_error_type_invalid")
-    if (
-        item.get("schema_version") != 3
-        or (item.get("status"), item.get("reason")) not in {
-            ("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline"),
-        }
-    ):
-        raise EvidenceError("terminal_contract_invalid")
+
+
+def _validate_terminal_timing(
+    item: dict[str, object], *, allow_zero_cycles: bool = False
+) -> None:
     cycles = item.get("cycles")
     reopens = item.get("db_reopens")
     first = item.get("first_cycle_start_elapsed_seconds")
     second = item.get("second_cycle_start_elapsed_seconds")
     interval = item.get("second_cycle_interval_seconds")
     minimum = item.get("minimum_cycle_interval_seconds")
+    minimum_cycles = 0 if allow_zero_cycles else 1
     if (
         not _finite_float(item.get("elapsed_seconds"))
-        or type(cycles) is not int or cycles < 1
-        or type(reopens) is not int or reopens != cycles - 1
-        or not _finite_float(first)
+        or type(cycles) is not int or cycles < minimum_cycles
+        or type(reopens) is not int or reopens != max(cycles - 1, 0)
     ):
+        raise EvidenceError("terminal_timing_invalid")
+    if cycles == 0:
+        if any(value is not None for value in (first, second, interval, minimum)):
+            raise EvidenceError("terminal_zero_cycle_invalid")
+        return
+    if not _finite_float(first):
         raise EvidenceError("terminal_timing_invalid")
     if cycles == 1:
         if any(value is not None for value in (second, interval, minimum)):
@@ -332,6 +431,30 @@ def _validate_terminal(item: dict[str, object]) -> None:
         or not _finite_float(minimum, minimum=60.0)
     ):
         raise EvidenceError("terminal_multi_cycle_invalid")
+
+
+def _validate_terminal(item: dict[str, object]) -> None:
+    _validate_terminal_shape(item)
+    if (
+        item.get("schema_version") != 3
+        or (item.get("status"), item.get("reason")) not in {
+            ("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline"),
+        }
+    ):
+        raise EvidenceError("terminal_contract_invalid")
+    _validate_terminal_timing(item)
+
+
+def _validate_diagnostic_terminal(item: dict[str, object]) -> None:
+    """Validate a redacted terminal that is not proof of successful operation."""
+
+    _validate_terminal_shape(item)
+    outcome = (item.get("status"), item.get("reason"))
+    if item.get("schema_version") != 3 or outcome not in DIAGNOSTIC_TERMINAL_OUTCOMES:
+        raise EvidenceError("diagnostic_terminal_contract_invalid")
+    if type(item.get("resources_closed")) is not bool:
+        raise EvidenceError("diagnostic_terminal_resources_invalid")
+    _validate_terminal_timing(item, allow_zero_cycles=True)
 
 
 def validate(
@@ -361,7 +484,7 @@ def validate(
         not isinstance(side_effects, dict)
         or set(side_effects) != set(SIDE_EFFECT_KEYS)
         or any(
-        side_effects.get(name) is not False for name in SIDE_EFFECT_KEYS
+            side_effects.get(name) is not False for name in SIDE_EFFECT_KEYS
         )
     ):
         raise EvidenceError("side_effects_unsafe")
@@ -379,6 +502,47 @@ def validate(
         "terminal": set(item),
     }[event]
     return {key: item[key] for key in sorted(expected_keys)}
+
+
+def validate_diagnostic_terminal(
+    records: Iterable[object], *, source_sha: str, image_digest: str,
+    activation_id: str,
+) -> dict[str, object]:
+    """Accept only safe non-operational terminal records for diagnostics.
+
+    This is intentionally separate from :func:`validate`: callers cannot use a
+    FAILED/CLOSED record as activation success evidence.
+    """
+
+    matches: list[dict[str, object]] = []
+    for value in records:
+        if not isinstance(value, dict):
+            raise EvidenceError("record_not_object")
+        if (
+            value.get("mode") == "shadow-continuous"
+            and value.get("event") == "terminal"
+        ):
+            matches.append(value)
+    if not matches:
+        raise EvidenceError("diagnostic_terminal_not_found")
+    item = matches[-1]
+    if (
+        item.get("source_sha") != source_sha
+        or item.get("image_digest") != image_digest
+        or item.get("activation_id") != activation_id
+    ):
+        raise EvidenceError("activation_tuple_mismatch")
+    side_effects = item.get("side_effects")
+    if (
+        not isinstance(side_effects, dict)
+        or set(side_effects) != set(SIDE_EFFECT_KEYS)
+        or any(
+            side_effects.get(name) is not False for name in SIDE_EFFECT_KEYS
+        )
+    ):
+        raise EvidenceError("side_effects_unsafe")
+    _validate_diagnostic_terminal(item)
+    return {key: item[key] for key in sorted(item)}
 
 
 def activation_summary(item: dict[str, object]) -> dict[str, object]:
@@ -401,6 +565,7 @@ def activation_summary(item: dict[str, object]) -> dict[str, object]:
         ),
         "db_reopens": item.get("db_reopens"),
         "database": database,
+        "decision_telemetry": item.get("decision_telemetry"),
         "side_effects": {
             "orders": side["broker_orders"],
             "account": side["account"],
@@ -426,6 +591,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output", required=True, choices=("accepted-record", "activation-summary")
     )
+    parser.add_argument(
+        "--terminal-policy",
+        choices=("operational", "diagnostic"),
+        default="operational",
+    )
     return parser
 
 
@@ -442,11 +612,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         content = _bounded_read(sys.stdin)
         records, invocation_result = _records(content, args.input_format)
-        item = validate(
-            records, mode=args.mode, event=args.event,
-            source_sha=args.source_sha, image_digest=args.image_digest,
-            activation_id=args.activation_id,
-        )
+        if args.terminal_policy == "diagnostic":
+            if args.mode != "shadow-continuous" or args.event != "terminal":
+                raise EvidenceError("diagnostic_terminal_setup_invalid")
+            item = validate_diagnostic_terminal(
+                records, source_sha=args.source_sha,
+                image_digest=args.image_digest, activation_id=args.activation_id,
+            )
+        else:
+            item = validate(
+                records, mode=args.mode, event=args.event,
+                source_sha=args.source_sha, image_digest=args.image_digest,
+                activation_id=args.activation_id,
+            )
     except EvidenceError as error:
         print(f"shadow evidence invalid: {error.category}", file=sys.stderr)
         return 1

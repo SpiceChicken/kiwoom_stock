@@ -256,10 +256,13 @@ def _allowlisted_strategy_verdict(
     if regime is MarketRegime.UNKNOWN:
         raise ValidationError("strategy verdict regime is unknown")
     status = raw_verdict.get("status")
+    reason_code = raw_verdict.get("reason_code")
     is_buy_signal = raw_verdict.get("is_buy_signal")
     raw_regime = raw_verdict.get("regime")
     if not isinstance(status, str) or not status:
         raise ValidationError("strategy verdict status contract failed")
+    if not isinstance(reason_code, str) or not reason_code:
+        raise ValidationError("strategy verdict reason code contract failed")
     if not isinstance(is_buy_signal, bool):
         raise ValidationError("strategy verdict signal contract failed")
     if (
@@ -269,6 +272,7 @@ def _allowlisted_strategy_verdict(
         raise ValidationError("strategy verdict regime contract failed")
     return {
         "status": status,
+        "reason_code": reason_code,
         "is_buy_signal": is_buy_signal,
         "regime": regime.name,
     }

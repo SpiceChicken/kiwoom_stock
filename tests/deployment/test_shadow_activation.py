@@ -24,6 +24,7 @@ from kiwoom_stock.application.execution import (
     ExecutionPolicy,
 )
 from kiwoom_stock.domain.models import PhysicalContinuityEvidence
+from kiwoom_stock.domain.models import ShadowDecisionTelemetry
 
 
 SCRIPT = Path("deploy/ec2/shadow_worker_control.sh")
@@ -61,6 +62,24 @@ def _local_counts():
     }
 
 
+def _decision_telemetry():
+    return ShadowDecisionTelemetry(
+        market_regime="NEUTRAL",
+        strategy_reason_code="JERK_NON_POSITIVE",
+        strategy_intent="NO_ENTRY_SIGNAL",
+        paper_action="HOLD",
+        position_before="FLAT",
+        trading_window="OPEN",
+        session_phase="ENTRY",
+        net_force_band="POSITIVE",
+        current_velocity_band="POSITIVE",
+        jerk_band="NEUTRAL",
+        strength_band="ABOVE_100",
+        trend_rsi_band="NEUTRAL",
+        price_vwap_relation="ABOVE",
+    )
+
+
 def _oneshot_evidence(**updates):
     result = ShadowRunResult(
         status="PASS",
@@ -88,6 +107,7 @@ def _oneshot_evidence(**updates):
         },
         local_counts=_local_counts(),
         continuity=_continuity(),
+        decision_telemetry=_decision_telemetry(),
     ).to_safe_dict()
     result.update(updates)
     return result
@@ -119,6 +139,7 @@ def _cycle_evidence(**updates):
         "db_reopened": False,
         "db_reopens": 0,
         "continuity": _continuity().to_safe_dict(),
+        "decision_telemetry": _decision_telemetry().to_safe_dict(),
         "resources_closed": True,
         "side_effects": {
             "broker_orders": False,
@@ -162,6 +183,10 @@ def _run_sourced(command, *args):
         f'validate_safe_evidence() {{ python3 "{validator}" '
         '--mode "$1" --event "$2" --source-sha "$3" --image-digest "$4" '
         '--activation-id "$5" --input-format json-lines --output accepted-record; }; '
+        f'validate_safe_terminal_diagnostic() {{ python3 "{validator}" '
+        '--mode shadow-continuous --event terminal --source-sha "$1" '
+        '--image-digest "$2" --activation-id "$3" --input-format json-lines '
+        '--output accepted-record --terminal-policy diagnostic; }; '
     )
     return subprocess.run(
         ["bash", "-c", f'source "$1"; {adapter}{command}', "test", str(SCRIPT), *args],
@@ -445,6 +470,7 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
         "worker_sha256",
         "validator_sha256",
         "shadow_document_sha256",
+        "status_notification",
     }
     assert triggers["workflow_dispatch"]["inputs"]["build_run_id"]["required"] is False
     assert triggers["workflow_dispatch"]["inputs"]["compose_shadow_sha256"]["required"] is False
@@ -461,7 +487,9 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
         "id-token": "write",
     }
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "secrets." not in text
+    assert text.count("secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL") == 2
+    assert "secrets.CONFIG_JSON" not in text
+    assert "secrets.STRATEGY_CONFIG_JSON" not in text
     assert "KIWOOM_APP_KEY" not in text
     assert "KIWOOM_SECRET_KEY" not in text
     assert "ssm get-parameter" not in text.lower()
@@ -816,6 +844,7 @@ def test_actual_continuous_emitter_cycle_and_terminal_round_trip_consumers(
         resources_closed=True,
         local_counts=_local_counts(),
         continuity=_continuity(),
+        decision_telemetry=_decision_telemetry(),
     )
     policy = ExecutionPolicy.for_request(
         ExecutionMode.SHADOW_CONTINUOUS,
@@ -994,6 +1023,23 @@ def test_host_running_stop_requires_exact_clean_terminal_and_zero_exit(tmp_path)
     mismatch = _terminal_evidence(status="DEADLINE", reason="run-deadline")
     assert _run_running_stop(tmp_path, failure, 0).returncode != 0
     assert _run_running_stop(tmp_path, mismatch, 0).returncode != 0
+
+
+def test_host_failed_terminal_is_safely_emitted_and_container_is_removed(tmp_path):
+    failed = _terminal_evidence(
+        status="FAILED",
+        reason="failure",
+        error_type="ReadOnlyBoundaryError",
+    )
+    completed = _run_running_stop(tmp_path, failed, 0)
+    assert completed.returncode != 0
+    emitted = [
+        json.loads(line)
+        for line in completed.stdout.splitlines()
+        if line.startswith("{")
+    ]
+    assert emitted == [failed]
+    assert "non-operational" in completed.stderr
 
 
 def test_shadow_iam_policy_is_document_and_instance_scoped():
