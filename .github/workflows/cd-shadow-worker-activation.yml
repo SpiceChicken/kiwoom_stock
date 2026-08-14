@@ -177,6 +177,7 @@ jobs:
         timeout-minutes: 1
         env:
           KIWOOM_SHADOW_SLACK_WEBHOOK_URL: ${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}
+          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
         run: |
           python3 .shadow-control-plane/deploy/notify_shadow_status.py \
             --check-webhook
@@ -311,6 +312,7 @@ jobs:
         if: always() && inputs.status_notification == 'slack'
         env:
           KIWOOM_SHADOW_SLACK_WEBHOOK_URL: ${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}
+          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
         run: |
           python3 .shadow-control-plane/deploy/notify_shadow_status.py \
             --evidence "${EVIDENCE_FILENAME}" \

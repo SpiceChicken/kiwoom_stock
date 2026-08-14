@@ -62,6 +62,22 @@ def replace_once(root: Path, path: Path, old: str, new: str) -> None:
     (root / path).write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def replace_in_step(
+    root: Path, step_name: str, old: str, new: str,
+) -> None:
+    path = root / ACTIVATION_WORKFLOW
+    text = path.read_text(encoding="utf-8")
+    marker = f"      - name: {step_name}\n"
+    start = text.index(marker)
+    end = text.find("\n      - name:", start + len(marker))
+    if end < 0:
+        end = len(text)
+    step = text[start:end]
+    assert step.count(old) == 1
+    text = text[:start] + step.replace(old, new, 1) + text[end:]
+    path.write_text(text, encoding="utf-8")
+
+
 def assert_failure(
     result: subprocess.CompletedProcess[str], exit_code: int, category: str,
 ) -> None:
@@ -78,6 +94,145 @@ def test_clean_contract_has_stable_two_unit_summary(contract_root: Path):
         "PASS units=2 activation_parameters=10 rollout_parameters=8\n"
     )
     assert result.stderr == ""
+
+
+def test_activation_notification_secret_contract_baseline(
+    contract_root: Path,
+):
+    text = read(contract_root, ACTIVATION_WORKFLOW)
+
+    assert text.count(
+        "secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL"
+    ) == 2
+    assert text.count("secrets.CONFIG_JSON") == 2
+    assert "secrets.STRATEGY_CONFIG_JSON" not in text
+    assert run_checker(contract_root).returncode == 0
+
+
+def test_missing_legacy_notification_secret_fails_closed(
+    contract_root: Path,
+):
+    replace_in_step(
+        contract_root,
+        "Preflight protected Slack status boundary",
+        "          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}\n",
+        "",
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "activation.workflow.notification_secret",
+    )
+
+
+def test_renamed_legacy_notification_secret_fails_closed(
+    contract_root: Path,
+):
+    replace_in_step(
+        contract_root,
+        "Notify protected shadow status",
+        "          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}\n",
+        "          LEGACY_CONFIG_JSON: ${{ secrets.CONFIG_JSON }}\n",
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "activation.workflow.notification_secret",
+    )
+
+
+@pytest.mark.parametrize(
+    ("step_name", "old", "new"),
+    [
+        (
+            "Preflight protected Slack status boundary",
+            "            --check-webhook\n",
+            "            --check-webhook\n"
+            "          printf '%s' '${{ secrets.CONFIG_JSON }}'\n",
+        ),
+        (
+            "Upload bounded shadow evidence",
+            "          retention-days: 14\n",
+            "          retention-days: 14\n"
+            "          legacy-config: ${{ secrets.CONFIG_JSON }}\n",
+        ),
+        (
+            "Clear OIDC credentials before evidence upload",
+            "        shell: bash\n",
+            "        env:\n"
+            "          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}\n"
+            "        shell: bash\n",
+        ),
+    ],
+)
+def test_extra_legacy_reference_outside_exact_env_fails_scope(
+    contract_root: Path, step_name: str, old: str, new: str,
+):
+    replace_in_step(contract_root, step_name, old, new)
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "activation.workflow.notification_secret_scope",
+    )
+
+
+@pytest.mark.parametrize(
+    ("step_name", "old", "new"),
+    [
+        (
+            "Execute bounded shadow action",
+            "          PYTHONPATH: ${{ github.workspace }}/src\n",
+            "          INDEXED_CONFIG_JSON: "
+            "${{ secrets['CONFIG_JSON'] }}\n"
+            "          PYTHONPATH: ${{ github.workspace }}/src\n",
+        ),
+        (
+            "Clear OIDC credentials before evidence upload",
+            "        run: |\n",
+            "        run: |\n"
+            "          printf '%s' '${{ secrets [ \"CONFIG_JSON\" ] }}'\n",
+        ),
+        (
+            "Upload bounded shadow evidence",
+            "          retention-days: 14\n",
+            "          retention-days: 14\n"
+            "          indexed-secret: ${{ secrets['OTHER_SECRET'] }}\n",
+        ),
+    ],
+)
+def test_indexed_secret_context_outside_slack_steps_fails_scope(
+    contract_root: Path, step_name: str, old: str, new: str,
+):
+    replace_in_step(contract_root, step_name, old, new)
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "activation.workflow.notification_secret_scope",
+    )
+
+
+def test_moved_legacy_reference_to_other_step_fails_closed(
+    contract_root: Path,
+):
+    replace_in_step(
+        contract_root,
+        "Preflight protected Slack status boundary",
+        "          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}\n",
+        "",
+    )
+    replace_in_step(
+        contract_root,
+        "Clear OIDC credentials before evidence upload",
+        "        shell: bash\n",
+        "        env:\n"
+        "          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}\n"
+        "        shell: bash\n",
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "activation.workflow.notification_secret",
+    )
 
 
 def test_wrong_activation_instance_target_fails_closed(contract_root: Path):

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ SLACK_PATH_RE = re.compile(
     r"[A-Za-z0-9_-]{16,256}"
 )
 MAX_ARTIFACT_BYTES = 65_536
+MAX_LEGACY_CONFIG_BYTES = 65_536
 MAX_RESPONSE_BYTES = 64
 SAFE_FAILURE_CATEGORIES = {
     "container_absent",
@@ -59,6 +61,52 @@ class SlackStatusError(RuntimeError):
         self.category = category
 
 
+def _reject_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _reject_non_json_constant(value: str) -> object:
+    del value
+    raise ValueError("non-JSON constant")
+
+
+def _legacy_webhook() -> object:
+    raw = os.environ.get("CONFIG_JSON")
+    if raw is None:
+        raise SlackStatusError("webhook_invalid")
+    try:
+        encoded = raw.encode("utf-8", errors="strict")
+    except UnicodeError:
+        raise SlackStatusError("webhook_invalid") from None
+    if len(encoded) > MAX_LEGACY_CONFIG_BYTES:
+        raise SlackStatusError("webhook_invalid")
+    try:
+        value = json.loads(
+            encoded.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_json_constant,
+        )
+    except (json.JSONDecodeError, UnicodeError, TypeError, ValueError):
+        raise SlackStatusError("webhook_invalid") from None
+    if not isinstance(value, dict) or "webhook_url" not in value:
+        raise SlackStatusError("webhook_invalid")
+    return value["webhook_url"]
+
+
+def resolve_webhook() -> str:
+    dedicated = os.environ.get("KIWOOM_SHADOW_SLACK_WEBHOOK_URL")
+    if dedicated not in (None, ""):
+        return validate_webhook(dedicated)
+    return validate_webhook(_legacy_webhook())
+
+
 class ResponsePort(Protocol):
     status: int
 
@@ -78,16 +126,23 @@ class NoRedirect(HTTPRedirectHandler):
 def validate_webhook(value: object) -> str:
     if not isinstance(value, str) or value != value.strip():
         raise SlackStatusError("webhook_invalid")
-    if len(value.encode("utf-8")) > 1024:
+    if any(
+        ord(character) <= 0x1F or ord(character) == 0x7F
+        for character in value
+    ):
         raise SlackStatusError("webhook_invalid")
-    parsed = urlsplit(value)
     try:
+        encoded = value.encode("utf-8", errors="strict")
+        parsed = urlsplit(value)
         port = parsed.port
-    except ValueError:
+        hostname = parsed.hostname
+    except (UnicodeError, ValueError):
         raise SlackStatusError("webhook_invalid") from None
+    if len(encoded) > 1024:
+        raise SlackStatusError("webhook_invalid")
     if (
         parsed.scheme != "https"
-        or parsed.hostname != "hooks.slack.com"
+        or hostname != "hooks.slack.com"
         or port not in (None, 443)
         or parsed.username is not None
         or parsed.password is not None
@@ -247,16 +302,22 @@ def deliver(
     payload = json.dumps(
         {"text": message}, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
-    request = Request(
-        webhook,
-        data=payload,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
+    try:
+        request = Request(
+            webhook,
+            data=payload,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+    except (HTTPException, UnicodeError, ValueError):
+        raise SlackStatusError("webhook_invalid") from None
     if opener is None:
-        context = ssl.create_default_context()
-        client = build_opener(NoRedirect(), HTTPSHandler(context=context))
-        opener = client.open
+        try:
+            context = ssl.create_default_context()
+            client = build_opener(NoRedirect(), HTTPSHandler(context=context))
+            opener = client.open
+        except (HTTPException, OSError, ssl.SSLError):
+            raise SlackStatusError("slack_network_error") from None
     try:
         with opener(request, timeout=5.0) as response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
@@ -271,7 +332,7 @@ def deliver(
             else "slack_http_error"
         )
         raise SlackStatusError(category) from None
-    except (URLError, TimeoutError, OSError, ssl.SSLError):
+    except (HTTPException, URLError, TimeoutError, OSError, ssl.SSLError):
         raise SlackStatusError("slack_network_error") from None
 
 
@@ -308,9 +369,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        webhook = validate_webhook(
-            os.environ.get("KIWOOM_SHADOW_SLACK_WEBHOOK_URL")
-        )
+        webhook = resolve_webhook()
         if args.check_webhook:
             return 0
         if (

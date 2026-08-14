@@ -576,7 +576,10 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
     notification_steps = [
         step for step in steps if step.get("name") in expected_notification_steps
     ]
-    secret_reference = "${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}"
+    dedicated_secret_reference = (
+        "${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}"
+    )
+    legacy_secret_reference = "${{ secrets.CONFIG_JSON }}"
     for notification_name in (
         "Preflight protected Slack status boundary",
         "Notify protected shadow status",
@@ -586,7 +589,8 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
             if step.get("name") == notification_name
         )
         if notification_step.get("env") != {
-            "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": secret_reference,
+            "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": dedicated_secret_reference,
+            "CONFIG_JSON": legacy_secret_reference,
         }:
             raise ContractMismatch("activation.workflow.notification_secret")
     preflight = next(
@@ -606,8 +610,9 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
     workflow_text = json.dumps(workflow, sort_keys=True)
     if (
         workflow_text.count("secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL") != 2
-        or "secrets.CONFIG_JSON" in workflow_text
+        or workflow_text.count("secrets.CONFIG_JSON") != 2
         or "secrets.STRATEGY_CONFIG_JSON" in workflow_text
+        or re.search(r"secrets\s*\[", workflow_text) is not None
     ):
         raise ContractMismatch("activation.workflow.notification_secret_scope")
     aws_units = _aws_cli_units(steps, "activation.workflow.aws_command")
