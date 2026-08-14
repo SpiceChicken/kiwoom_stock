@@ -217,6 +217,26 @@ def _run_fixed_container_guard(tmp_path, lifecycle):
         "rollout_attempt_id": "111",
     }), encoding="utf-8")
     binding.chmod(0o600)
+    if lifecycle == "artifact-metadata":
+        worker.chmod(0o700)
+    elif lifecycle == "binding-shape":
+        binding.write_text("[]", encoding="utf-8")
+    elif lifecycle == "binding-value":
+        value = json.loads(binding.read_text(encoding="utf-8"))
+        value["source_sha"] = "invalid"
+        binding.write_text(json.dumps(value), encoding="utf-8")
+    elif lifecycle == "binding-value-type":
+        value = json.loads(binding.read_text(encoding="utf-8"))
+        value["source_sha"] = 123
+        binding.write_text(json.dumps(value), encoding="utf-8")
+    elif lifecycle == "worker-hash":
+        value = json.loads(binding.read_text(encoding="utf-8"))
+        value["worker_sha256"] = "f" * 64
+        binding.write_text(json.dumps(value), encoding="utf-8")
+    elif lifecycle == "validator-hash":
+        value = json.loads(binding.read_text(encoding="utf-8"))
+        value["validator_sha256"] = "f" * 64
+        binding.write_text(json.dumps(value), encoding="utf-8")
     tools = tmp_path / "tools"
     tools.mkdir()
     curl_marker = tmp_path / "curl-called"
@@ -233,6 +253,7 @@ def _run_fixed_container_guard(tmp_path, lifecycle):
         "    if not removed.exists(): print('kiwoom-shadow-once')\n"
         "    raise SystemExit(0)\n"
         "if args[:2]==['container','inspect']:\n"
+        "    if lifecycle=='inspect-shape': print('[]'); raise SystemExit(0)\n"
         "    image='ghcr.io/spicechicken/kiwoom_stock@sha256:'+'e'*64\n"
         "    activation='bounded-recovery-1'\n"
         "    labels={'io.kiwoom.shadow.source-sha':'a'*40,'io.kiwoom.shadow.image-digest':image,'io.kiwoom.shadow.activation-id':activation,'io.kiwoom.shadow.mode':'shadow-continuous'}\n"
@@ -240,6 +261,13 @@ def _run_fixed_container_guard(tmp_path, lifecycle):
         "    if lifecycle=='label-mismatch': labels['io.kiwoom.shadow.source-sha']='f'*40\n"
         "    running=lifecycle=='running'\n"
         "    value={'Name':'/kiwoom-shadow-once','State':{'Running':running,'Status':'running' if running else 'exited'},'Config':{'User':'0:0','Labels':labels,'Image':image,'Cmd':['python','-m','kiwoom_stock','shadow-worker','--source-sha','a'*40,'--image-digest',image,'--activation-id',activation]},'HostConfig':{'ReadonlyRootfs':True,'RestartPolicy':{'Name':'no'},'CapDrop':['ALL'],'CapAdd':['CHOWN','SETGID','SETUID'],'SecurityOpt':['no-new-privileges:true']}}\n"
+        "    if lifecycle=='config-shape': value['Config']['User']='1000:1000'\n"
+        "    if lifecycle=='labels-shape': value['Config']['Labels']=[]\n"
+        "    if lifecycle=='image': value['Config']['Image']='invalid-image'\n"
+        "    if lifecycle=='command': value['Config']['Cmd'].append('--unexpected')\n"
+        "    if lifecycle=='runtime-security': value['HostConfig']['ReadonlyRootfs']=False\n"
+        "    if lifecycle=='capabilities': value['HostConfig']['CapAdd']=[]\n"
+        "    if lifecycle=='no-new-privileges': value['HostConfig']['SecurityOpt']=[]\n"
         "    print(json.dumps([value],separators=(',',':')))\n"
         "    raise SystemExit(0)\n"
         "if args[:2]==['rm','--'] and lifecycle=='valid-stopped':\n"
@@ -296,11 +324,14 @@ def _run_fixed_container_guard(tmp_path, lifecycle):
     return completed, worker, validator, binding, curl_marker, removed_marker, state
 
 
-@pytest.mark.parametrize("lifecycle", [
-    "running", "label-missing", "label-mismatch", "operational-error",
+@pytest.mark.parametrize(("lifecycle", "failure_code"), [
+    ("running", "lifecycle"),
+    ("label-missing", "activation"),
+    ("label-mismatch", "source_mode"),
+    ("operational-error", None),
 ])
 def test_untrusted_fixed_container_blocks_before_backup_download_publish(
-    tmp_path, lifecycle,
+    tmp_path, lifecycle, failure_code,
 ):
     (completed, worker, validator, binding, curl_marker, removed_marker,
      state) = _run_fixed_container_guard(tmp_path, lifecycle)
@@ -308,13 +339,46 @@ def test_untrusted_fixed_container_blocks_before_backup_download_publish(
     if lifecycle == "operational-error":
         assert "docker fixed shadow inventory failed" in completed.stderr
     else:
-        assert "fixed stopped shadow identity validation failed" in completed.stderr
+        assert completed.stderr.splitlines() == [
+            f"fixed-identity:{failure_code}",
+            "fixed stopped shadow identity validation failed",
+        ]
     assert worker.read_bytes() == b"old-worker"
     assert validator.read_bytes() == b"old-validator"
     assert json.loads(binding.read_text(encoding="utf-8"))["source_sha"] == "a" * 40
     assert not curl_marker.exists()
     assert not removed_marker.exists()
     assert not (state / "321").exists()
+
+
+@pytest.mark.parametrize(("lifecycle", "failure_code"), [
+    ("artifact-metadata", "artifact_metadata"),
+    ("binding-shape", "binding_shape"),
+    ("binding-value", "binding_value"),
+    ("binding-value-type", "binding_value"),
+    ("worker-hash", "worker_hash"),
+    ("validator-hash", "validator_hash"),
+    ("inspect-shape", "inspect_shape"),
+    ("running", "lifecycle"),
+    ("config-shape", "config_shape"),
+    ("labels-shape", "labels_shape"),
+    ("label-mismatch", "source_mode"),
+    ("image", "image"),
+    ("label-missing", "activation"),
+    ("command", "command"),
+    ("runtime-security", "runtime_security"),
+    ("capabilities", "capabilities"),
+    ("no-new-privileges", "no_new_privileges"),
+])
+def test_fixed_container_identity_failures_emit_only_allowlisted_category(
+    tmp_path, lifecycle, failure_code,
+):
+    completed, *_ = _run_fixed_container_guard(tmp_path, lifecycle)
+    assert completed.returncode != 0
+    assert completed.stderr.splitlines() == [
+        f"fixed-identity:{failure_code}",
+        "fixed stopped shadow identity validation failed",
+    ]
 
 
 def test_exact_stopped_fixed_container_is_removed_before_install(tmp_path):
@@ -785,6 +849,122 @@ def test_finish_command_waits_through_nonterminal_to_true_terminal(
     assert len(calls) == 2
     assert record["status"] == terminal
     assert record["response_code"] == response_code
+    if not succeeds:
+        assert record["failure_category"] == "host_action_failed"
+
+
+@pytest.mark.parametrize(
+    ("marker", "category"),
+    sorted(shadow_rollout.FIXED_IDENTITY_FAILURE_CATEGORIES.items()),
+)
+def test_host_action_failure_category_accepts_one_exact_install_marker(
+    marker, category,
+):
+    invocation = {
+        "Status": "Failed",
+        "ResponseCode": 1,
+        "StandardErrorContent": (
+            f"{marker}\nfixed stopped shadow identity validation failed\n"
+        )
+    }
+    assert shadow_rollout._host_action_failure_category(
+        "install", invocation
+    ) == category
+
+
+@pytest.mark.parametrize("stderr", [
+    "fixed-identity:unknown\n",
+    "fixed-identity:lifecycle\n",
+    (
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+        "fixed-identity:unknown\n"
+    ),
+    "fixed-identity:lifecycle\nfixed-identity:lifecycle\n",
+    "fixed-identity:lifecycle\nfixed-identity:image\n",
+    (
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+        "fixed stopped shadow identity validation failed\n"
+    ),
+    "prefix fixed-identity:lifecycle suffix\n",
+    "x" * 65537,
+    None,
+])
+def test_host_action_failure_category_rejects_unknown_ambiguous_or_unbounded_stderr(
+    stderr,
+):
+    assert shadow_rollout._host_action_failure_category(
+        "install", {
+            "Status": "Failed", "ResponseCode": 1,
+            "StandardErrorContent": stderr,
+        }
+    ) == "host_action_failed"
+
+
+def test_host_action_failure_category_is_install_only():
+    assert shadow_rollout._host_action_failure_category(
+        "readback", {
+            "Status": "Failed", "ResponseCode": 1,
+            "StandardErrorContent": (
+                "fixed-identity:lifecycle\n"
+                "fixed stopped shadow identity validation failed\n"
+            ),
+        }
+    ) == "host_action_failed"
+
+
+@pytest.mark.parametrize(
+    ("status", "response_code"),
+    [("Cancelled", 1), ("TimedOut", 1), ("Failed", 2), ("Success", 1)],
+)
+def test_host_action_failure_category_requires_exact_failed_exit_one(
+    status, response_code,
+):
+    assert shadow_rollout._host_action_failure_category(
+        "install", {
+            "Status": status,
+            "ResponseCode": response_code,
+            "StandardErrorContent": (
+                "fixed-identity:lifecycle\n"
+                "fixed stopped shadow identity validation failed\n"
+            ),
+        }
+    ) == "host_action_failed"
+
+
+def test_finish_command_records_only_safe_fixed_identity_failure(monkeypatch):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    command_id = "00000000-0000-0000-0000-000000000001"
+    invocation = _poll_response(
+        rollout, command_id, Status="Failed", ResponseCode=1,
+        StandardErrorContent=(
+            "fixed-identity:runtime_security\n"
+            "fixed stopped shadow identity validation failed\n"
+        ),
+    )
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    monkeypatch.setattr(adapter, "poll", lambda command_id, rollout: invocation)
+    record = {}
+    with pytest.raises(
+        shadow_rollout.RolloutError,
+        match="host_fixed_identity_runtime_security",
+    ):
+        adapter._finish_command(
+            "install", rollout, record, command_id, expect_tuple=True,
+        )
+    assert record == {
+        "status": "Failed",
+        "response_code": 1,
+        "failure_category": "host_fixed_identity_runtime_security",
+    }
 
 
 @pytest.mark.parametrize("response_code", [False, 0.0, "0"])
@@ -1621,6 +1801,72 @@ def test_incoherent_prestate_fails_before_install_and_records_existing_skew(
     assert evidence["preexisting_skew"] is True
     assert evidence["skew"] is True
     assert not any(call[:2] == ("send", "install") for call in IncoherentAws.instances[-1].calls)
+
+
+@pytest.mark.parametrize(("stderr", "failure_category", "forbidden"), [
+    (
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n",
+        "host_fixed_identity_lifecycle",
+        "StandardErrorContent",
+    ),
+    (
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+        "sentinel raw host detail\n",
+        "host_action_failed",
+        "sentinel raw host detail",
+    ),
+])
+def test_failed_invocation_persists_only_safe_category_not_stderr(
+    monkeypatch, tmp_path, stderr, failure_category, forbidden,
+):
+    finish_command = shadow_rollout.AwsCli._finish_command
+
+    class PersistedFailureAws(_FakeAws):
+        def send(self, action, rollout, expect_tuple=False):
+            self.calls.append(("send", action))
+            command_id = (
+                f"00000000-0000-0000-0000-{len(self.command_ids):012d}"
+            )
+            self.command_ids.append(command_id)
+            record = {
+                "action": action, "command_id": command_id,
+                "accepted": True, "status": "unknown", "response_code": None,
+            }
+            self.commands.append(record)
+            if action == "install":
+                return finish_command(
+                    self, action, rollout, record, command_id,
+                    expect_tuple=expect_tuple,
+                )
+            record["status"] = "Success"
+            record["response_code"] = 0
+            return _host_evidence(action, rollout, False)
+
+        def poll(self, command_id, rollout):
+            return _poll_response(
+                rollout, command_id, Status="Failed", ResponseCode=1,
+                StandardErrorContent=stderr,
+            )
+
+    PersistedFailureAws.instances.clear()
+    monkeypatch.setattr(shadow_rollout, "AwsCli", PersistedFailureAws)
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    audit = tmp_path / "failed-invocation-audit.json"
+    with pytest.raises(shadow_rollout.RolloutError, match=failure_category):
+        shadow_rollout.execute("a" * 40, "125", audit)
+    encoded = audit.read_text(encoding="utf-8")
+    evidence = json.loads(encoded)
+    assert evidence["failure_category"] == failure_category
+    install = next(
+        item for item in evidence["commands"] if item["action"] == "install"
+    )
+    assert install["failure_category"] == failure_category
+    assert "StandardErrorContent" not in encoded
+    assert forbidden not in encoded
+    assert evidence["phase"] == "rolled_back"
+    assert evidence["skew"] is False
 
 
 def test_legacy_transition_drain_precedes_first_host_command(monkeypatch, tmp_path):

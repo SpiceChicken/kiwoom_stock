@@ -81,34 +81,48 @@ mainSteps:
             if ! python3 - "$snapshot" "$binding" "$worker_target" "$validator_target" <<'PY'
           import hashlib,json,os,re,stat,sys
           snapshot,binding_path,worker_path,validator_path=sys.argv[1:]
+          def reject(code):
+              print(f"fixed-identity:{code}",file=sys.stderr)
+              raise SystemExit(1)
           def regular(path,mode):
-              value=os.stat(path,follow_symlinks=False)
+              try: value=os.stat(path,follow_symlinks=False)
+              except OSError: return False
               return stat.S_ISREG(value.st_mode) and value.st_uid==0 and value.st_gid==0 and stat.S_IMODE(value.st_mode)==mode and value.st_nlink==1
-          if not regular(binding_path,0o600) or not regular(worker_path,0o750) or not regular(validator_path,0o750): raise SystemExit(1)
-          with open(binding_path,encoding="utf-8") as stream: binding=json.load(stream)
-          if set(binding)!={"source_sha","worker_sha256","validator_sha256","shadow_document_sha256","rollout_attempt_id"}: raise SystemExit(1)
-          if re.fullmatch(r"[0-9a-f]{40}",binding["source_sha"]) is None or re.fullmatch(r"[1-9][0-9]{0,19}",binding["rollout_attempt_id"]) is None: raise SystemExit(1)
+          def digest(path):
+              try:
+                  with open(path,"rb") as stream: return hashlib.sha256(stream.read()).hexdigest()
+              except OSError: reject("artifact_metadata")
+          if not regular(binding_path,0o600) or not regular(worker_path,0o750) or not regular(validator_path,0o750): reject("artifact_metadata")
+          try:
+              with open(binding_path,encoding="utf-8") as stream: binding=json.load(stream)
+          except (OSError,UnicodeError,json.JSONDecodeError): reject("binding_shape")
+          if not isinstance(binding,dict) or set(binding)!={"source_sha","worker_sha256","validator_sha256","shadow_document_sha256","rollout_attempt_id"}: reject("binding_shape")
+          if not isinstance(binding["source_sha"],str) or re.fullmatch(r"[0-9a-f]{40}",binding["source_sha"]) is None or not isinstance(binding["rollout_attempt_id"],str) or re.fullmatch(r"[1-9][0-9]{0,19}",binding["rollout_attempt_id"]) is None: reject("binding_value")
           for key in ("worker_sha256","validator_sha256","shadow_document_sha256"):
-              if re.fullmatch(r"[0-9a-f]{64}",binding[key]) is None: raise SystemExit(1)
-          if hashlib.sha256(open(worker_path,"rb").read()).hexdigest()!=binding["worker_sha256"]: raise SystemExit(1)
-          if hashlib.sha256(open(validator_path,"rb").read()).hexdigest()!=binding["validator_sha256"]: raise SystemExit(1)
-          with open(snapshot,encoding="utf-8") as stream: values=json.load(stream)
-          if not isinstance(values,list) or len(values)!=1 or not isinstance(values[0],dict): raise SystemExit(1)
+              if not isinstance(binding[key],str) or re.fullmatch(r"[0-9a-f]{64}",binding[key]) is None: reject("binding_value")
+          if digest(worker_path)!=binding["worker_sha256"]: reject("worker_hash")
+          if digest(validator_path)!=binding["validator_sha256"]: reject("validator_hash")
+          try:
+              with open(snapshot,encoding="utf-8") as stream: values=json.load(stream)
+          except (OSError,UnicodeError,json.JSONDecodeError): reject("inspect_shape")
+          if not isinstance(values,list) or len(values)!=1 or not isinstance(values[0],dict): reject("inspect_shape")
           item=values[0]; state=item.get("State"); config=item.get("Config"); host=item.get("HostConfig")
-          if item.get("Name")!="/kiwoom-shadow-once" or not isinstance(state,dict) or state.get("Running") is not False or state.get("Status")!="exited": raise SystemExit(1)
-          if not isinstance(config,dict) or not isinstance(host,dict) or config.get("User")!="0:0": raise SystemExit(1)
+          if item.get("Name")!="/kiwoom-shadow-once" or not isinstance(state,dict) or state.get("Running") is not False or state.get("Status")!="exited": reject("lifecycle")
+          if not isinstance(config,dict) or not isinstance(host,dict) or config.get("User")!="0:0": reject("config_shape")
           labels=config.get("Labels")
-          if not isinstance(labels,dict): raise SystemExit(1)
+          if not isinstance(labels,dict): reject("labels_shape")
           source=labels.get("io.kiwoom.shadow.source-sha"); image=labels.get("io.kiwoom.shadow.image-digest"); activation=labels.get("io.kiwoom.shadow.activation-id")
-          if source!=binding["source_sha"] or labels.get("io.kiwoom.shadow.mode")!="shadow-continuous": raise SystemExit(1)
-          if not isinstance(image,str) or re.fullmatch(r"ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}",image) is None or config.get("Image")!=image: raise SystemExit(1)
-          if not isinstance(activation,str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}",activation) is None: raise SystemExit(1)
+          if source!=binding["source_sha"] or labels.get("io.kiwoom.shadow.mode")!="shadow-continuous": reject("source_mode")
+          if not isinstance(image,str) or re.fullmatch(r"ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}",image) is None or config.get("Image")!=image: reject("image")
+          if not isinstance(activation,str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}",activation) is None: reject("activation")
           expected=["python","-m","kiwoom_stock","shadow-worker","--source-sha",source,"--image-digest",image,"--activation-id",activation]
-          if config.get("Cmd")!=expected: raise SystemExit(1)
+          if config.get("Cmd")!=expected: reject("command")
           restart=host.get("RestartPolicy")
-          if host.get("ReadonlyRootfs") is not True or not isinstance(restart,dict) or restart.get("Name")!="no": raise SystemExit(1)
-          if set(host.get("CapDrop") or [])!={"ALL"} or set(host.get("CapAdd") or [])!={"CHOWN","SETGID","SETUID"}: raise SystemExit(1)
-          if "no-new-privileges:true" not in (host.get("SecurityOpt") or []): raise SystemExit(1)
+          if host.get("ReadonlyRootfs") is not True or not isinstance(restart,dict) or restart.get("Name")!="no": reject("runtime_security")
+          cap_drop=host.get("CapDrop"); cap_add=host.get("CapAdd")
+          if not isinstance(cap_drop,list) or not all(isinstance(value,str) for value in cap_drop) or set(cap_drop)!={"ALL"} or not isinstance(cap_add,list) or not all(isinstance(value,str) for value in cap_add) or set(cap_add)!={"CHOWN","SETGID","SETUID"}: reject("capabilities")
+          security_opt=host.get("SecurityOpt")
+          if not isinstance(security_opt,list) or not all(isinstance(value,str) for value in security_opt) or "no-new-privileges:true" not in security_opt: reject("no_new_privileges")
           PY
             then
               printf 'fixed stopped shadow identity validation failed\n' >&2

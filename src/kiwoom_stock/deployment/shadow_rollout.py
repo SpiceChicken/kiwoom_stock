@@ -38,6 +38,26 @@ NONTERMINAL_STATUSES = frozenset({
     "Pending", "InProgress", "Delayed", "Cancelling",
 })
 ALL_STATUSES = TERMINAL_STATUSES | NONTERMINAL_STATUSES
+FIXED_IDENTITY_FAILURE_CATEGORIES = {
+    "fixed-identity:artifact_metadata": "host_fixed_identity_artifact_metadata",
+    "fixed-identity:binding_shape": "host_fixed_identity_binding_shape",
+    "fixed-identity:binding_value": "host_fixed_identity_binding_value",
+    "fixed-identity:worker_hash": "host_fixed_identity_worker_hash",
+    "fixed-identity:validator_hash": "host_fixed_identity_validator_hash",
+    "fixed-identity:inspect_shape": "host_fixed_identity_inspect_shape",
+    "fixed-identity:lifecycle": "host_fixed_identity_lifecycle",
+    "fixed-identity:config_shape": "host_fixed_identity_config_shape",
+    "fixed-identity:labels_shape": "host_fixed_identity_labels_shape",
+    "fixed-identity:source_mode": "host_fixed_identity_source_mode",
+    "fixed-identity:image": "host_fixed_identity_image",
+    "fixed-identity:activation": "host_fixed_identity_activation",
+    "fixed-identity:command": "host_fixed_identity_command",
+    "fixed-identity:runtime_security": "host_fixed_identity_runtime_security",
+    "fixed-identity:capabilities": "host_fixed_identity_capabilities",
+    "fixed-identity:no_new_privileges": (
+        "host_fixed_identity_no_new_privileges"
+    ),
+}
 LEGACY_QUIET_WINDOW_SECONDS = 3600
 LEGACY_SETTLING_SECONDS = 60
 LEGACY_SCAN_OFFSETS = (0, 30, 60)
@@ -449,6 +469,31 @@ def _classify_aws_command(args: Sequence[str]) -> bool:
     raise RolloutError("aws_command_not_allowed")
 
 
+def _host_action_failure_category(
+    action: str, invocation: Mapping[str, object]
+) -> str:
+    """Return one operator-safe fixed-container category without retaining stderr."""
+
+    if (
+        action != "install"
+        or invocation.get("Status") != "Failed"
+        or type(invocation.get("ResponseCode")) is not int
+        or invocation.get("ResponseCode") != 1
+    ):
+        return "host_action_failed"
+    stderr = invocation.get("StandardErrorContent")
+    if type(stderr) is not str or len(stderr) > 65536:
+        return "host_action_failed"
+    lines = stderr.splitlines()
+    if (
+        len(lines) != 2
+        or lines[0] not in FIXED_IDENTITY_FAILURE_CATEGORIES
+        or lines[1] != "fixed stopped shadow identity validation failed"
+    ):
+        return "host_action_failed"
+    return FIXED_IDENTITY_FAILURE_CATEGORIES[lines[0]]
+
+
 class AwsCli:
     """Bounded AWS CLI adapter; write operations are never blindly retried."""
 
@@ -551,7 +596,9 @@ class AwsCli:
             or type(response_code) is not int
             or response_code != 0
         ):
-            raise RolloutError("host_action_failed")
+            category = _host_action_failure_category(action, invocation)
+            record["failure_category"] = category
+            raise RolloutError(category)
         evidence = self._host_evidence(invocation)
         self.host_evidence.append(evidence)
         if evidence.get("action") != action:
