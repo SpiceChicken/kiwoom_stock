@@ -19,11 +19,14 @@ noncanonical KST dates, and non-finite timing evidence are schema failures and
 must not be bypassed.
 
 Do not roll out a new shadow artifact set while the fixed
-`kiwoom-shadow-once` container exists, including exited/deadline-completed or
-unexpected-label states. The host guard must accept only a successful empty
-exact-name Docker inventory and reject daemon/permission failures before backup,
-download, or publish so the old tuple remains available for stop. Stop and remove
-the exact old container, verify absence, then retry rollout. `preexisting_skew=true` means binding hashes
+`kiwoom-shadow-once` container is running or has an untrusted identity. For an
+exited container only, the host may remove it under the shared lock before
+install after proving the root-owned binding and installed worker/validator
+hashes, exact source/image/activation labels and command, exited state, and
+read-only/no-restart capability contract. Any mismatch or Docker inventory,
+inspect, removal, or post-removal failure stops before backup/download/publish.
+Rollout evidence records `fixed_container_recovery=removed`; an already-empty
+inventory records `absent`. `preexisting_skew=true` means binding hashes
 did not match observed worker/validator bytes; preserve the audit and recover the
 coherent prior set rather than treating exact restoration of incoherent bytes as
 success.

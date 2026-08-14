@@ -401,11 +401,16 @@ unrelated commands from older valid versions, and reject an otherwise exact
 comment/parameter tuple if it names a different rollout-document version.
 
 Before any install backup, exact-SHA download, or publish, the host checks under
-that same lock whether the exact fixed name `kiwoom-shadow-once` exists in any
-lifecycle state. Running, exited, deadline-completed, dead, and missing/mismatched
-label states all reject rollout, leaving the old artifact tuple intact and
-therefore stoppable. Only a successful empty exact-name inventory proves absence;
-missing Docker or daemon/permission/list failure also fails closed. Prestate is
+that same lock whether the exact fixed name `kiwoom-shadow-once` exists. Running,
+dead, created, ambiguous, or mismatched identity states reject rollout. An exited
+container is removable only after a root-owned single-link binding and the
+installed worker/validator bytes agree, and its source/image/activation labels,
+command, user, read-only root, no-restart, capability, and no-new-privileges
+settings all match the bounded continuous contract. The exact name is removed,
+absence is read back, and host evidence reports `fixed_container_recovery` as
+`removed`; an initially empty inventory reports `absent`. Docker daemon,
+permission, inventory, inspect, validation, removal, or post-removal failure is
+fail-closed. Prestate is
 classified as all-absent, coherent legacy
 worker/binding, coherent current artifact set, or incoherent. Incoherent
 binding-to-observed hashes set `preexisting_skew=true`/`skew=true` and stop before

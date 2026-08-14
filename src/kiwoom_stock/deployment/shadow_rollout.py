@@ -80,7 +80,7 @@ HOST_EVIDENCE_KEYS = {
     "validator_links", "validator_regular", "validator_metadata_valid",
     "binding_present", "binding_owner",
     "binding_mode", "binding_links", "binding_regular",
-    "binding_metadata_valid",
+    "binding_metadata_valid", "fixed_container_recovery",
 }
 ROLLOUT_YAML_PREFIX = b'''schemaVersion: "2.2"
 description: Install, read back, or roll back the exact shadow artifact set
@@ -556,6 +556,12 @@ class AwsCli:
         self.host_evidence.append(evidence)
         if evidence.get("action") != action:
             raise RolloutError("host_evidence_action_mismatch")
+        recovery = evidence.get("fixed_container_recovery")
+        if (
+            (action == "install" and recovery not in {"absent", "removed"})
+            or (action != "install" and recovery != "not-requested")
+        ):
+            raise RolloutError("host_evidence_recovery_invalid")
         if expect_tuple and any((
             evidence.get("source_sha") != rollout.source_sha,
             evidence.get("worker_sha256") != rollout.worker_sha256,
@@ -1215,7 +1221,9 @@ def set_default_reconciled(aws: AwsCli, version: str) -> str:
 
 def _host_identity(evidence: Mapping[str, object]) -> tuple[object, ...]:
     return tuple(
-        evidence.get(name) for name in sorted(HOST_EVIDENCE_KEYS - {"action"})
+        evidence.get(name) for name in sorted(
+            HOST_EVIDENCE_KEYS - {"action", "fixed_container_recovery"}
+        )
     )
 
 
@@ -1344,6 +1352,7 @@ def execute(
         "send_error_readback_category": None,
         "host_observed_after_uncertain": None,
         "host_rollback_observed": None,
+        "fixed_container_recovery": None,
     }
     previous_default = ""
     pre_host: dict[str, object] | None = None
@@ -1450,6 +1459,9 @@ def execute(
                 raise
             install_acceptance_uncertain = False
         audit["host_new"] = new_host
+        audit["fixed_container_recovery"] = new_host.get(
+            "fixed_container_recovery"
+        )
         audit["phase"] = "host_applied"
         audit["phase"] = "document_applying"
         try:
