@@ -1026,6 +1026,33 @@ def test_continuous_shadow_composition_requires_exact_process_name_before_creden
     assert calls == []
 
 
+def test_shadow_composition_rejects_debug_mode_before_credentials(tmp_path):
+    credentials_dir = tmp_path / "debug-credentials"
+    credentials_dir.mkdir()
+    settings = Settings.from_mapping(
+        {
+            "KIWOOM_EXECUTION_MODE": "shadow-once",
+            "KIWOOM_API_MODE": "prod",
+            "KIWOOM_APP_ENV": "prod",
+            "KIWOOM_PROCESS_NAME": "kiwoom-shadow-once",
+            "KIWOOM_DEBUG_MODE": "true",
+            "KIWOOM_CREDENTIALS_DIR": str(credentials_dir.resolve()),
+            "KIWOOM_DB_PATH": str(SHADOW_DATABASE_PATH),
+        }
+    )
+    calls = []
+
+    with pytest.raises(RuntimeError, match="forbids debug_mode"):
+        create_shadow_runtime(
+            policy=_policy(),
+            settings=settings,
+            admission=_open_admission(),
+            credential_provider_factory=lambda _path: calls.append("credentials"),
+        )
+
+    assert calls == []
+
+
 def _shadow_runtime(tmp_path, db_path, now, configure_engine=None):
     credentials = KiwoomClientCredentials(
         SensitiveText("synthetic-app-key"),

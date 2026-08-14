@@ -522,6 +522,10 @@ def create_shadow_runtime(
         raise RuntimeError(
             f"{policy.mode.value} requires KIWOOM_PROCESS_NAME={expected_process_name}"
         )
+    if settings.strategy.debug_mode:
+        raise RuntimeDisabledError(
+            "shadow execution forbids debug_mode; use a non-production test runtime"
+        )
     db_path = policy.assert_shadow_database_identity(settings.database.path)
     _assert_shadow_volume_attestation(db_path)
     if (
