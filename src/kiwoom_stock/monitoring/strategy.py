@@ -308,6 +308,7 @@ class TradingStrategy:
         if metrics.cur_prc <= 0.0:
             return {
                 "status": "⏸️VI 발동 대기 (0원 호가 무시)",
+                "reason_code": "VI_WAIT",
                 "regime": getattr(self._current_regime, 'name', str(self._current_regime)),
                 "is_buy_signal": False,
                 "price": metrics.cur_prc,
@@ -333,6 +334,7 @@ class TradingStrategy:
         # 기본값 초기화
         is_buy_signal = False
         status = "대기"
+        reason_code = "WAIT"
 
         # ===================================================================
         # 🚀 순수 동역학 진입 통제 센터 (Kinematic Entry Control)
@@ -342,33 +344,40 @@ class TradingStrategy:
         # ➔ 절대 살 수 없는 세력의 피날레 구간
         if thrust >= 1.5 and gravity <= -0.9:
             status = "🌋고점과열 차단 (Climax Shield)"
+            reason_code = "CLIMAX_SHIELD"
             is_buy_signal = False
 
         # [Stage 1] 진성 돌파 하이패스 (Breakout Override)
         # ➔ Climax가 아닌 일반적인 저항(Net Force < 0)을 자본으로 찢고 가는 주도주
         elif impulse >= 3.0 and jerk >= 0.5 and thrust >= 1.0:
             status = "🚀진성 돌파 (Breakout Override)"
+            reason_code = "BREAKOUT_OVERRIDE"
             is_buy_signal = True
 
         # [Stage 2] 물리적 하드 록 (Hard Locks)
         elif thrust < 0.8:
             status = "🛑수급 빈곤 (Thrust Low)"
+            reason_code = "THRUST_LOW"
             is_buy_signal = False
             
         elif net_force < 0.0:
             status = "🛑합력 역전 (Net Force < 0)"
+            reason_code = "NET_FORCE_NEGATIVE"
             is_buy_signal = False
             
         elif gravity <= -0.9 and thrust < 1.0:
             status = "🛬고공 실속 차단 (Stall Shield)"
+            reason_code = "STALL_SHIELD"
             is_buy_signal = False
             
         elif down_atr_percent > 0 and (up_atr / down_atr_percent) < 1.5:
             status = "💨더러운 추세 (Low Quality)"
+            reason_code = "LOW_QUALITY_TREND"
             is_buy_signal = False
 
         elif volume_drop_ratio < 0.5 and thrust < 1.5:
             status = "💨연료 고갈 차단 (Volume Exhausted)"
+            reason_code = "VOLUME_EXHAUSTED"
             is_buy_signal = False
 
         # [Stage 3] 정상 궤도 가동 (Standard Entry Triggers)
@@ -376,20 +385,25 @@ class TradingStrategy:
         elif jerk > 0.0:
             if current_velocity > 0.0:
                 status = "🔥추세돌파 (Uptrend)"
+                reason_code = "UPTREND_ENTRY"
                 is_buy_signal = True
             elif impulse > 0.0 or magnetic > 0.0:
                 status = "🚀바닥반등 (Reversal Boost)"
+                reason_code = "REVERSAL_ENTRY"
                 is_buy_signal = True
             else:
                 status = "👀예열중 (Warming Up)"
+                reason_code = "WARMING_UP"
                 is_buy_signal = False
                 
         else:
             status = "📉가속도 감소 (Jerk <= 0)"
+            reason_code = "JERK_NON_POSITIVE"
             is_buy_signal = False
 
         return {
             "status": status,
+            "reason_code": reason_code,
             "regime": getattr(self._current_regime, 'name', str(self._current_regime)),
             "is_buy_signal": is_buy_signal,
             "price": metrics.cur_prc,

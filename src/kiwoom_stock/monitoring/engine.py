@@ -5,6 +5,7 @@
 """
 
 import logging
+import math
 import threading
 import time as time_mod
 from datetime import datetime
@@ -32,6 +33,7 @@ from kiwoom_stock.domain.models import (
     PhysicalContinuityEvidence,
     PositionDecision,
     PositionStatus,
+    ShadowDecisionTelemetry,
 )
 from kiwoom_stock.domain.strategy import TargetStopPolicy
 from kiwoom_stock.utils.market_cal import (
@@ -184,8 +186,12 @@ class TradingEngine:
             self._checkpoint_shadow_lifecycle()
             if len(verdicts) != 1:
                 raise RuntimeError("shadow strategy evaluation did not produce one verdict")
-            self._process_decisions(verdicts)
+            positions_before = self._process_decisions(verdicts)
+            position_before = positions_before[stock_code]
             self._checkpoint_shadow_lifecycle()
+            telemetry = self._shadow_decision_telemetry(
+                verdicts[0], metrics, position_before
+            )
             self.notifier.flush_status(self.analyzer.market_regime.value)
             self._checkpoint_shadow_lifecycle()
             return {
@@ -194,10 +200,115 @@ class TradingEngine:
                 "verdict_count": len(verdicts),
                 "market_regime": self.analyzer.market_regime.value,
                 "continuity": metrics.continuity,
+                "decision_telemetry": telemetry,
             }
         finally:
             with self._shadow_cycle_lock:
                 self._shadow_cycle_state = "terminal"
+
+    @staticmethod
+    def _direction_band(value: object) -> str:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise RuntimeError("shadow telemetry direction is invalid")
+        numeric = float(value)
+        if numeric <= -1.0:
+            return "STRONG_NEGATIVE"
+        if numeric < 0.0:
+            return "NEGATIVE"
+        if numeric == 0.0:
+            return "NEUTRAL"
+        if numeric < 1.0:
+            return "POSITIVE"
+        return "STRONG_POSITIVE"
+
+    @staticmethod
+    def _three_way_band(
+        value: object, *, lower: float, upper: float, labels: tuple[str, str, str]
+    ) -> str:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise RuntimeError("shadow telemetry value is invalid")
+        numeric = float(value)
+        if numeric < lower:
+            return labels[0]
+        if numeric > upper:
+            return labels[2]
+        return labels[1]
+
+    def _shadow_decision_telemetry(
+        self,
+        verdict: Mapping[str, Any],
+        metrics: Any,
+        position_before: str,
+    ) -> ShadowDecisionTelemetry:
+        is_buy_signal = verdict.get("is_buy_signal")
+        reason_code = verdict.get("reason_code")
+        if not isinstance(is_buy_signal, bool):
+            raise RuntimeError("shadow verdict signal is invalid")
+        if not isinstance(reason_code, str):
+            raise RuntimeError("shadow verdict reason code is invalid")
+        counts = self.notifier.safe_counts()
+        if counts.get("paper_buy") == 1 and counts.get("paper_sell") == 0:
+            paper_action = "BUY"
+        elif counts.get("paper_sell") == 1 and counts.get("paper_buy") == 0:
+            paper_action = "SELL"
+        elif counts.get("paper_buy") == counts.get("paper_sell") == 0:
+            paper_action = "HOLD"
+        else:
+            raise RuntimeError("shadow paper action evidence is invalid")
+        forces = verdict.get("forces", {})
+        if not isinstance(forces, Mapping):
+            raise RuntimeError("shadow verdict force evidence is invalid")
+        entry_open = self.strategy.is_trading_window()
+        monitoring_open = self.strategy.is_monitoring_time()
+        return ShadowDecisionTelemetry(
+            market_regime=self.analyzer.market_regime.name,
+            strategy_reason_code=reason_code,
+            strategy_intent=(
+                "ENTRY_SIGNAL" if is_buy_signal else "NO_ENTRY_SIGNAL"
+            ),
+            paper_action=paper_action,
+            position_before=position_before,
+            trading_window="OPEN" if entry_open else "CLOSED",
+            session_phase=(
+                "ENTRY" if entry_open else "EXIT_ONLY" if monitoring_open else "CLOSED"
+            ),
+            net_force_band=self._direction_band(forces.get("net_force")),
+            current_velocity_band=self._direction_band(
+                forces.get("current_velocity")
+            ),
+            jerk_band=self._three_way_band(
+                forces.get("jerk"),
+                lower=0.0,
+                upper=0.0,
+                labels=("NEGATIVE", "NEUTRAL", "POSITIVE"),
+            ),
+            strength_band=self._three_way_band(
+                getattr(metrics, "strength", None),
+                lower=100.0,
+                upper=100.0,
+                labels=("BELOW_100", "AT_100", "ABOVE_100"),
+            ),
+            trend_rsi_band=self._three_way_band(
+                getattr(metrics, "trend_rsi", None),
+                lower=30.0,
+                upper=70.0,
+                labels=("OVERSOLD", "NEUTRAL", "OVERBOUGHT"),
+            ),
+            price_vwap_relation=self._three_way_band(
+                getattr(metrics, "cur_prc", None),
+                lower=float(getattr(metrics, "vwap", math.nan)),
+                upper=float(getattr(metrics, "vwap", math.nan)),
+                labels=("BELOW", "AT", "ABOVE"),
+            ),
+        )
 
     def _checkpoint_shadow_lifecycle(self) -> None:
         """Abort cooperative shadow work before another side-effect boundary."""
@@ -598,13 +709,20 @@ class TradingEngine:
         self,
         verdicts: List[Dict],
         context: Optional[CycleContext] = None,
-    ):
+    ) -> Dict[str, str]:
         """[Decision] 전략 결과를 바탕으로 매수/매도/관망 결정 (Orchestrator 역할)"""
         if context is None:
             self.stock_mgr.reconcile_overnight_positions()
+        positions_before: Dict[str, str] = {}
         for verdict in verdicts:
             self._checkpoint_shadow_lifecycle()
             stock_code = verdict['stock_code']
+            persisted_before = self.stock_mgr.active_positions.get(stock_code)
+            positions_before[stock_code] = (
+                "FLAT"
+                if persisted_before is None
+                else persisted_before.status.value
+            )
 
             # 1. 매도(청산) 검사 - 보유 중인 경우
             if stock_code in self.stock_mgr.active_positions:
@@ -669,6 +787,7 @@ class TradingEngine:
                         self._execute_paper_transition('BUY', verdict, context=context)
                     else:
                         self._execute_order('BUY', verdict, context=context)
+        return positions_before
 
     def _execute_paper_transition(
         self,

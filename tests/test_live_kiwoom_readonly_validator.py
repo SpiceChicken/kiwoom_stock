@@ -233,6 +233,7 @@ def test_market_only_pipeline_has_exact_calls_regime_state_and_safe_dto():
     assert result["market_regime"] != "UNKNOWN"
     assert result["verdict"] == {
         "status": "🛑수급 빈곤 (Thrust Low)",
+        "reason_code": "THRUST_LOW",
         "is_buy_signal": False,
         "regime": "QUIET_BEAR",
     }

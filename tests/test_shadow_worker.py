@@ -49,11 +49,32 @@ from kiwoom_stock.domain.models import (
     PhysicalContinuityEvidence,
     PositionDecision,
     PositionDecisionResult,
+    ShadowDecisionTelemetry,
 )
 
 
 def _continuity(source="initial", previous=None, depth=0):
     return PhysicalContinuityEvidence(1, source, previous, depth)
+
+
+def _decision_telemetry(**updates):
+    values = {
+        "market_regime": "NEUTRAL",
+        "strategy_reason_code": "JERK_NON_POSITIVE",
+        "strategy_intent": "NO_ENTRY_SIGNAL",
+        "paper_action": "HOLD",
+        "position_before": "FLAT",
+        "trading_window": "OPEN",
+        "session_phase": "ENTRY",
+        "net_force_band": "POSITIVE",
+        "current_velocity_band": "POSITIVE",
+        "jerk_band": "NEUTRAL",
+        "strength_band": "ABOVE_100",
+        "trend_rsi_band": "NEUTRAL",
+        "price_vwap_relation": "ABOVE",
+    }
+    values.update(updates)
+    return ShadowDecisionTelemetry(**values)
 from kiwoom_stock.infrastructure.kiwoom_market_only import (
     AllowlistedReadOnlySession,
     ReadOnlyBoundaryError,
@@ -105,6 +126,7 @@ class FakeRuntime:
             resources_closed=True,
             local_counts={},
             continuity=_continuity(),
+            decision_telemetry=_decision_telemetry(),
         )
 
 
@@ -323,6 +345,7 @@ def test_active_cycle_signal_gives_runtime_dynamic_thirty_second_close_budget(tm
                 db_identity=str(SHADOW_DATABASE_PATH),
                 resources_closed=True,
                 local_counts={},
+                decision_telemetry=_decision_telemetry(),
             )
 
     result = run_shadow_continuous(
@@ -1041,6 +1064,7 @@ def _paper_verdict(*, buy_signal, price):
         "stock_code": "005930",
         "status": "paper-test",
         "is_buy_signal": buy_signal,
+        "reason_code": "UPTREND_ENTRY" if buy_signal else "JERK_NON_POSITIVE",
         "price": price,
         "regime": "NEUTRAL",
         "atr_percent": 0.5,
@@ -1050,7 +1074,7 @@ def _paper_verdict(*, buy_signal, price):
             "gravity": 0.0,
             "drag": 0.0,
             "magnetic": 0.0,
-            "jerk": 0.0,
+            "jerk": 0.5 if buy_signal else 0.0,
             "impulse": 0.0,
             "net_force": 1.0,
             "current_velocity": 1.0,
@@ -1077,6 +1101,12 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
     buy_receipt = buy_runtime.execute_once()
 
     assert buy_receipt.local_counts["paper_buy"] == 1
+    assert buy_receipt.decision_telemetry is not None
+    assert buy_receipt.decision_telemetry.strategy_intent == "ENTRY_SIGNAL"
+    assert buy_receipt.decision_telemetry.paper_action == "BUY"
+    assert buy_receipt.decision_telemetry.position_before == "FLAT"
+    assert buy_receipt.decision_telemetry.trading_window == "OPEN"
+    assert buy_receipt.decision_telemetry.session_phase == "ENTRY"
     with sqlite3.connect(db_path) as connection:
         buy_row = connection.execute(
             "SELECT status, buy_time FROM trades WHERE stock_code = '005930'"
@@ -1107,6 +1137,12 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
     sell_receipt = sell_runtime.execute_once()
 
     assert sell_receipt.local_counts["paper_sell"] == 1
+    assert sell_receipt.decision_telemetry is not None
+    assert sell_receipt.decision_telemetry.strategy_intent == "NO_ENTRY_SIGNAL"
+    assert sell_receipt.decision_telemetry.paper_action == "SELL"
+    assert sell_receipt.decision_telemetry.position_before == "OPEN"
+    assert sell_receipt.decision_telemetry.trading_window == "CLOSED"
+    assert sell_receipt.decision_telemetry.session_phase == "EXIT_ONLY"
     with sqlite3.connect(db_path) as connection:
         sell_row = connection.execute(
             "SELECT status, sell_time, sell_reason FROM trades WHERE stock_code = '005930'"
@@ -1354,7 +1390,11 @@ class _LatchMonitor:
             assert self.release.wait(timeout=2)
         if self.run_error is not None:
             raise self.run_error
-        return {"cycles": 1, "continuity": _continuity()}
+        return {
+            "cycles": 1,
+            "continuity": _continuity(),
+            "decision_telemetry": _decision_telemetry(),
+        }
 
     def close(self):
         if self.close_error is not None:

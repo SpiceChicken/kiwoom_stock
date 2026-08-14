@@ -343,6 +343,21 @@ validate_safe_evidence() {
         --output accepted-record
 }
 
+validate_safe_terminal_diagnostic() {
+    local expected_source_sha="$1"
+    local expected_image="$2"
+    local expected_activation_id="$3"
+    python3 "${VALIDATOR_PATH}" \
+        --mode shadow-continuous \
+        --event terminal \
+        --source-sha "${expected_source_sha}" \
+        --image-digest "${expected_image}" \
+        --activation-id "${expected_activation_id}" \
+        --input-format json-lines \
+        --output accepted-record \
+        --terminal-policy diagnostic
+}
+
 validate_container_identity() {
     local expected_source_sha="$1"
     local expected_image="$2"
@@ -538,7 +553,7 @@ stop_shadow() {
     local image="$1"
     local source_sha="$2"
     local activation_id="$3"
-    local logs exit_code terminal running expected_status expected_reason
+    local logs exit_code terminal diagnostic running expected_status expected_reason
     if ! docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
         fail "shadow container is absent; stop identity cannot be proven"
     fi
@@ -554,9 +569,18 @@ stop_shadow() {
         expected_reason="run-deadline"
     fi
     logs="$(docker logs "${CONTAINER_NAME}" 2>&1)"
-    terminal="$(validate_safe_evidence shadow-continuous terminal \
-        "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
-        || fail "continuous terminal safe evidence is missing"
+    if ! terminal="$(validate_safe_evidence shadow-continuous terminal \
+        "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")"; then
+        diagnostic="$(validate_safe_terminal_diagnostic \
+            "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
+            || fail "continuous terminal safe evidence is missing"
+        printf '%s\n' "${diagnostic}"
+        docker rm "${CONTAINER_NAME}" >/dev/null \
+            || fail "failed shadow container removal failed"
+        docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1 \
+            && fail "failed shadow container remains after stop"
+        fail "shadow runtime terminal state is non-operational"
+    fi
     exit_code="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.ExitCode}}')"
     [[ "${exit_code}" == 0 ]] \
         || fail "shadow worker did not exit cleanly"

@@ -41,7 +41,10 @@ from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.infrastructure.physical_state_repository import (
     AsyncPhysicalStateRepository,
 )
-from kiwoom_stock.domain.models import PhysicalContinuityEvidence
+from kiwoom_stock.domain.models import (
+    PhysicalContinuityEvidence,
+    ShadowDecisionTelemetry,
+)
 from kiwoom_stock.domain.strategy import TargetStopPolicy
 from kiwoom_stock.infrastructure.kiwoom_credentials import (
     StrictFileCredentialProvider,
@@ -381,6 +384,9 @@ class ShadowRuntime:
         continuity = cycle.get("continuity")
         if not isinstance(continuity, PhysicalContinuityEvidence):
             raise RuntimeError("shadow runtime reported invalid continuity evidence")
+        decision_telemetry = cycle.get("decision_telemetry")
+        if not isinstance(decision_telemetry, ShadowDecisionTelemetry):
+            raise RuntimeError("shadow runtime reported invalid decision telemetry")
         return ShadowExecutionReceipt(
             cycles=1,
             http_attempts=attempts,
@@ -389,6 +395,7 @@ class ShadowRuntime:
             resources_closed=True,
             local_counts=local_counts,
             continuity=continuity,
+            decision_telemetry=decision_telemetry,
         )
 
     def _checkpoint_lifecycle(self) -> None:

@@ -41,6 +41,7 @@ class TestEntryLogic:
         
         # 합력 역전(net_force < 0)이지만 Stage 1에서 하이패스로 매수되어야 함
         assert result["is_buy_signal"] is True
+        assert result["reason_code"] == "BREAKOUT_OVERRIDE"
         assert "진성 돌파" in result["status"] or "Breakout Override" in result["status"]
 
     @pytest.mark.parametrize("forces, atr, down_atr, expected_keyword", [
@@ -86,21 +87,25 @@ class TestEntryLogic:
         data.forces = {**base_forces, "jerk": 0.1, "current_velocity": 0.1}
         res_up = strategy.evaluate(data)
         assert res_up["is_buy_signal"] is True and "추세돌파" in res_up["status"]
+        assert res_up["reason_code"] == "UPTREND_ENTRY"
 
         # Case B: 바닥반등 (jerk > 0, current_velocity <= 0, impulse > 0)
         data.forces = {**base_forces, "jerk": 0.1, "current_velocity": -0.5, "impulse": 1.0}
         res_rev = strategy.evaluate(data)
         assert res_rev["is_buy_signal"] is True and "바닥반등" in res_rev["status"]
+        assert res_rev["reason_code"] == "REVERSAL_ENTRY"
 
         # Case C: 예열중 (jerk > 0, current_velocity <= 0, impulse=0, magnetic=0)
         data.forces = {**base_forces, "jerk": 0.1, "current_velocity": -0.5, "impulse": 0.0, "magnetic": 0.0}
         res_warm = strategy.evaluate(data)
         assert res_warm["is_buy_signal"] is False and "예열중" in res_warm["status"]
+        assert res_warm["reason_code"] == "WARMING_UP"
 
         # Case D: 가속도 감소 (jerk <= 0)
         data.forces = {**base_forces, "jerk": 0.0, "current_velocity": 1.0}
         res_drop = strategy.evaluate(data)
         assert res_drop["is_buy_signal"] is False and "가속도 감소" in res_drop["status"]
+        assert res_drop["reason_code"] == "JERK_NON_POSITIVE"
 
     def test_zero_price_shield(self, strategy):
         """🛡️ 1. Zero-Price Shield 검증 (V2.6.3)"""
