@@ -36,12 +36,15 @@ category for artifact metadata, binding shape/value, installed hashes, inspect
 shape, lifecycle, config/labels, source/mode, image, activation, command, runtime
 security, capabilities, or no-new-privileges. These are fixed operator-safe
 categories, not Docker inspect values. Promotion requires an install invocation
-with exact `Failed`/response-code `1` and exactly two stderr lines: one allowlisted
-marker followed by the fixed validation-failed companion. Unknown, duplicate,
-oversized, non-install, cancelled, timed-out, or otherwise malformed stderr
-remains the generic `host_action_failed`. Never weaken an identity guard from the
-category alone; compare the expected contract with separately authorized host
-inspection before making a focused correction.
+with exact `Failed`/response-code `1`, exactly one `fixed-identity:` namespace
+line that is allowlisted, and exactly one fixed validation-failed companion
+immediately after that marker. SSM may append non-marker wrapper lines; they are
+neither trusted nor persisted. Unknown or duplicate namespace markers, a missing,
+duplicate, or displaced companion, oversized stderr, non-install, cancelled,
+timed-out, or otherwise malformed evidence remains the generic
+`host_action_failed`. Never weaken an identity guard from the category alone;
+compare the expected contract with separately authorized host inspection before
+making a focused correction.
 
 If `send-command` returns an error, do not dispatch another install. The rollout
 uses its exact attempt/action comment and full parameter tuple to reconcile at

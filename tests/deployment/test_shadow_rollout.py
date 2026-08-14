@@ -873,6 +873,35 @@ def test_host_action_failure_category_accepts_one_exact_install_marker(
 
 
 @pytest.mark.parametrize("stderr", [
+    (
+        "ssm wrapper before\n"
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+    ),
+    (
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+        "ssm wrapper after\n"
+    ),
+    (
+        "ssm wrapper before\n"
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+        "ssm wrapper after\n"
+    ),
+])
+def test_host_action_failure_category_ignores_untrusted_non_marker_wrapper_lines(
+    stderr,
+):
+    assert shadow_rollout._host_action_failure_category(
+        "install", {
+            "Status": "Failed", "ResponseCode": 1,
+            "StandardErrorContent": stderr,
+        }
+    ) == "host_fixed_identity_lifecycle"
+
+
+@pytest.mark.parametrize("stderr", [
     "fixed-identity:unknown\n",
     "fixed-identity:lifecycle\n",
     (
@@ -885,6 +914,11 @@ def test_host_action_failure_category_accepts_one_exact_install_marker(
     (
         "fixed-identity:lifecycle\n"
         "fixed stopped shadow identity validation failed\n"
+        "fixed stopped shadow identity validation failed\n"
+    ),
+    (
+        "fixed-identity:lifecycle\n"
+        "ssm wrapper displaced companion\n"
         "fixed stopped shadow identity validation failed\n"
     ),
     "prefix fixed-identity:lifecycle suffix\n",
@@ -1813,6 +1847,14 @@ def test_incoherent_prestate_fails_before_install_and_records_existing_skew(
     (
         "fixed-identity:lifecycle\n"
         "fixed stopped shadow identity validation failed\n"
+        "sentinel raw host detail\n",
+        "host_fixed_identity_lifecycle",
+        "sentinel raw host detail",
+    ),
+    (
+        "fixed-identity:lifecycle\n"
+        "fixed stopped shadow identity validation failed\n"
+        "fixed-identity:unknown\n"
         "sentinel raw host detail\n",
         "host_action_failed",
         "sentinel raw host detail",

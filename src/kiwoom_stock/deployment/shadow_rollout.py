@@ -485,13 +485,20 @@ def _host_action_failure_category(
     if type(stderr) is not str or len(stderr) > 65536:
         return "host_action_failed"
     lines = stderr.splitlines()
+    marker_indexes = [
+        index for index, line in enumerate(lines)
+        if line.startswith("fixed-identity:")
+    ]
+    companion = "fixed stopped shadow identity validation failed"
     if (
-        len(lines) != 2
-        or lines[0] not in FIXED_IDENTITY_FAILURE_CATEGORIES
-        or lines[1] != "fixed stopped shadow identity validation failed"
+        len(marker_indexes) != 1
+        or lines[marker_indexes[0]] not in FIXED_IDENTITY_FAILURE_CATEGORIES
+        or lines.count(companion) != 1
+        or marker_indexes[0] + 1 >= len(lines)
+        or lines[marker_indexes[0] + 1] != companion
     ):
         return "host_action_failed"
-    return FIXED_IDENTITY_FAILURE_CATEGORIES[lines[0]]
+    return FIXED_IDENTITY_FAILURE_CATEGORIES[lines[marker_indexes[0]]]
 
 
 class AwsCli:
