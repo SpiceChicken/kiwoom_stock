@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from collections.abc import Mapping
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -64,6 +65,15 @@ FIXED_IDENTITY_REJECT_COUNTS = Counter({
     "capabilities": 1,
     "no_new_privileges": 1,
 })
+FIXED_IDENTITY_SOURCE_SHA256 = (
+    "8035e10f8c9a4dac7fe365db33feb315cdb6337771009246e217e3ece16b226c"
+)
+FIXED_CONTAINER_RECOVERY_ENVELOPE_SHA256 = (
+    "13c311fc8d45049d11886f6dc228f002a934172bdc119d3534440f746b72a869"
+)
+ROLLOUT_COMMAND_SOURCE_SHA256 = (
+    "2a02c602a2aa36378b51ef84e60d37076229bb82df546e111d8f3500c9e0f106"
+)
 
 ACTIVATION_INPUT_ENV = {
     "SOURCE_SHA": "${{ inputs.source_sha }}",
@@ -1794,9 +1804,35 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
     try:
         identity_start = identity_lines.index(identity_header) + 1
         identity_end = identity_lines.index("PY", identity_start)
-        identity_tree = ast.parse("\n".join(identity_lines[identity_start:identity_end]))
+        identity_source = "\n".join(identity_lines[identity_start:identity_end])
+        identity_tree = ast.parse(identity_source)
     except (ValueError, SyntaxError):
         raise ContractMismatch("rollout.document.fixed_container_recovery") from None
+    capability_guard = ast.parse(
+        'cap_drop=host.get("CapDrop"); cap_add=host.get("CapAdd")\n'
+        'legacy_cap_add={"CHOWN","SETGID","SETUID"}\n'
+        'canonical_cap_add={"CAP_CHOWN","CAP_SETGID","CAP_SETUID"}\n'
+        "if not isinstance(cap_drop,list) or len(cap_drop)!=1 or "
+        "not all(isinstance(value,str) for value in cap_drop) or "
+        'set(cap_drop)!={"ALL"} or not isinstance(cap_add,list) or '
+        "len(cap_add)!=3 or not all(isinstance(value,str) for value in cap_add) or "
+        "set(cap_add) not in (legacy_cap_add,canonical_cap_add): "
+        'reject("capabilities")\n'
+    ).body
+    capability_guard_dump = [
+        ast.dump(statement, include_attributes=False)
+        for statement in capability_guard
+    ]
+    identity_body_dump = [
+        ast.dump(statement, include_attributes=False)
+        for statement in identity_tree.body
+    ]
+    if not any(
+        identity_body_dump[index:index + len(capability_guard_dump)]
+        == capability_guard_dump
+        for index in range(len(identity_body_dump) - len(capability_guard_dump) + 1)
+    ):
+        raise ContractMismatch("rollout.document.capability_contract")
     reject_counts: Counter[str] = Counter()
     for call in (
         node for node in ast.walk(identity_tree) if isinstance(node, ast.Call)
@@ -1810,10 +1846,47 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
         ):
             raise ContractMismatch("rollout.document.fixed_container_recovery")
         reject_counts[call.args[0].value] += 1
+    if reject_counts != FIXED_IDENTITY_REJECT_COUNTS:
+        raise ContractMismatch("rollout.document.fixed_container_recovery")
+    recovery_function_header = "prepare_fixed_container_for_install() {"
+    recovery_invocation = (
+        'if [[ "$action" == install ]]; then '
+        "prepare_fixed_container_for_install; fi"
+    )
+    if (
+        identity_lines.count(recovery_function_header) != 1
+        or identity_lines.count(recovery_invocation) != 1
+    ):
+        raise ContractMismatch("rollout.document.capability_contract")
+    recovery_function_start = identity_lines.index(recovery_function_header)
+    recovery_invocation_index = identity_lines.index(recovery_invocation)
+    if (
+        recovery_function_start >= recovery_invocation_index
+        or recovery_invocation_index == 0
+        or identity_lines[recovery_invocation_index - 1] != "}"
+    ):
+        raise ContractMismatch("rollout.document.capability_contract")
+    recovery_envelope = "\n".join(
+        identity_lines[
+            recovery_function_start:recovery_invocation_index + 1
+        ]
+    )
+    recovery_envelope_sha256 = hashlib.sha256(
+        recovery_envelope.encode("utf-8")
+    ).hexdigest()
+    if (
+        recovery_envelope_sha256
+        != FIXED_CONTAINER_RECOVERY_ENVELOPE_SHA256
+    ):
+        raise ContractMismatch("rollout.document.capability_contract")
+    identity_source_sha256 = hashlib.sha256(
+        identity_source.encode("utf-8")
+    ).hexdigest()
+    if identity_source_sha256 != FIXED_IDENTITY_SOURCE_SHA256:
+        raise ContractMismatch("rollout.document.capability_contract")
     if (
         any(position < 0 for position in recovery_positions)
         or recovery_positions != sorted(recovery_positions)
-        or reject_counts != FIXED_IDENTITY_REJECT_COUNTS
         or command.count(
             'print(f"fixed-identity:{code}",file=sys.stderr)'
         ) != 1
@@ -1823,10 +1896,6 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
             "docker container ls --all --filter "
             "'name=^/kiwoom-shadow-once$' --format '{{.Names}}'"
         ) != 2
-        or command.count(
-            'if [[ "$action" == install ]]; then '
-            "prepare_fixed_container_for_install; fi"
-        ) != 1
         or command.count(
             '"fixed_container_recovery":sys.argv[5]'
         ) != 1
@@ -1853,6 +1922,11 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
         pipeline_positions != sorted(pipeline_positions)
     ):
         raise ContractMismatch("rollout.document.publish_pipeline")
+    command_source_sha256 = hashlib.sha256(
+        command.encode("utf-8")
+    ).hexdigest()
+    if command_source_sha256 != ROLLOUT_COMMAND_SOURCE_SHA256:
+        raise ContractMismatch("rollout.document.capability_contract")
 
 
 def _ci_shell_commands(script: str) -> list[list[str]]:

@@ -197,7 +197,13 @@ def test_rendered_rollout_command_dispatches_argv_before_any_host_mutation():
     assert completed.stderr == "unsupported rollout action: unsupported-test-action\n"
 
 
-def _run_fixed_container_guard(tmp_path, lifecycle):
+_DEFAULT_CAPABILITY_VALUE = object()
+
+
+def _run_fixed_container_guard(
+    tmp_path, lifecycle, *, cap_drop=_DEFAULT_CAPABILITY_VALUE,
+    cap_add=_DEFAULT_CAPABILITY_VALUE,
+):
     worker = tmp_path / "worker"
     validator = tmp_path / "validator.py"
     binding = tmp_path / "binding.json"
@@ -260,7 +266,9 @@ def _run_fixed_container_guard(tmp_path, lifecycle):
         "    if lifecycle=='label-missing': labels.pop('io.kiwoom.shadow.activation-id')\n"
         "    if lifecycle=='label-mismatch': labels['io.kiwoom.shadow.source-sha']='f'*40\n"
         "    running=lifecycle=='running'\n"
-        "    value={'Name':'/kiwoom-shadow-once','State':{'Running':running,'Status':'running' if running else 'exited'},'Config':{'User':'0:0','Labels':labels,'Image':image,'Cmd':['python','-m','kiwoom_stock','shadow-worker','--source-sha','a'*40,'--image-digest',image,'--activation-id',activation]},'HostConfig':{'ReadonlyRootfs':True,'RestartPolicy':{'Name':'no'},'CapDrop':['ALL'],'CapAdd':['CHOWN','SETGID','SETUID'],'SecurityOpt':['no-new-privileges:true']}}\n"
+        "    cap_drop=json.loads(os.environ['FIXED_CONTAINER_CAP_DROP'])\n"
+        "    cap_add=json.loads(os.environ['FIXED_CONTAINER_CAP_ADD'])\n"
+        "    value={'Name':'/kiwoom-shadow-once','State':{'Running':running,'Status':'running' if running else 'exited'},'Config':{'User':'0:0','Labels':labels,'Image':image,'Cmd':['python','-m','kiwoom_stock','shadow-worker','--source-sha','a'*40,'--image-digest',image,'--activation-id',activation]},'HostConfig':{'ReadonlyRootfs':True,'RestartPolicy':{'Name':'no'},'CapDrop':cap_drop,'CapAdd':cap_add,'SecurityOpt':['no-new-privileges:true']}}\n"
         "    if lifecycle=='config-shape': value['Config']['User']='1000:1000'\n"
         "    if lifecycle=='labels-shape': value['Config']['Labels']=[]\n"
         "    if lifecycle=='image': value['Config']['Image']='invalid-image'\n"
@@ -310,6 +318,13 @@ def _run_fixed_container_guard(tmp_path, lifecycle):
         "PATH": f"{tools}:{environment['PATH']}",
         "FIXED_CONTAINER_LIFECYCLE": lifecycle,
         "FIXED_CONTAINER_REMOVED": str(removed_marker),
+        "FIXED_CONTAINER_CAP_DROP": json.dumps(
+            ["ALL"] if cap_drop is _DEFAULT_CAPABILITY_VALUE else cap_drop
+        ),
+        "FIXED_CONTAINER_CAP_ADD": json.dumps(
+            ["CHOWN", "SETGID", "SETUID"]
+            if cap_add is _DEFAULT_CAPABILITY_VALUE else cap_add
+        ),
         "SSM_Action": "install", "SSM_SourceSha": "a" * 40,
         "SSM_WorkerSha256": "b" * 64, "SSM_ValidatorSha256": "c" * 64,
         "SSM_ShadowDocumentSha256": "d" * 64,
@@ -389,6 +404,65 @@ def test_exact_stopped_fixed_container_is_removed_before_install(tmp_path):
     assert removed_marker.is_file()
     assert not curl_marker.exists()
     assert not (state / "321").exists()
+
+
+@pytest.mark.parametrize("cap_add", [
+    ["CHOWN", "SETGID", "SETUID"],
+    ["SETUID", "CHOWN", "SETGID"],
+    ["CAP_CHOWN", "CAP_SETGID", "CAP_SETUID"],
+    ["CAP_SETUID", "CAP_CHOWN", "CAP_SETGID"],
+])
+def test_fixed_container_accepts_legacy_or_docker_28_canonical_capabilities(
+    tmp_path, cap_add,
+):
+    completed, *_rest, removed_marker, state = _run_fixed_container_guard(
+        tmp_path, "valid-stopped", cap_add=cap_add,
+    )
+
+    assert completed.returncode == 77
+    assert completed.stderr == ""
+    assert removed_marker.is_file()
+    assert not (state / "321").exists()
+
+
+@pytest.mark.parametrize(("cap_drop", "cap_add"), [
+    (None, ["CHOWN", "SETGID", "SETUID"]),
+    (True, ["CHOWN", "SETGID", "SETUID"]),
+    (1, ["CHOWN", "SETGID", "SETUID"]),
+    ({}, ["CHOWN", "SETGID", "SETUID"]),
+    ([True], ["CHOWN", "SETGID", "SETUID"]),
+    ([1], ["CHOWN", "SETGID", "SETUID"]),
+    (["ALL", "ALL"], ["CHOWN", "SETGID", "SETUID"]),
+    (["all"], ["CHOWN", "SETGID", "SETUID"]),
+    ([], ["CHOWN", "SETGID", "SETUID"]),
+    ("ALL", ["CHOWN", "SETGID", "SETUID"]),
+    (["ALL"], None),
+    (["ALL"], True),
+    (["ALL"], 1),
+    (["ALL"], {}),
+    (["ALL"], [True, "SETGID", "SETUID"]),
+    (["ALL"], [1, "SETGID", "SETUID"]),
+    (["ALL"], ["CAP_CHOWN", "SETGID", "SETUID"]),
+    (["ALL"], ["CHOWN", "SETGID", "SETGID"]),
+    (["ALL"], ["CHOWN", "SETGID", "SETUID", "NET_RAW"]),
+    (["ALL"], ["chown", "SETGID", "SETUID"]),
+    (["ALL"], ["", "SETGID", "SETUID"]),
+    (["ALL"], ["CHOWN", 1, "SETUID"]),
+    (["ALL"], []),
+    (["ALL"], "CHOWN,SETGID,SETUID"),
+])
+def test_fixed_container_rejects_nonexact_capability_contract(
+    tmp_path, cap_drop, cap_add,
+):
+    completed, *_ = _run_fixed_container_guard(
+        tmp_path, "valid-stopped", cap_drop=cap_drop, cap_add=cap_add,
+    )
+
+    assert completed.returncode != 0
+    assert completed.stderr.splitlines() == [
+        "fixed-identity:capabilities",
+        "fixed stopped shadow identity validation failed",
+    ]
 
 
 def test_atomic_binding_publish_failure_restores_exact_prior_artifact_set(tmp_path):

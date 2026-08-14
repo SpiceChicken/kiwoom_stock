@@ -25,6 +25,17 @@ install after proving the root-owned binding and installed worker/validator
 hashes, exact source/image/activation labels and command, exited state, and
 read-only/no-restart capability contract. Any mismatch or Docker inventory,
 inspect, removal, or post-removal failure stops before backup/download/publish.
+Docker Engine 28 follows Moby PR #48551 capability canonicalization: `ALL`
+remains `ALL`, while every other capability is uppercased and receives the
+`CAP_` prefix; normalized lists are deduplicated and sorted. Therefore the
+fixed-container guard accepts `CapDrop` only as the one-item list `["ALL"]` and
+accepts `CapAdd` only as either the exact legacy set
+`CHOWN/SETGID/SETUID` or the exact Docker 28 canonical set
+`CAP_CHOWN/CAP_SETGID/CAP_SETUID`. Order alone is immaterial. Mixed notation,
+duplicates, additional capabilities, wrong types, wrong case, and empty values
+remain fail-closed as `host_fixed_identity_capabilities`. The compose
+declaration remains unchanged; this compatibility boundary applies only to
+Docker inspect readback.
 Rollout evidence records `fixed_container_recovery=removed`; an already-empty
 inventory records `absent`. `preexisting_skew=true` means binding hashes
 did not match observed worker/validator bytes; preserve the audit and recover the

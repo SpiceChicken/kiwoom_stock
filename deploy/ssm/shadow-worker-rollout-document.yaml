@@ -120,7 +120,9 @@ mainSteps:
           restart=host.get("RestartPolicy")
           if host.get("ReadonlyRootfs") is not True or not isinstance(restart,dict) or restart.get("Name")!="no": reject("runtime_security")
           cap_drop=host.get("CapDrop"); cap_add=host.get("CapAdd")
-          if not isinstance(cap_drop,list) or not all(isinstance(value,str) for value in cap_drop) or set(cap_drop)!={"ALL"} or not isinstance(cap_add,list) or not all(isinstance(value,str) for value in cap_add) or set(cap_add)!={"CHOWN","SETGID","SETUID"}: reject("capabilities")
+          legacy_cap_add={"CHOWN","SETGID","SETUID"}
+          canonical_cap_add={"CAP_CHOWN","CAP_SETGID","CAP_SETUID"}
+          if not isinstance(cap_drop,list) or len(cap_drop)!=1 or not all(isinstance(value,str) for value in cap_drop) or set(cap_drop)!={"ALL"} or not isinstance(cap_add,list) or len(cap_add)!=3 or not all(isinstance(value,str) for value in cap_add) or set(cap_add) not in (legacy_cap_add,canonical_cap_add): reject("capabilities")
           security_opt=host.get("SecurityOpt")
           if not isinstance(security_opt,list) or not all(isinstance(value,str) for value in security_opt) or "no-new-privileges:true" not in security_opt: reject("no_new_privileges")
           PY
