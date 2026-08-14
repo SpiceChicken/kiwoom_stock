@@ -499,6 +499,15 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert "ExpectedValidatorSha256=${VALIDATOR_SHA256}" in text
     assert "ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256}" in text
     assert "deploy/ec2/shadow_runtime_evidence.py" in text
+    assert text.count("ref: ${{ github.sha }}") == 1
+    assert text.count("path: .shadow-control-plane") == 1
+    assert (
+        "python3 .shadow-control-plane/deploy/ec2/"
+        "shadow_invocation_diagnostic.py" in text
+    )
+    assert text.count(
+        ".shadow-control-plane/deploy/notify_shadow_status.py"
+    ) == 3
     assert "--input-format ssm-invocation" in text
     assert "def valid_continuity" not in text
     assert 'if [[ "${DESIRED_STATE}" == stop ]]' in text
@@ -590,7 +599,16 @@ def test_stop_pre_oidc_accepts_proven_old_main_ancestor(tmp_path):
     tools.mkdir()
     for name, body in {
         "gh": "#!/usr/bin/env bash\nprintf 'ahead\\t%s\\t%s\\n' \"$SOURCE_SHA\" \"$SOURCE_SHA\"\n",
-        "git": "#!/usr/bin/env bash\nprintf '%s\\n' \"$SOURCE_SHA\"\n",
+        "git": (
+            "#!/usr/bin/env bash\n"
+            "if [[ \"$*\" == '-C .shadow-control-plane rev-parse HEAD' ]]; then\n"
+            "  printf '%s\\n' \"$GITHUB_SHA\"\n"
+            "elif [[ \"$*\" == '-C .shadow-control-plane status --short' ]]; then\n"
+            "  exit 0\n"
+            "else\n"
+            "  printf '%s\\n' \"$SOURCE_SHA\"\n"
+            "fi\n"
+        ),
         "sha256sum": "#!/usr/bin/env bash\nprintf '%s  file\\n' \"$VALIDATOR_SHA256\"\n",
         "python3": "#!/usr/bin/env bash\nexit 0\n",
     }.items():
