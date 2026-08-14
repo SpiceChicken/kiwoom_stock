@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -30,6 +30,7 @@ from kiwoom_stock.application.runtime import (
 from kiwoom_stock.application.shadow_lifecycle import (
     ShadowRunDeadlineExceeded,
     ShadowStopRequested,
+    shadow_session_remaining,
 )
 from kiwoom_stock.application.shadow_worker import (
     CalendarDecision,
@@ -222,6 +223,36 @@ def test_continuous_uses_fresh_one_shot_runtime_and_interruptible_sixty_second_g
     assert result.db_reopens == 1
 
 
+def test_continuous_waits_until_kst_open_before_first_cycle(tmp_path):
+    wall_now = [datetime(2026, 8, 2, 23, 59, tzinfo=timezone.utc)]
+    monotonic_now = [0.0]
+    admitted = []
+
+    class SessionAdvancingStopEvent(AdvancingStopEvent):
+        def wait(self, timeout=None):
+            wall_now[0] += timedelta(seconds=timeout or 0.0)
+            return super().wait(timeout)
+
+    event = SessionAdvancingStopEvent(monotonic_now, stop_after_waits=2)
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda _policy, admission: (
+            admitted.append(admission.now) or FakeRuntime()
+        ),
+        emit=lambda _evidence: None,
+        lock_path=(tmp_path / "pre-open.lock").resolve(),
+        clock=lambda: wall_now[0],
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: monotonic_now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "STOPPED"
+    assert result.cycles == 1
+    assert admitted == [datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc)]
+
+
 def test_continuous_hard_deadline_stops_before_constructing_another_cycle(tmp_path):
     now = [0.0]
     event = AdvancingStopEvent(now)
@@ -239,14 +270,17 @@ def test_continuous_hard_deadline_stops_before_constructing_another_cycle(tmp_pa
     )
 
     assert result.status == "DEADLINE"
-    assert result.cycles == 15
-    assert len(constructions) == 15
-    assert now[0] == 900.0
+    expected_runtime = shadow_session_remaining(
+        datetime(2026, 8, 3, 1, tzinfo=timezone.utc)
+    )
+    assert result.cycles == int(expected_runtime // 60)
+    assert len(constructions) == result.cycles
+    assert now[0] == expected_runtime
     assert result.first_cycle_start_elapsed_seconds == 0.0
     assert result.second_cycle_start_elapsed_seconds == 60.0
     assert result.second_cycle_interval_seconds == 60.0
     assert result.minimum_cycle_interval_seconds == 60.0
-    assert result.db_reopens == 14
+    assert result.db_reopens == result.cycles - 1
 
 
 def test_continuous_failure_is_redacted_and_never_starts_next_cycle(tmp_path):

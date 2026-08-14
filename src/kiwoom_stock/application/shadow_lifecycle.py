@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from contextlib import contextmanager
+from datetime import datetime, time as wall_time
 import signal
 import threading
 import time
 from types import FrameType
 from typing import Any, Callable, Dict, Iterator, TypeVar, cast
+from zoneinfo import ZoneInfo
 
 
 class ShadowLifecycleError(RuntimeError):
@@ -35,7 +37,41 @@ MonotonicClock = Callable[[], float]
 LifecycleResult = TypeVar("LifecycleResult")
 SHUTDOWN_TIMEOUT_SECONDS = 30.0
 SHADOW_CONTINUOUS_INTERVAL_SECONDS = 60.0
-SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS = 15.0 * 60.0
+# The process cap is deliberately a little wider than the KRX regular session
+# so a scheduler can start before the open.  The absolute KST session close is
+# enforced separately by ``shadow_session_remaining``.
+SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS = 7.0 * 60.0 * 60.0
+SHADOW_SESSION_OPEN_TIME = wall_time(9, 0)
+SHADOW_SESSION_CLOSE_TIME = wall_time(15, 30)
+_SEOUL = ZoneInfo("Asia/Seoul")
+
+
+def _session_kst(now: datetime) -> datetime:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("shadow session clock must return an aware datetime")
+    return now.astimezone(_SEOUL)
+
+
+def shadow_session_remaining(now: datetime) -> float:
+    """Return seconds until the absolute KST regular-session close."""
+
+    current = _session_kst(now)
+    close = datetime.combine(
+        current.date(), SHADOW_SESSION_CLOSE_TIME, tzinfo=_SEOUL
+    )
+    return (close - current).total_seconds()
+
+
+def shadow_session_wait_until_open(now: datetime) -> float | None:
+    """Return pre-open wait seconds, or ``None`` once monitoring may run."""
+
+    current = _session_kst(now)
+    if current.time() >= SHADOW_SESSION_OPEN_TIME:
+        return None
+    opening = datetime.combine(
+        current.date(), SHADOW_SESSION_OPEN_TIME, tzinfo=_SEOUL
+    )
+    return max(0.0, (opening - current).total_seconds())
 
 
 class SignalLatch:

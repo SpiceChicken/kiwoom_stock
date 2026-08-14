@@ -461,7 +461,11 @@ def test_worker_rejects_spoofed_inherited_lock_fd(tmp_path):
 def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     triggers = workflow.get("on", workflow.get(True))
-    assert set(triggers) == {"workflow_dispatch"}
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    assert triggers["schedule"] == [
+        {"cron": "50 23 * * 1-5"},
+        {"cron": "35 6 * * 1-5"},
+    ]
     assert set(triggers["workflow_dispatch"]["inputs"]) == {
         "source_sha",
         "image_digest",
@@ -933,7 +937,7 @@ def test_actual_continuous_emitter_cycle_and_terminal_round_trip_consumers(
         )(),
         emit=emitted.append,
         lock_path=tmp_path / "emitter.lock",
-        clock=lambda: datetime(2026, 8, 8, 10, 0, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 8, 8, 1, 0, tzinfo=timezone.utc),
         calendar=lambda _target: CalendarDecision.OPEN,
         stop_event=StopAfterFirstCycle(),
         monotonic=lambda: now[0],

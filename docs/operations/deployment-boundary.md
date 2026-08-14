@@ -169,6 +169,9 @@ approval and C4 real-path validation boundary.
 
 ## Bounded shadow activation boundary
 
+For the market-hours schedule and tuple registration, see
+[shadow session scheduling](shadow-session-scheduling.md).
+
 The shadow activation artifacts are deliberately separate from the check-only
 promotion path:
 
@@ -208,7 +211,8 @@ and one cycle permits no paper transition, one buy, or one sell; missing, extra,
 boolean, floating-point, out-of-range, or simultaneous buy/sell values fail
 activation. It uses a fresh one-shot
 runtime per cycle, a 60-second completion-to-start gate, one process lock, a
-15-minute hard cap, `restart: "no"`, and 30-second signal shutdown. Stop targets
+seven-hour outer cap plus an absolute 15:30 KST session close, `restart: "no"`,
+and 30-second signal shutdown. Stop targets
 only the exact container. The expected source SHA, image digest, and activation
 ID travel through workflow, SSM, host arguments, container labels/config, and
 terminal JSON. Mismatch or container absence is a nonzero failure. After exact

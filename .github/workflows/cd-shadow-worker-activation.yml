@@ -1,6 +1,12 @@
 name: Shadow worker activation
 
 on:
+  schedule:
+    # KST 08:50 and 15:35 on weekdays. The worker itself enforces the
+    # absolute 15:30 KST session close; the latter job removes the stopped
+    # container and records terminal evidence.
+    - cron: "50 23 * * 1-5"
+    - cron: "35 6 * * 1-5"
   workflow_dispatch:
     inputs:
       desired_state:
@@ -78,7 +84,7 @@ jobs:
         timeout-minutes: 1
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ inputs.source_sha || vars.KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA || github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -91,19 +97,95 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Resolve effective shadow activation tuple
+        id: resolve
+        timeout-minutes: 1
+        env:
+          INPUT_DESIRED_STATE: ${{ inputs.desired_state }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          INPUT_BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          INPUT_COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
+          INPUT_ACTIVATION_ID: ${{ inputs.activation_id }}
+          INPUT_WORKER_SHA256: ${{ inputs.worker_sha256 }}
+          INPUT_VALIDATOR_SHA256: ${{ inputs.validator_sha256 }}
+          INPUT_SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
+          INPUT_STATUS_NOTIFICATION: ${{ inputs.status_notification }}
+          SCHEDULE_SOURCE_SHA: ${{ vars.KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA }}
+          SCHEDULE_IMAGE_DIGEST: ${{ vars.KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST }}
+          SCHEDULE_BUILD_RUN_ID: ${{ vars.KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == schedule ]]; then
+            case "${EVENT_SCHEDULE}" in
+              '50 23 * * 1-5') desired_state=continuous ;;
+              '35 6 * * 1-5') desired_state=stop ;;
+              *) echo 'unexpected shadow schedule' >&2; exit 64 ;;
+            esac
+            source_sha="${SCHEDULE_SOURCE_SHA}"
+            image_digest="${SCHEDULE_IMAGE_DIGEST}"
+            build_run_id="${SCHEDULE_BUILD_RUN_ID}"
+            activation_id="shadow-session-$(TZ=Asia/Seoul date +%Y%m%d)"
+            status_notification=slack
+            worker_sha256="$(sha256sum deploy/ec2/shadow_worker_control.sh | cut -d' ' -f1)"
+            validator_sha256="$(sha256sum deploy/ec2/shadow_runtime_evidence.py | cut -d' ' -f1)"
+            shadow_document_sha256="$(PYTHONPATH=src python3 - <<'PY'
+          from pathlib import Path
+          from kiwoom_stock.deployment.shadow_rollout import canonical_json, sha256
+
+          _, canonical = canonical_json(
+              Path("deploy/ssm/shadow-worker-document.yaml").read_bytes()
+          )
+          print(sha256(canonical))
+          PY
+            )"
+            if [[ "${desired_state}" == stop ]]; then
+              build_run_id=""
+              compose_shadow_sha256=""
+            else
+              compose_shadow_sha256="$(sha256sum compose.shadow.yaml | cut -d' ' -f1)"
+            fi
+          else
+            desired_state="${INPUT_DESIRED_STATE}"
+            source_sha="${INPUT_SOURCE_SHA}"
+            image_digest="${INPUT_IMAGE_DIGEST}"
+            build_run_id="${INPUT_BUILD_RUN_ID}"
+            compose_shadow_sha256="${INPUT_COMPOSE_SHADOW_SHA256}"
+            activation_id="${INPUT_ACTIVATION_ID}"
+            worker_sha256="${INPUT_WORKER_SHA256}"
+            validator_sha256="${INPUT_VALIDATOR_SHA256}"
+            shadow_document_sha256="${INPUT_SHADOW_DOCUMENT_SHA256}"
+            status_notification="${INPUT_STATUS_NOTIFICATION}"
+          fi
+          {
+            printf 'desired_state=%s\n' "${desired_state}"
+            printf 'source_sha=%s\n' "${source_sha}"
+            printf 'image_digest=%s\n' "${image_digest}"
+            printf 'build_run_id=%s\n' "${build_run_id}"
+            printf 'compose_shadow_sha256=%s\n' "${compose_shadow_sha256}"
+            printf 'activation_id=%s\n' "${activation_id}"
+            printf 'worker_sha256=%s\n' "${worker_sha256}"
+            printf 'validator_sha256=%s\n' "${validator_sha256}"
+            printf 'shadow_document_sha256=%s\n' "${shadow_document_sha256}"
+            printf 'status_notification=%s\n' "${status_notification}"
+          } >>"${GITHUB_OUTPUT}"
+
       - name: Validate immutable shadow tuple and candidate run
         timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          IMAGE_DIGEST: ${{ inputs.image_digest }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
-          COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
-          ACTIVATION_ID: ${{ inputs.activation_id }}
-          DESIRED_STATE: ${{ inputs.desired_state }}
-          WORKER_SHA256: ${{ inputs.worker_sha256 }}
-          VALIDATOR_SHA256: ${{ inputs.validator_sha256 }}
-          SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          IMAGE_DIGEST: ${{ steps.resolve.outputs.image_digest }}
+          BUILD_RUN_ID: ${{ steps.resolve.outputs.build_run_id }}
+          COMPOSE_SHADOW_SHA256: ${{ steps.resolve.outputs.compose_shadow_sha256 }}
+          ACTIVATION_ID: ${{ steps.resolve.outputs.activation_id }}
+          DESIRED_STATE: ${{ steps.resolve.outputs.desired_state }}
+          WORKER_SHA256: ${{ steps.resolve.outputs.worker_sha256 }}
+          VALIDATOR_SHA256: ${{ steps.resolve.outputs.validator_sha256 }}
+          SHADOW_DOCUMENT_SHA256: ${{ steps.resolve.outputs.shadow_document_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -173,7 +255,7 @@ jobs:
           [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{json .Config.Entrypoint}}')" == '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]' ]]
 
       - name: Preflight protected Slack status boundary
-        if: inputs.status_notification == 'slack'
+        if: steps.resolve.outputs.status_notification == 'slack'
         timeout-minutes: 1
         env:
           KIWOOM_SHADOW_SLACK_WEBHOOK_URL: ${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}
@@ -200,15 +282,15 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ steps.oidc.outputs.aws-access-key-id }}
           AWS_SECRET_ACCESS_KEY: ${{ steps.oidc.outputs.aws-secret-access-key }}
           AWS_SESSION_TOKEN: ${{ steps.oidc.outputs.aws-session-token }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          IMAGE_DIGEST: ${{ inputs.image_digest }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
-          COMPOSE_SHADOW_SHA256: ${{ inputs.compose_shadow_sha256 }}
-          ACTIVATION_ID: ${{ inputs.activation_id }}
-          DESIRED_STATE: ${{ inputs.desired_state }}
-          WORKER_SHA256: ${{ inputs.worker_sha256 }}
-          VALIDATOR_SHA256: ${{ inputs.validator_sha256 }}
-          SHADOW_DOCUMENT_SHA256: ${{ inputs.shadow_document_sha256 }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          IMAGE_DIGEST: ${{ steps.resolve.outputs.image_digest }}
+          BUILD_RUN_ID: ${{ steps.resolve.outputs.build_run_id }}
+          COMPOSE_SHADOW_SHA256: ${{ steps.resolve.outputs.compose_shadow_sha256 }}
+          ACTIVATION_ID: ${{ steps.resolve.outputs.activation_id }}
+          DESIRED_STATE: ${{ steps.resolve.outputs.desired_state }}
+          WORKER_SHA256: ${{ steps.resolve.outputs.worker_sha256 }}
+          VALIDATOR_SHA256: ${{ steps.resolve.outputs.validator_sha256 }}
+          SHADOW_DOCUMENT_SHA256: ${{ steps.resolve.outputs.shadow_document_sha256 }}
           PYTHONPATH: ${{ github.workspace }}/src
         shell: bash
         run: |
@@ -309,7 +391,7 @@ jobs:
 
       - name: Notify protected shadow status
         timeout-minutes: 1
-        if: always() && inputs.status_notification == 'slack'
+        if: always() && steps.resolve.outputs.status_notification == 'slack'
         env:
           KIWOOM_SHADOW_SLACK_WEBHOOK_URL: ${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}
           CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
@@ -318,17 +400,17 @@ jobs:
             --evidence "${EVIDENCE_FILENAME}" \
             --diagnostic "${DIAGNOSTIC_FILENAME}" \
             --receipt "${NOTIFICATION_RECEIPT_FILENAME}" \
-            --source-sha "${{ inputs.source_sha }}" \
-            --image-digest "${{ inputs.image_digest }}" \
-            --activation-id "${{ inputs.activation_id }}" \
-            --desired-state "${{ inputs.desired_state }}"
+            --source-sha "${{ steps.resolve.outputs.source_sha }}" \
+            --image-digest "${{ steps.resolve.outputs.image_digest }}" \
+            --activation-id "${{ steps.resolve.outputs.activation_id }}" \
+            --desired-state "${{ steps.resolve.outputs.desired_state }}"
 
       - name: Upload bounded shadow evidence
         timeout-minutes: 1
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: shadow-worker-${{ inputs.source_sha }}-${{ inputs.activation_id }}
+          name: shadow-worker-${{ steps.resolve.outputs.source_sha }}-${{ steps.resolve.outputs.activation_id }}
           path: |
             ${{ env.EVIDENCE_FILENAME }}
             ${{ env.DIAGNOSTIC_FILENAME }}

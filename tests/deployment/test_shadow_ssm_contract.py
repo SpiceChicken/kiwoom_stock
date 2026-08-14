@@ -250,11 +250,13 @@ def test_wrong_activation_instance_target_fails_closed(contract_root: Path):
 def test_wrong_activation_env_source_fails_closed(contract_root: Path):
     text = read(contract_root, ACTIVATION_WORKFLOW)
     execute = text.index("aws ssm send-command")
-    source = text.rfind("SOURCE_SHA: ${{ inputs.source_sha }}", 0, execute)
+    source = text.rfind(
+        "SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}", 0, execute
+    )
     assert source >= 0
     text = text[:source] + text[source:].replace(
-        "SOURCE_SHA: ${{ inputs.source_sha }}",
-        "SOURCE_SHA: ${{ inputs.image_digest }}",
+        "SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}",
+        "SOURCE_SHA: ${{ steps.resolve.outputs.image_digest }}",
         1,
     )
     (contract_root / ACTIVATION_WORKFLOW).write_text(text, encoding="utf-8")

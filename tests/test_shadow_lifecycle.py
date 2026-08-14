@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import signal
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,16 @@ from kiwoom_stock.application.shadow_lifecycle import (
     ContinuousLifecycle,
     SignalLatch,
     RunDeadline,
+    SHADOW_SESSION_CLOSE_TIME,
+    SHADOW_SESSION_OPEN_TIME,
     SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS,
     ShutdownDeadline,
     ShadowDeadlineExceeded,
     ShadowShutdownDeadlineExceeded,
     ShadowStopController,
     ShadowStopRequested,
+    shadow_session_remaining,
+    shadow_session_wait_until_open,
     execute_with_lifecycle,
 )
 from kiwoom_stock.infrastructure.shadow_process_lock import (
@@ -33,12 +38,25 @@ def test_deadline_uses_monotonic_clock_and_fails_closed():
         deadline.remaining(clock=lambda: 40.0)
 
 
-def test_continuous_run_deadline_is_fixed_to_fifteen_monotonic_minutes():
+def test_continuous_run_deadline_has_a_session_sized_process_cap():
     deadline = RunDeadline.start(clock=lambda: 10.0)
     assert deadline.expires_at == 10.0 + SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS
     assert deadline.elapsed(clock=lambda: 25.0) == 15.0
     with pytest.raises(ShadowDeadlineExceeded):
-        deadline.remaining(clock=lambda: 910.0)
+        deadline.remaining(clock=lambda: 10.0 + SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS)
+
+
+def test_shadow_session_window_is_absolute_kst_and_has_no_dst_ambiguity():
+    before_open = datetime(2026, 8, 14, 23, 50, tzinfo=timezone.utc)
+    at_open = datetime(2026, 8, 15, 0, 0, tzinfo=timezone.utc)
+    at_close = datetime(2026, 8, 15, 6, 30, tzinfo=timezone.utc)
+
+    assert SHADOW_SESSION_OPEN_TIME.isoformat() == "09:00:00"
+    assert SHADOW_SESSION_CLOSE_TIME.isoformat() == "15:30:00"
+    assert shadow_session_wait_until_open(before_open) == 600.0
+    assert shadow_session_wait_until_open(at_open) is None
+    assert shadow_session_remaining(at_open) == 23_400.0
+    assert shadow_session_remaining(at_close) == 0.0
 
 
 def test_signal_starts_distinct_thirty_second_shutdown_budget_and_takes_minimum():
@@ -50,7 +68,7 @@ def test_signal_starts_distinct_thirty_second_shutdown_budget_and_takes_minimum(
         run_deadline=RunDeadline.start(clock=lambda: 0.0),
         clock=lambda: now[0],
     )
-    assert lifecycle.remaining() == 800.0
+    assert lifecycle.remaining() == SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS - 100.0
 
     latch.set()
     assert lifecycle.remaining() == 30.0

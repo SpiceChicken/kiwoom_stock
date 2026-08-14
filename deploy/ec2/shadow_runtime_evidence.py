@@ -15,7 +15,9 @@ from typing import Iterable, TextIO
 MAX_INPUT_BYTES = 1_048_576
 MAX_LINE_BYTES = 65_536
 MAX_LINES = 4_096
-MAX_RECORDS = 256
+# A full KRX session emits one cycle per minute (up to 390 cycles) plus a
+# terminal record. Keep bounded input while allowing one complete session.
+MAX_RECORDS = 512
 SOURCE_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_RE = re.compile(
     r"ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}"
