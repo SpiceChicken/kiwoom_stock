@@ -506,6 +506,30 @@ def test_closed_calendar_constructs_no_credentials_client_or_database():
     assert calls == [("calendar", date(2026, 8, 2))]
 
 
+def test_continuous_closed_calendar_terminates_without_a_cycle_or_runtime(tmp_path):
+    emitted = []
+    calls = []
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda *_args: pytest.fail("runtime constructed"),
+        emit=emitted.append,
+        lock_path=(tmp_path / "closed-continuous.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 14, 12, tzinfo=timezone.utc),
+        calendar=lambda target: calls.append(target) or CalendarDecision.CLOSED,
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "CLOSED"
+    assert result.exit_code == 0
+    assert result.reason == "calendar-closed"
+    assert result.cycles == 0
+    assert result.db_reopens == 0
+    assert result.resources_closed is True
+    assert emitted == []
+    assert calls == [date(2026, 8, 14)]
+
+
 def test_invalid_clock_and_calendar_fail_before_runtime_construction():
     def factory(*_args):
         pytest.fail("runtime constructed")
@@ -1193,6 +1217,35 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
             "SELECT status, sell_time, sell_reason FROM trades WHERE stock_code = '005930'"
         ).fetchone()
     assert sell_row == ("CLOSED", "2026-08-03 15:28:00", "Day Trade Close")
+
+
+def test_shadow_policy_runtime_blocks_entry_after_monitoring_window(tmp_path):
+    db_path = (tmp_path / "kiwoom-shadow" / "closed.db").resolve()
+    db_path.parent.mkdir()
+    runtime = _shadow_runtime(
+        tmp_path,
+        db_path,
+        datetime(2026, 8, 3, 15, 30, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+        configure_engine=lambda engine: setattr(
+            engine.strategy,
+            "evaluate",
+            lambda _metrics: _paper_verdict(buy_signal=True, price=71000.0),
+        ),
+    )
+
+    receipt = runtime.execute_once()
+
+    assert receipt.local_counts["paper_buy"] == 0
+    assert receipt.local_counts["paper_sell"] == 0
+    assert receipt.decision_telemetry is not None
+    assert receipt.decision_telemetry.strategy_intent == "ENTRY_SIGNAL"
+    assert receipt.decision_telemetry.paper_action == "HOLD"
+    assert receipt.decision_telemetry.trading_window == "CLOSED"
+    assert receipt.decision_telemetry.session_phase == "CLOSED"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT status FROM trades WHERE stock_code = '005930'"
+        ).fetchone() is None
 
 
 def test_fresh_shadow_runtimes_preserve_same_session_overnight_then_reopen_and_sell(
