@@ -1,14 +1,18 @@
 """Tests for the isolated Slack shadow status boundary."""
 
+from http.client import InvalidURL
 import json
 from pathlib import Path
 
 import pytest
 
+import deploy.notify_shadow_status as notification
 from deploy.notify_shadow_status import (
     SlackStatusError,
     build_message,
     deliver,
+    main,
+    resolve_webhook,
     validate_webhook,
 )
 
@@ -76,6 +80,22 @@ def _write(path: Path, value) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def _legacy_config_of_size(size: int, fill: str = "x") -> str:
+    base = json.dumps(
+        {"webhook_url": WEBHOOK, "padding": ""},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    remaining = size - len(base.encode("utf-8"))
+    assert remaining >= 0
+    fill_bytes = len(fill.encode("utf-8"))
+    padding = fill * (remaining // fill_bytes)
+    trailing = " " * (remaining % fill_bytes)
+    config = base.replace('"padding":""', f'"padding":"{padding}"') + trailing
+    assert len(config.encode("utf-8")) == size
+    return config
+
+
 def test_webhook_is_exactly_slack_https_without_redirectable_components():
     assert validate_webhook(WEBHOOK) == WEBHOOK
     for value in (
@@ -89,6 +109,94 @@ def test_webhook_is_exactly_slack_https_without_redirectable_components():
     ):
         with pytest.raises(SlackStatusError, match="webhook_invalid"):
             validate_webhook(value)
+
+
+@pytest.mark.parametrize(
+    "control", [*(chr(value) for value in range(0x20)), chr(0x7F)]
+)
+def test_webhook_rejects_every_c0_control_and_del(control):
+    embedded = WEBHOOK.replace("services", f"serv{control}ices")
+    with pytest.raises(SlackStatusError, match="webhook_invalid"):
+        validate_webhook(embedded)
+
+
+@pytest.mark.parametrize("control", ["\r", "\n", "\t"])
+def test_legacy_webhook_rejects_embedded_cr_lf_and_tab(monkeypatch, control):
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", "")
+    monkeypatch.setenv(
+        "CONFIG_JSON",
+        json.dumps({
+            "webhook_url": WEBHOOK.replace(
+                "services", f"serv{control}ices"
+            ),
+        }),
+    )
+    with pytest.raises(SlackStatusError, match="webhook_invalid"):
+        resolve_webhook()
+
+
+def test_dedicated_webhook_has_precedence(monkeypatch):
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", WEBHOOK)
+    monkeypatch.setenv("CONFIG_JSON", '{"webhook_url":"https://bad.invalid"}')
+    assert resolve_webhook() == WEBHOOK
+
+
+def test_invalid_dedicated_webhook_does_not_fallback(monkeypatch):
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", "not-a-webhook")
+    monkeypatch.setenv("CONFIG_JSON", json.dumps({"webhook_url": WEBHOOK}))
+    with pytest.raises(SlackStatusError, match="webhook_invalid"):
+        resolve_webhook()
+
+
+def test_empty_dedicated_webhook_uses_legacy_fallback(monkeypatch):
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", "")
+    monkeypatch.setenv("CONFIG_JSON", json.dumps({"webhook_url": WEBHOOK}))
+    assert resolve_webhook() == WEBHOOK
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        json.dumps({"webhook_url": WEBHOOK}),
+        '{"webhook_url":"' + WEBHOOK + '","webhook_url":"' + WEBHOOK + '"}',
+        "[]",
+        '{"other":"value"}',
+        '{"webhook_url":123}',
+        '{"webhook_url":null}',
+        '{"webhook_url":"' + WEBHOOK,
+        '{"webhook_url":NaN}',
+        '{"webhook_url":Infinity}',
+        '{"webhook_url":-Infinity}',
+        '{"webhook_url":"\\ud800"}',
+    ],
+)
+def test_legacy_config_is_strict_and_fail_closed(monkeypatch, config):
+    monkeypatch.delenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("CONFIG_JSON", config)
+    if config == json.dumps({"webhook_url": WEBHOOK}):
+        assert resolve_webhook() == WEBHOOK
+    else:
+        with pytest.raises(SlackStatusError, match="webhook_invalid"):
+            resolve_webhook()
+
+
+def test_legacy_config_rejects_oversize_and_empty(monkeypatch):
+    monkeypatch.delenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", raising=False)
+    for config in ("", " " * 65_537):
+        monkeypatch.setenv("CONFIG_JSON", config)
+        with pytest.raises(SlackStatusError, match="webhook_invalid"):
+            resolve_webhook()
+
+
+@pytest.mark.parametrize("fill", ["x", "한"])
+def test_legacy_config_enforces_exact_utf8_byte_boundary(monkeypatch, fill):
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", "")
+    exact = _legacy_config_of_size(65_536, fill)
+    monkeypatch.setenv("CONFIG_JSON", exact)
+    assert resolve_webhook() == WEBHOOK
+    monkeypatch.setenv("CONFIG_JSON", exact + " ")
+    with pytest.raises(SlackStatusError, match="webhook_invalid"):
+        resolve_webhook()
 
 
 def test_success_message_uses_only_accepted_summary(tmp_path):
@@ -188,3 +296,72 @@ def test_delivery_rejects_non_exact_slack_ack(status, body):
 
     with pytest.raises(SlackStatusError, match="slack_response_rejected"):
         deliver(WEBHOOK, "fixed safe message", opener=open_request)
+
+
+def test_request_construction_error_is_value_free(monkeypatch):
+    sentinel = "WEBHOOK_TOKEN_MUST_NOT_REFLECT"
+
+    def reject_request(*_args, **_kwargs):
+        raise ValueError(sentinel)
+
+    monkeypatch.setattr(notification, "Request", reject_request)
+    with pytest.raises(SlackStatusError) as raised:
+        deliver(WEBHOOK, "fixed safe message")
+    assert str(raised.value) == "webhook_invalid"
+    assert sentinel not in str(raised.value)
+
+
+def test_http_client_error_is_value_free():
+    sentinel = "WEBHOOK_TOKEN_MUST_NOT_REFLECT"
+
+    def reject_open(_request, timeout):
+        del timeout
+        raise InvalidURL(sentinel)
+
+    with pytest.raises(SlackStatusError) as raised:
+        deliver(WEBHOOK, "fixed safe message", opener=reject_open)
+    assert str(raised.value) == "slack_network_error"
+    assert sentinel not in str(raised.value)
+
+
+def test_main_failure_receipt_and_logs_never_reflect_webhook(
+    monkeypatch, tmp_path, capsys,
+):
+    sentinel = "WEBHOOK_TOKEN_MUST_NOT_REFLECT"
+    receipt = tmp_path / "receipt.json"
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", WEBHOOK)
+    monkeypatch.setenv("CONFIG_JSON", json.dumps({"webhook_url": WEBHOOK}))
+
+    class RejectingClient:
+        def open(self, _request, timeout):
+            del timeout
+            raise InvalidURL(sentinel)
+
+    monkeypatch.setattr(
+        notification, "build_opener", lambda *_args: RejectingClient()
+    )
+
+    result = main([
+        "--evidence", str(tmp_path / "evidence.json"),
+        "--diagnostic", str(tmp_path / "diagnostic.json"),
+        "--receipt", str(receipt),
+        "--source-sha", SOURCE_SHA,
+        "--image-digest", IMAGE,
+        "--activation-id", ACTIVATION_ID,
+        "--desired-state", "continuous",
+    ])
+
+    captured = capsys.readouterr()
+    receipt_text = receipt.read_text(encoding="utf-8")
+    receipt_value = json.loads(receipt_text)
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "shadow status notification failed: slack_network_error\n"
+    )
+    assert receipt_value["delivery_status"] == "FAILED"
+    assert receipt_value["category"] == "slack_network_error"
+    assert all(
+        sentinel not in output
+        for output in (captured.out, captured.err, receipt_text)
+    )

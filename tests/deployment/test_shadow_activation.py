@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -487,8 +488,58 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
         "id-token": "write",
     }
     text = WORKFLOW.read_text(encoding="utf-8")
+    serialized_workflow = json.dumps(workflow)
     assert text.count("secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL") == 2
-    assert "secrets.CONFIG_JSON" not in text
+    assert text.count("secrets.CONFIG_JSON") == 2
+    assert serialized_workflow.count(
+        "secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL"
+    ) == 2
+    assert serialized_workflow.count("secrets.CONFIG_JSON") == 2
+    assert re.search(r"secrets\s*\[", serialized_workflow) is None
+    assert text.count("CONFIG_JSON: ${{ secrets.CONFIG_JSON }}") == 2
+    slack_steps = [
+        step for step in job["steps"]
+        if step.get("name") in {
+            "Preflight protected Slack status boundary",
+            "Notify protected shadow status",
+        }
+    ]
+    assert len(slack_steps) == 2
+    assert all(
+        step["env"]["CONFIG_JSON"] == "${{ secrets.CONFIG_JSON }}"
+        for step in slack_steps
+    )
+    assert all(
+        "CONFIG_JSON" not in step.get("env", {})
+        for step in job["steps"] if step not in slack_steps
+    )
+
+    def config_reference_paths(value, path=()):
+        if isinstance(value, str):
+            return [path] if "secrets.CONFIG_JSON" in value else []
+        if isinstance(value, dict):
+            return [
+                reference
+                for key, nested in value.items()
+                for reference in config_reference_paths(nested, (*path, key))
+            ]
+        if isinstance(value, list):
+            return [
+                reference
+                for index, nested in enumerate(value)
+                for reference in config_reference_paths(nested, (*path, index))
+            ]
+        return []
+
+    config_references = config_reference_paths(workflow)
+    expected_config_references = [
+        (
+            "jobs", "activate", "steps", job["steps"].index(step),
+            "env", "CONFIG_JSON",
+        )
+        for step in slack_steps
+    ]
+    assert config_references == expected_config_references
     assert "secrets.STRATEGY_CONFIG_JSON" not in text
     assert "KIWOOM_APP_KEY" not in text
     assert "KIWOOM_SECRET_KEY" not in text
