@@ -139,6 +139,8 @@ class TradingStrategy:
         if self.debug_mode:
             return True
         current = self._resolve_now(now)
+        if current.weekday() >= 5:
+            return False
         return time(9, 0) <= current.time() < self.deadline_time
 
     def is_kill_switch_activated(self, cumulative_trade_return_score: float) -> bool:
