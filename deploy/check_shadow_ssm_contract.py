@@ -76,15 +76,15 @@ ROLLOUT_COMMAND_SOURCE_SHA256 = (
 )
 
 ACTIVATION_INPUT_ENV = {
-    "SOURCE_SHA": "${{ inputs.source_sha }}",
-    "IMAGE_DIGEST": "${{ inputs.image_digest }}",
-    "BUILD_RUN_ID": "${{ inputs.build_run_id }}",
-    "COMPOSE_SHADOW_SHA256": "${{ inputs.compose_shadow_sha256 }}",
-    "ACTIVATION_ID": "${{ inputs.activation_id }}",
-    "DESIRED_STATE": "${{ inputs.desired_state }}",
-    "WORKER_SHA256": "${{ inputs.worker_sha256 }}",
-    "VALIDATOR_SHA256": "${{ inputs.validator_sha256 }}",
-    "SHADOW_DOCUMENT_SHA256": "${{ inputs.shadow_document_sha256 }}",
+    "SOURCE_SHA": "${{ steps.resolve.outputs.source_sha }}",
+    "IMAGE_DIGEST": "${{ steps.resolve.outputs.image_digest }}",
+    "BUILD_RUN_ID": "${{ steps.resolve.outputs.build_run_id }}",
+    "COMPOSE_SHADOW_SHA256": "${{ steps.resolve.outputs.compose_shadow_sha256 }}",
+    "ACTIVATION_ID": "${{ steps.resolve.outputs.activation_id }}",
+    "DESIRED_STATE": "${{ steps.resolve.outputs.desired_state }}",
+    "WORKER_SHA256": "${{ steps.resolve.outputs.worker_sha256 }}",
+    "VALIDATOR_SHA256": "${{ steps.resolve.outputs.validator_sha256 }}",
+    "SHADOW_DOCUMENT_SHA256": "${{ steps.resolve.outputs.shadow_document_sha256 }}",
 }
 ACTIVATION_PARAMETER_ENV = {
     "DesiredState": "DESIRED_STATE",

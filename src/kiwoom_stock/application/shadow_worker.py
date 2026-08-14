@@ -28,6 +28,8 @@ from kiwoom_stock.application.shadow_lifecycle import (
     ShadowStopRequested,
     ShutdownDeadline,
     check_lifecycle,
+    shadow_session_remaining,
+    shadow_session_wait_until_open,
     signal_stop_event,
 )
 from kiwoom_stock.domain.models import (
@@ -514,9 +516,13 @@ def run_shadow_continuous(
     if lock_factory is None:
         raise ShadowWorkerError("shadow process lock adapter was not injected")
     event: StopEventPort = stop_event if stop_event is not None else Event()
+    session_remaining = shadow_session_remaining(clock())
     deadline = RunDeadline.start(
         clock=monotonic,
-        timeout_seconds=SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS,
+        timeout_seconds=max(
+            1.0,
+            min(SHADOW_CONTINUOUS_MAX_RUNTIME_SECONDS, session_remaining),
+        ),
     )
     signal_latch = SignalLatch(event, monotonic)  # type: ignore[arg-type]
     lifecycle = ContinuousLifecycle(
@@ -535,6 +541,15 @@ def run_shadow_continuous(
     previous_cycle_started: float | None = None
     previous_db_identity: str | None = None
     db_reopens = 0
+
+    def bounded_remaining() -> float:
+        remaining = lifecycle.remaining()
+        session_remaining_now = shadow_session_remaining(clock())
+        if session_remaining_now <= 0.0:
+            raise ShadowRunDeadlineExceeded(
+                "shadow KST session close deadline exceeded"
+            )
+        return min(remaining, session_remaining_now)
 
     def terminal(
         status: str,
@@ -567,11 +582,29 @@ def run_shadow_continuous(
                     if lifecycle.stop_requested():
                         return terminal("STOPPED", ShadowTerminalReason.STOP_REQUESTED)
                     try:
-                        lifecycle.remaining()
+                        remaining = bounded_remaining()
                     except ShadowRunDeadlineExceeded:
+                        if shadow_session_remaining(clock()) <= 0.0:
+                            current_date = clock().astimezone(_SEOUL).date()
+                            if calendar(current_date) is CalendarDecision.CLOSED:
+                                return terminal(
+                                    "CLOSED",
+                                    ShadowTerminalReason.CALENDAR_CLOSED,
+                                )
                         return terminal("DEADLINE", ShadowTerminalReason.RUN_DEADLINE)
                     except ShadowShutdownDeadlineExceeded:
                         return terminal("FAILED", ShadowTerminalReason.SHUTDOWN_DEADLINE)
+                    wait_until_open = shadow_session_wait_until_open(clock())
+                    if wait_until_open is not None:
+                        wait_seconds = min(
+                            SHADOW_CONTINUOUS_INTERVAL_SECONDS,
+                            wait_until_open,
+                            remaining,
+                        )
+                        if signal_latch.wait(wait_seconds):
+                            lifecycle.stop_requested()
+                            return terminal("STOPPED", ShadowTerminalReason.STOP_REQUESTED)
+                        continue
                     cycle_started = monotonic()
                     cycle_start_elapsed_seconds = round(
                         max(0.0, cycle_started - deadline.started_at), 6
@@ -589,7 +622,7 @@ def run_shadow_continuous(
                             clock=clock,
                             calendar=calendar,
                             stop_event=runtime_stop_event,  # type: ignore[arg-type]
-                            deadline_remaining=lifecycle.remaining,
+                            deadline_remaining=bounded_remaining,
                         )
                     except ShadowCycleTerminated as error:
                         last_closed = error.resources_closed
@@ -670,7 +703,7 @@ def run_shadow_continuous(
                     )
                     emit(cycle_evidence)
                     try:
-                        remaining = lifecycle.remaining()
+                        remaining = bounded_remaining()
                     except ShadowRunDeadlineExceeded:
                         return terminal("DEADLINE", ShadowTerminalReason.RUN_DEADLINE)
                     except ShadowShutdownDeadlineExceeded:
@@ -680,7 +713,7 @@ def run_shadow_continuous(
                         lifecycle.stop_requested()
                         return terminal("STOPPED", ShadowTerminalReason.STOP_REQUESTED)
                     try:
-                        lifecycle.remaining()
+                        bounded_remaining()
                     except ShadowRunDeadlineExceeded:
                         return terminal("DEADLINE", ShadowTerminalReason.RUN_DEADLINE)
                     except ShadowShutdownDeadlineExceeded:
