@@ -8,7 +8,8 @@ Slack notifications.
 
 The protected activation workflow has two weekday schedules:
 
-- `50 23 * * 1-5` UTC = 08:50 KST: start `shadow-continuous`.
+- `50 23 * * 0-4` UTC = 08:50 KST on the following day: start
+  `shadow-continuous` Monday-Friday KST.
 - `35 6 * * 1-5` UTC = 15:35 KST: issue `stop` for the same daily activation.
 
 GitHub Actions schedule delivery may be delayed. The worker therefore waits
