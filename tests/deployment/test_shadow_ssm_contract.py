@@ -404,6 +404,21 @@ def test_rollout_executor_send_target_drift_fails_closed(contract_root: Path):
     )
 
 
+def test_rollout_executor_fixed_identity_category_drift_fails_closed(
+    contract_root: Path,
+):
+    replace_once(
+        contract_root, ROLLOUT_EXECUTOR,
+        '"fixed-identity:lifecycle": "host_fixed_identity_lifecycle"',
+        '"fixed-identity:lifecycle": "unsafe_raw_lifecycle"',
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.executor.fixed_identity_categories",
+    )
+
+
 def test_rollout_executor_extra_send_site_fails_closed(contract_root: Path):
     replace_once(
         contract_root, ROLLOUT_EXECUTOR,
@@ -759,6 +774,40 @@ def test_rollout_document_artifact_target_drift_fails_closed(contract_root: Path
 
     assert_failure(
         run_checker(contract_root), 1, "rollout.document.artifact_wiring"
+    )
+
+
+def test_rollout_document_fixed_identity_marker_drift_fails_closed(
+    contract_root: Path,
+):
+    replace_once(
+        contract_root, ROLLOUT_DOCUMENT,
+        'reject("lifecycle")', 'reject("raw_docker_state")',
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.document.fixed_container_recovery",
+    )
+
+
+@pytest.mark.parametrize("replacement", [
+    'reject("raw-docker-state")',
+    'reject("lifecycle" + "")',
+    'reject("lifecycle"); reject("lifecycle")',
+    'reject("lifecycle"); print("fixed-identity:rogue")',
+])
+def test_rollout_document_nonliteral_or_duplicate_identity_reject_fails_closed(
+    contract_root: Path, replacement: str,
+):
+    replace_once(
+        contract_root, ROLLOUT_DOCUMENT,
+        'reject("lifecycle")', replacement,
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.document.fixed_container_recovery",
     )
 
 

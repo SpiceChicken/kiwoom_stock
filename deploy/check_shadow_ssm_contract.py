@@ -36,6 +36,34 @@ INSTANCE_ID = "i-02cb0a404794bd43a"
 ACTIVATION_DOCUMENT_NAME = "KiwoomStock-ShadowWorker"
 ROLLOUT_DOCUMENT_NAME = "KiwoomStock-ShadowWorkerRollout"
 TERMINAL_STATUSES = {"Success", "Failed", "Cancelled", "TimedOut"}
+FIXED_IDENTITY_CODES = {
+    "artifact_metadata", "binding_shape", "binding_value", "worker_hash",
+    "validator_hash", "inspect_shape", "lifecycle", "config_shape",
+    "labels_shape", "source_mode", "image", "activation", "command",
+    "runtime_security", "capabilities", "no_new_privileges",
+}
+FIXED_IDENTITY_FAILURE_CATEGORIES = {
+    f"fixed-identity:{code}": f"host_fixed_identity_{code}"
+    for code in FIXED_IDENTITY_CODES
+}
+FIXED_IDENTITY_REJECT_COUNTS = Counter({
+    "artifact_metadata": 2,
+    "binding_shape": 2,
+    "binding_value": 2,
+    "worker_hash": 1,
+    "validator_hash": 1,
+    "inspect_shape": 2,
+    "lifecycle": 1,
+    "config_shape": 1,
+    "labels_shape": 1,
+    "source_mode": 1,
+    "image": 1,
+    "activation": 1,
+    "command": 1,
+    "runtime_security": 1,
+    "capabilities": 1,
+    "no_new_privileges": 1,
+})
 
 ACTIVATION_INPUT_ENV = {
     "SOURCE_SHA": "${{ inputs.source_sha }}",
@@ -921,6 +949,10 @@ def _verify_rollout_executor(source: str) -> None:
     }
     if any(assignments.get(key) != value for key, value in expected_assignments.items()):
         raise ContractMismatch("rollout.executor.fixed_target")
+    if assignments.get("FIXED_IDENTITY_FAILURE_CATEGORIES") != (
+        FIXED_IDENTITY_FAILURE_CATEGORIES
+    ):
+        raise ContractMismatch("rollout.executor.fixed_identity_categories")
     path_values: dict[str, str] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -1754,9 +1786,39 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
         "fixed_container_recovery=removed",
     ]
     recovery_positions = [command.find(fragment) for fragment in recovery_fragments]
+    identity_header = (
+        '  if ! python3 - "$snapshot" "$binding" "$worker_target" '
+        '"$validator_target" <<\'PY\''
+    )
+    identity_lines = command.splitlines()
+    try:
+        identity_start = identity_lines.index(identity_header) + 1
+        identity_end = identity_lines.index("PY", identity_start)
+        identity_tree = ast.parse("\n".join(identity_lines[identity_start:identity_end]))
+    except (ValueError, SyntaxError):
+        raise ContractMismatch("rollout.document.fixed_container_recovery") from None
+    reject_counts: Counter[str] = Counter()
+    for call in (
+        node for node in ast.walk(identity_tree) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "reject"
+    ):
+        if (
+            len(call.args) != 1
+            or call.keywords
+            or not isinstance(call.args[0], ast.Constant)
+            or not isinstance(call.args[0].value, str)
+        ):
+            raise ContractMismatch("rollout.document.fixed_container_recovery")
+        reject_counts[call.args[0].value] += 1
     if (
         any(position < 0 for position in recovery_positions)
         or recovery_positions != sorted(recovery_positions)
+        or reject_counts != FIXED_IDENTITY_REJECT_COUNTS
+        or command.count(
+            'print(f"fixed-identity:{code}",file=sys.stderr)'
+        ) != 1
+        or command.count("fixed-identity:") != 1
+        or command.count("fixed stopped shadow identity validation failed") != 1
         or command.count(
             "docker container ls --all --filter "
             "'name=^/kiwoom-shadow-once$' --format '{{.Names}}'"
