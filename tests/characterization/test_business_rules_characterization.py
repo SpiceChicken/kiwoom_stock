@@ -497,11 +497,13 @@ class ExitPriorityCharacterizationTests(unittest.TestCase):
         friday_open = datetime(2026, 7, 17, 9, 0, 0)
         friday_deadline = datetime(2026, 7, 17, 15, 0, 0)
         friday_exit = datetime(2026, 7, 17, 15, 30, 0)
+        friday_after_close = datetime(2026, 7, 17, 15, 30, 1)
         saturday_open = datetime(2026, 7, 18, 10, 0, 0)
         sunday_open = datetime(2026, 7, 19, 10, 0, 0)
 
         self.assertTrue(strategy.is_monitoring_time(now=friday_open))
         self.assertTrue(strategy.is_monitoring_time(now=friday_exit))
+        self.assertFalse(strategy.is_monitoring_time(now=friday_after_close))
         self.assertFalse(strategy.is_monitoring_time(now=saturday_open))
         self.assertTrue(strategy.is_trading_window(now=friday_open))
         self.assertFalse(strategy.is_trading_window(now=friday_deadline))
