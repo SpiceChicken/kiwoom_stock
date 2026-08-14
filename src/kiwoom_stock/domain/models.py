@@ -248,6 +248,7 @@ class ShadowDecisionTelemetry:
     session_phase: str
     net_force_band: str
     current_velocity_band: str
+    thrust_band: str
     jerk_band: str
     strength_band: str
     trend_rsi_band: str
@@ -278,6 +279,10 @@ class ShadowDecisionTelemetry:
                 "STRONG_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE",
                 "STRONG_POSITIVE",
             },
+            "thrust_band": {
+                "BELOW_0_8", "FROM_0_8_TO_1_0", "FROM_1_0_TO_1_5",
+                "AT_LEAST_1_5",
+            },
             "jerk_band": {"NEGATIVE", "NEUTRAL", "POSITIVE"},
             "strength_band": {"BELOW_100", "AT_100", "ABOVE_100"},
             "trend_rsi_band": {"OVERSOLD", "NEUTRAL", "OVERBOUGHT"},
@@ -306,6 +311,26 @@ class ShadowDecisionTelemetry:
         ):
             raise ValueError("net-force reason requires negative force")
         if (
+            self.strategy_reason_code == "THRUST_LOW"
+            and self.thrust_band != "BELOW_0_8"
+        ):
+            raise ValueError("thrust-low reason requires below-0.8 thrust")
+        if (
+            self.strategy_reason_code == "CLIMAX_SHIELD"
+            and self.thrust_band != "AT_LEAST_1_5"
+        ):
+            raise ValueError("climax reason requires at-least-1.5 thrust")
+        if (
+            self.strategy_reason_code == "BREAKOUT_OVERRIDE"
+            and self.thrust_band not in {"FROM_1_0_TO_1_5", "AT_LEAST_1_5"}
+        ):
+            raise ValueError("breakout reason requires at-least-1.0 thrust")
+        if (
+            self.strategy_reason_code == "STALL_SHIELD"
+            and self.thrust_band != "FROM_0_8_TO_1_0"
+        ):
+            raise ValueError("stall reason requires 0.8-to-1.0 thrust")
+        if (
             self.strategy_reason_code == "JERK_NON_POSITIVE"
             and self.jerk_band == "POSITIVE"
         ):
@@ -332,6 +357,7 @@ class ShadowDecisionTelemetry:
             "session_phase": self.session_phase,
             "net_force_band": self.net_force_band,
             "current_velocity_band": self.current_velocity_band,
+            "thrust_band": self.thrust_band,
             "jerk_band": self.jerk_band,
             "strength_band": self.strength_band,
             "trend_rsi_band": self.trend_rsi_band,

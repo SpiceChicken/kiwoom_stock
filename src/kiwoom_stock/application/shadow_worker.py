@@ -42,10 +42,10 @@ from kiwoom_stock.utils.market_cal import (
 
 
 _SEOUL = ZoneInfo("Asia/Seoul")
-SHADOW_EVIDENCE_SCHEMA_VERSION = 2
+SHADOW_EVIDENCE_SCHEMA_VERSION = 3
 # Continuous evidence adds timing and database-reopen attestations without
 # changing the established one-shot evidence contract.
-SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 3
+SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 4
 
 
 class ShadowWorkerError(RuntimeError):

@@ -50,6 +50,7 @@ def _decision_telemetry():
         "session_phase": "ENTRY",
         "net_force_band": "POSITIVE",
         "current_velocity_band": "POSITIVE",
+        "thrust_band": "FROM_1_0_TO_1_5",
         "jerk_band": "NEUTRAL",
         "strength_band": "ABOVE_100",
         "trend_rsi_band": "NEUTRAL",
@@ -59,7 +60,7 @@ def _decision_telemetry():
 
 def _oneshot():
     return {
-        **_base(), "schema_version": 2, "status": "PASS",
+        **_base(), "schema_version": 3, "status": "PASS",
         "mode": "shadow-once", "kst_date": "2026-08-09", "calendar": "OPEN",
         "stock_code": "005930", "proxy_code": "069500", "cycles": 1,
         "http_attempts": 6,
@@ -80,7 +81,7 @@ def _oneshot():
 def _cycle():
     value = _oneshot()
     value.update({
-        "schema_version": 3, "event": "cycle", "mode": "shadow-continuous",
+        "schema_version": 4, "event": "cycle", "mode": "shadow-continuous",
         "cycle_index": 1, "elapsed_seconds": 0.25, "interval_seconds": 60.0,
         "cycle_start_elapsed_seconds": 0.0, "observed_interval_seconds": None,
         "db_reopened": False, "db_reopens": 0,
@@ -90,7 +91,7 @@ def _cycle():
 
 def _terminal():
     return {
-        **_base(), "schema_version": 3, "event": "terminal",
+        **_base(), "schema_version": 4, "event": "terminal",
         "status": "STOPPED", "mode": "shadow-continuous",
         "reason": "stop-requested", "elapsed_seconds": 120.0,
         "cycles": 2, "db_reopens": 1,

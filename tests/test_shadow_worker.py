@@ -68,6 +68,7 @@ def _decision_telemetry(**updates):
         "session_phase": "ENTRY",
         "net_force_band": "POSITIVE",
         "current_velocity_band": "POSITIVE",
+        "thrust_band": "FROM_1_0_TO_1_5",
         "jerk_band": "NEUTRAL",
         "strength_band": "ABOVE_100",
         "trend_rsi_band": "NEUTRAL",
@@ -83,6 +84,21 @@ from kiwoom_stock.infrastructure.shadow_process_lock import ShadowProcessLock
 from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.monitoring.engine import TradingEngine
 from kiwoom_stock.settings import Settings
+
+
+@pytest.mark.parametrize(
+    ("thrust", "expected"),
+    [
+        (0.79, "BELOW_0_8"),
+        (0.8, "FROM_0_8_TO_1_0"),
+        (1.0, "FROM_1_0_TO_1_5"),
+        (1.5, "AT_LEAST_1_5"),
+    ],
+)
+def test_shadow_thrust_telemetry_preserves_strategy_boundaries(
+    thrust, expected
+):
+    assert TradingEngine._thrust_band(thrust) == expected
 
 
 def _policy() -> ExecutionPolicy:
@@ -1134,6 +1150,7 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
     assert buy_receipt.decision_telemetry.position_before == "FLAT"
     assert buy_receipt.decision_telemetry.trading_window == "OPEN"
     assert buy_receipt.decision_telemetry.session_phase == "ENTRY"
+    assert buy_receipt.decision_telemetry.thrust_band == "FROM_1_0_TO_1_5"
     with sqlite3.connect(db_path) as connection:
         buy_row = connection.execute(
             "SELECT status, buy_time FROM trades WHERE stock_code = '005930'"
@@ -1170,6 +1187,7 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
     assert sell_receipt.decision_telemetry.position_before == "OPEN"
     assert sell_receipt.decision_telemetry.trading_window == "CLOSED"
     assert sell_receipt.decision_telemetry.session_phase == "EXIT_ONLY"
+    assert sell_receipt.decision_telemetry.thrust_band == "FROM_1_0_TO_1_5"
     with sqlite3.connect(db_path) as connection:
         sell_row = connection.execute(
             "SELECT status, sell_time, sell_reason FROM trades WHERE stock_code = '005930'"

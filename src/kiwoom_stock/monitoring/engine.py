@@ -226,6 +226,23 @@ class TradingEngine:
         return "STRONG_POSITIVE"
 
     @staticmethod
+    def _thrust_band(value: object) -> str:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise RuntimeError("shadow telemetry thrust is invalid")
+        numeric = float(value)
+        if numeric < 0.8:
+            return "BELOW_0_8"
+        if numeric < 1.0:
+            return "FROM_0_8_TO_1_0"
+        if numeric < 1.5:
+            return "FROM_1_0_TO_1_5"
+        return "AT_LEAST_1_5"
+
+    @staticmethod
     def _three_way_band(
         value: object, *, lower: float, upper: float, labels: tuple[str, str, str]
     ) -> str:
@@ -284,6 +301,7 @@ class TradingEngine:
             current_velocity_band=self._direction_band(
                 forces.get("current_velocity")
             ),
+            thrust_band=self._thrust_band(forces.get("thrust")),
             jerk_band=self._three_way_band(
                 forces.get("jerk"),
                 lower=0.0,
