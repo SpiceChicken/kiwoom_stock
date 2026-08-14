@@ -463,7 +463,7 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     triggers = workflow.get("on", workflow.get(True))
     assert set(triggers) == {"schedule", "workflow_dispatch"}
     assert triggers["schedule"] == [
-        {"cron": "50 23 * * 1-5"},
+        {"cron": "50 23 * * 0-4"},
         {"cron": "35 6 * * 1-5"},
     ]
     assert set(triggers["workflow_dispatch"]["inputs"]) == {

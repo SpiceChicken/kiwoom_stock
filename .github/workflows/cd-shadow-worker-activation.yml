@@ -5,7 +5,9 @@ on:
     # KST 08:50 and 15:35 on weekdays. The worker itself enforces the
     # absolute 15:30 KST session close; the latter job removes the stopped
     # container and records terminal evidence.
-    - cron: "50 23 * * 1-5"
+    # 23:50 UTC is 08:50 KST on the following calendar day; Sunday-Thursday
+    # UTC therefore maps to Monday-Friday KST.
+    - cron: "50 23 * * 0-4"
     - cron: "35 6 * * 1-5"
   workflow_dispatch:
     inputs:
@@ -121,7 +123,7 @@ jobs:
           set -euo pipefail
           if [[ "${EVENT_NAME}" == schedule ]]; then
             case "${EVENT_SCHEDULE}" in
-              '50 23 * * 1-5') desired_state=continuous ;;
+              '50 23 * * 0-4') desired_state=continuous ;;
               '35 6 * * 1-5') desired_state=stop ;;
               *) echo 'unexpected shadow schedule' >&2; exit 64 ;;
             esac
