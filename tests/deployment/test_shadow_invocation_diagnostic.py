@@ -15,7 +15,7 @@ COMMAND_ID = "00000000-0000-0000-0000-000000000001"
 
 def _terminal(**updates):
     value = {
-        "schema_version": 3,
+        "schema_version": 4,
         "event": "terminal",
         "status": "FAILED",
         "mode": "shadow-continuous",

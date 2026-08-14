@@ -57,7 +57,7 @@ DECISION_TELEMETRY_KEYS = {
     "market_regime", "strategy_reason_code", "strategy_intent", "paper_action",
     "position_before", "trading_window", "session_phase", "net_force_band",
     "current_velocity_band", "jerk_band", "strength_band", "trend_rsi_band",
-    "price_vwap_relation",
+    "thrust_band", "price_vwap_relation",
 }
 DIAGNOSTIC_TERMINAL_OUTCOMES = {
     ("FAILED", "failure"),
@@ -214,6 +214,17 @@ def _valid_decision_consistency(value: dict[str, object]) -> bool:
         and value.get("net_force_band") not in {"STRONG_NEGATIVE", "NEGATIVE"}
     ):
         return False
+    thrust_band = value.get("thrust_band")
+    if reason == "THRUST_LOW" and thrust_band != "BELOW_0_8":
+        return False
+    if reason == "CLIMAX_SHIELD" and thrust_band != "AT_LEAST_1_5":
+        return False
+    if reason == "BREAKOUT_OVERRIDE" and thrust_band not in {
+        "FROM_1_0_TO_1_5", "AT_LEAST_1_5",
+    }:
+        return False
+    if reason == "STALL_SHIELD" and thrust_band != "FROM_0_8_TO_1_0":
+        return False
     if reason == "JERK_NON_POSITIVE" and value.get("jerk_band") == "POSITIVE":
         return False
     if value.get("paper_action") == "BUY" and (
@@ -260,6 +271,10 @@ def _valid_decision_telemetry(value: object) -> bool:
         and value.get("current_velocity_band") in {
             "STRONG_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE",
             "STRONG_POSITIVE",
+        }
+        and value.get("thrust_band") in {
+            "BELOW_0_8", "FROM_0_8_TO_1_0", "FROM_1_0_TO_1_5",
+            "AT_LEAST_1_5",
         }
         and value.get("jerk_band") in {"NEGATIVE", "NEUTRAL", "POSITIVE"}
         and value.get("strength_band") in {
@@ -322,7 +337,7 @@ def _validate_oneshot(item: dict[str, object]) -> None:
     local_counts = item.get("local_counts")
     common = (
         type(item.get("schema_version")) is int
-        and item.get("schema_version") == 2
+        and item.get("schema_version") == 3
         and item.get("stock_code") == "005930"
         and item.get("proxy_code") == "069500"
         and _valid_date(item.get("kst_date"))
@@ -365,7 +380,7 @@ def _validate_cycle(item: dict[str, object]) -> None:
     )
     if (
         any(type(value) is not int for value in integer_fields)
-        or item.get("schema_version") != 3
+        or item.get("schema_version") != 4
         or item.get("event") != "cycle"
         or item.get("status") != "PASS"
         or item.get("cycle_index") != 1
@@ -436,7 +451,7 @@ def _validate_terminal_timing(
 def _validate_terminal(item: dict[str, object]) -> None:
     _validate_terminal_shape(item)
     if (
-        item.get("schema_version") != 3
+        item.get("schema_version") != 4
         or (item.get("status"), item.get("reason")) not in {
             ("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline"),
         }
@@ -450,7 +465,7 @@ def _validate_diagnostic_terminal(item: dict[str, object]) -> None:
 
     _validate_terminal_shape(item)
     outcome = (item.get("status"), item.get("reason"))
-    if item.get("schema_version") != 3 or outcome not in DIAGNOSTIC_TERMINAL_OUTCOMES:
+    if item.get("schema_version") != 4 or outcome not in DIAGNOSTIC_TERMINAL_OUTCOMES:
         raise EvidenceError("diagnostic_terminal_contract_invalid")
     if type(item.get("resources_closed")) is not bool:
         raise EvidenceError("diagnostic_terminal_resources_invalid")

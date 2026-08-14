@@ -74,6 +74,7 @@ def _decision_telemetry():
         session_phase="ENTRY",
         net_force_band="POSITIVE",
         current_velocity_band="POSITIVE",
+        thrust_band="FROM_1_0_TO_1_5",
         jerk_band="NEUTRAL",
         strength_band="ABOVE_100",
         trend_rsi_band="NEUTRAL",
@@ -700,12 +701,12 @@ def test_activation_evidence_binds_attested_numeric_version_and_pair_hashes():
     assert _run_activation_evidence_builder(validator_hash="bad").returncode != 0
 
 
-def test_one_shot_schema_2_production_serializer_round_trips_both_consumers(
+def test_one_shot_schema_3_production_serializer_round_trips_both_consumers(
     tmp_path,
 ):
     evidence = _oneshot_evidence()
-    assert SHADOW_EVIDENCE_SCHEMA_VERSION == 2
-    assert evidence["schema_version"] == 2
+    assert SHADOW_EVIDENCE_SCHEMA_VERSION == 3
+    assert evidence["schema_version"] == 3
     host = _run_host_oneshot_parser(evidence, tmp_path)
     workflow = _run_workflow_parser(evidence, "oneshot")
     assert host.returncode == 0, host.stderr
@@ -811,7 +812,7 @@ def test_host_and_workflow_reject_non_integer_or_invalid_cycle_schema(tmp_path):
         invalid.append(_cycle_evidence(**{field: 1.0}))
     invalid.extend(
         (
-            _cycle_evidence(schema_version=2),
+            _cycle_evidence(schema_version=3),
             _cycle_evidence(api_counts={**valid["api_counts"], "token": True}),
             _cycle_evidence(api_counts={**valid["api_counts"], "token": 1.0}),
             _cycle_evidence(local_counts={**valid["local_counts"], "status": True}),

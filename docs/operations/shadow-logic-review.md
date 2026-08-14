@@ -28,6 +28,8 @@ The telemetry fields are:
 - `session_phase`: `ENTRY`, `EXIT_ONLY`, or `CLOSED`.
 - `net_force_band`, `current_velocity_band`, and `jerk_band`: categorical
   direction evidence for the physics model.
+- `thrust_band`: the exact entry-rule range (`<0.8`, `0.8–<1.0`,
+  `1.0–<1.5`, or `>=1.5`) used to independently verify thrust locks.
 - `strength_band`, `trend_rsi_band`, and `price_vwap_relation`: categorical
   context for supply strength, momentum, and price location.
 
