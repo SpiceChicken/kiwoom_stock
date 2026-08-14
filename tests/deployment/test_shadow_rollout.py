@@ -48,6 +48,9 @@ def _host_evidence(action, rollout, installed):
         "binding_present": present, "binding_owner": "0:0" if present else "",
         "binding_mode": "600" if present else "", "binding_links": 1 if present else 0,
         "binding_regular": present, "binding_metadata_valid": True,
+        "fixed_container_recovery": (
+            "absent" if action == "install" else "not-requested"
+        ),
     }
 
 
@@ -194,36 +197,55 @@ def test_rendered_rollout_command_dispatches_argv_before_any_host_mutation():
     assert completed.stderr == "unsupported rollout action: unsupported-test-action\n"
 
 
-@pytest.mark.parametrize(
-    ("lifecycle", "docker_exit"),
-    [
-        ("running", 0),
-        ("stopped-after-deadline", 0),
-        ("label-missing", 0),
-        ("label-mismatch", 0),
-        ("operational-error", 55),
-    ],
-)
-def test_fixed_container_or_inventory_error_blocks_before_backup_download_publish(
-    tmp_path, lifecycle, docker_exit,
-):
+def _run_fixed_container_guard(tmp_path, lifecycle):
     worker = tmp_path / "worker"
     validator = tmp_path / "validator.py"
     binding = tmp_path / "binding.json"
     state = tmp_path / "state"
     lock = tmp_path / "rollout.lock"
-    worker.write_bytes(b"old-worker")
-    validator.write_bytes(b"old-validator")
-    binding.write_bytes(b"old-binding")
+    worker_bytes = b"old-worker"
+    validator_bytes = b"old-validator"
+    worker.write_bytes(worker_bytes)
+    worker.chmod(0o750)
+    validator.write_bytes(validator_bytes)
+    validator.chmod(0o750)
+    binding.write_text(json.dumps({
+        "source_sha": "a" * 40,
+        "worker_sha256": shadow_rollout.sha256(worker_bytes),
+        "validator_sha256": shadow_rollout.sha256(validator_bytes),
+        "shadow_document_sha256": "d" * 64,
+        "rollout_attempt_id": "111",
+    }), encoding="utf-8")
+    binding.chmod(0o600)
     tools = tmp_path / "tools"
     tools.mkdir()
     curl_marker = tmp_path / "curl-called"
+    removed_marker = tmp_path / "container-removed"
     docker = tools / "docker"
     docker.write_text(
-        "#!/usr/bin/env bash\n"
-        f"[[ \"$*\" == \"container ls --all --filter name=^/kiwoom-shadow-once$ --format {{{{.Names}}}}\" ]] || exit 91\n"
-        f"[[ {docker_exit} -eq 0 ]] || exit {docker_exit}\n"
-        "printf 'kiwoom-shadow-once\\n'\n",
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "args=sys.argv[1:]\n"
+        "lifecycle=os.environ['FIXED_CONTAINER_LIFECYCLE']\n"
+        "removed=pathlib.Path(os.environ['FIXED_CONTAINER_REMOVED'])\n"
+        "if args[:2]==['container','ls']:\n"
+        "    if lifecycle=='operational-error': raise SystemExit(55)\n"
+        "    if not removed.exists(): print('kiwoom-shadow-once')\n"
+        "    raise SystemExit(0)\n"
+        "if args[:2]==['container','inspect']:\n"
+        "    image='ghcr.io/spicechicken/kiwoom_stock@sha256:'+'e'*64\n"
+        "    activation='bounded-recovery-1'\n"
+        "    labels={'io.kiwoom.shadow.source-sha':'a'*40,'io.kiwoom.shadow.image-digest':image,'io.kiwoom.shadow.activation-id':activation,'io.kiwoom.shadow.mode':'shadow-continuous'}\n"
+        "    if lifecycle=='label-missing': labels.pop('io.kiwoom.shadow.activation-id')\n"
+        "    if lifecycle=='label-mismatch': labels['io.kiwoom.shadow.source-sha']='f'*40\n"
+        "    running=lifecycle=='running'\n"
+        "    value={'Name':'/kiwoom-shadow-once','State':{'Running':running,'Status':'running' if running else 'exited'},'Config':{'User':'0:0','Labels':labels,'Image':image,'Cmd':['python','-m','kiwoom_stock','shadow-worker','--source-sha','a'*40,'--image-digest',image,'--activation-id',activation]},'HostConfig':{'ReadonlyRootfs':True,'RestartPolicy':{'Name':'no'},'CapDrop':['ALL'],'CapAdd':['CHOWN','SETGID','SETUID'],'SecurityOpt':['no-new-privileges:true']}}\n"
+        "    print(json.dumps([value],separators=(',',':')))\n"
+        "    raise SystemExit(0)\n"
+        "if args[:2]==['rm','--'] and lifecycle=='valid-stopped':\n"
+        "    removed.touch()\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(91)\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -233,6 +255,7 @@ def test_fixed_container_or_inventory_error_blocks_before_backup_download_publis
         encoding="utf-8",
     )
     curl.chmod(0o755)
+    uid, gid = os.getuid(), os.getgid()
     command = _rendered_rollout_command().replace(
         "worker_target=/usr/local/sbin/kiwoom-shadow-worker",
         f"worker_target={worker}",
@@ -246,10 +269,19 @@ def test_fixed_container_or_inventory_error_blocks_before_backup_download_publis
         f"binding={binding}",
     ).replace(
         "lock=/run/lock/kiwoom-stock-shadow.lock", f"lock={lock}"
-    ).replace("-o root -g root ", "")
+    ).replace("-o root -g root ", "").replace(
+        "value.st_uid==0", f"value.st_uid=={uid}"
+    ).replace(
+        "value.st_gid==0", f"value.st_gid=={gid}"
+    ).replace(
+        'if [[ "$action" == install ]]; then prepare_fixed_container_for_install; fi',
+        'if [[ "$action" == install ]]; then prepare_fixed_container_for_install; exit 77; fi',
+    )
     environment = dict(os.environ)
     environment.update({
         "PATH": f"{tools}:{environment['PATH']}",
+        "FIXED_CONTAINER_LIFECYCLE": lifecycle,
+        "FIXED_CONTAINER_REMOVED": str(removed_marker),
         "SSM_Action": "install", "SSM_SourceSha": "a" * 40,
         "SSM_WorkerSha256": "b" * 64, "SSM_ValidatorSha256": "c" * 64,
         "SSM_ShadowDocumentSha256": "d" * 64,
@@ -261,14 +293,36 @@ def test_fixed_container_or_inventory_error_blocks_before_backup_download_publis
         ["bash", "-c", command], env=environment, check=False,
         capture_output=True, text=True, timeout=10,
     )
+    return completed, worker, validator, binding, curl_marker, removed_marker, state
+
+
+@pytest.mark.parametrize("lifecycle", [
+    "running", "label-missing", "label-mismatch", "operational-error",
+])
+def test_untrusted_fixed_container_blocks_before_backup_download_publish(
+    tmp_path, lifecycle,
+):
+    (completed, worker, validator, binding, curl_marker, removed_marker,
+     state) = _run_fixed_container_guard(tmp_path, lifecycle)
     assert completed.returncode != 0
     if lifecycle == "operational-error":
         assert "docker fixed shadow inventory failed" in completed.stderr
     else:
-        assert "fixed shadow container exists; artifact rollout blocked" in completed.stderr
+        assert "fixed stopped shadow identity validation failed" in completed.stderr
     assert worker.read_bytes() == b"old-worker"
     assert validator.read_bytes() == b"old-validator"
-    assert binding.read_bytes() == b"old-binding"
+    assert json.loads(binding.read_text(encoding="utf-8"))["source_sha"] == "a" * 40
+    assert not curl_marker.exists()
+    assert not removed_marker.exists()
+    assert not (state / "321").exists()
+
+
+def test_exact_stopped_fixed_container_is_removed_before_install(tmp_path):
+    (completed, _worker, _validator, _binding, curl_marker, removed_marker,
+     state) = _run_fixed_container_guard(tmp_path, "valid-stopped")
+    assert completed.returncode == 77
+    assert completed.stderr == ""
+    assert removed_marker.is_file()
     assert not curl_marker.exists()
     assert not (state / "321").exists()
 
@@ -384,6 +438,7 @@ def test_atomic_binding_publish_failure_restores_exact_prior_artifact_set(tmp_pa
     assert host_evidence["worker_metadata_valid"] is True
     assert host_evidence["validator_metadata_valid"] is True
     assert host_evidence["binding_metadata_valid"] is True
+    assert host_evidence["fixed_container_recovery"] == "absent"
     current = json.loads(binding.read_text(encoding="utf-8"))
     assert current["rollout_attempt_id"] == "789"
     assert current["worker_sha256"] == shadow_rollout.sha256(new_worker)
@@ -587,6 +642,52 @@ def test_aws_send_records_acceptance_terminal_status_and_exact_argv(monkeypatch)
         "comment": "kiwoom-shadow-rollout/123/local/install",
         "document_version": "2",
     }]
+
+
+@pytest.mark.parametrize(("action", "recovery"), [
+    ("install", "not-requested"),
+    ("readback", "removed"),
+    ("rollback", "absent"),
+    ("install", "unknown"),
+])
+def test_host_evidence_recovery_is_action_bound(monkeypatch, action, recovery):
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+        rollout_document_version="2",
+        rollout_document_canonical_sha256="9" * 64,
+    )
+    evidence = _host_evidence(action, rollout, True)
+    evidence["fixed_container_recovery"] = recovery
+    command_id = "00000000-0000-0000-0000-000000000001"
+    invocation = _poll_response(
+        rollout, command_id, Status="Success", ResponseCode=0,
+        StandardOutputContent=json.dumps(evidence),
+    )
+    adapter = shadow_rollout.AwsCli(shadow_rollout.time.monotonic() + 10)
+    monkeypatch.setattr(adapter, "poll", lambda *_args: invocation)
+    with pytest.raises(
+        shadow_rollout.RolloutError, match="host_evidence_recovery_invalid"
+    ):
+        adapter._finish_command(
+            action, rollout, {}, command_id, expect_tuple=True,
+        )
+
+
+def test_host_identity_excludes_install_recovery_observation():
+    rollout = shadow_rollout.RolloutTuple(
+        source_sha="a" * 40, worker_sha256="b" * 64,
+        validator_sha256="f" * 64, shadow_document_sha256="c" * 64,
+        shadow_document_raw_sha256="d" * 64,
+        rollout_document_sha256="e" * 64, rollout_attempt_id="123",
+    )
+    absent = _host_evidence("install", rollout, True)
+    removed = dict(absent, fixed_container_recovery="removed")
+    assert shadow_rollout._host_identity(absent) == shadow_rollout._host_identity(
+        removed
+    )
 
 
 @pytest.mark.parametrize(
@@ -1478,6 +1579,7 @@ def test_executor_orders_host_install_document_default_and_final_readback(monkey
     assert evidence["host_new"]["worker_metadata_valid"] is True
     assert evidence["host_new"]["validator_metadata_valid"] is True
     assert evidence["host_new"]["binding_metadata_valid"] is True
+    assert evidence["fixed_container_recovery"] == "absent"
     assert evidence["host_final"]["worker_owner"] == "0:0"
     assert evidence["host_final"]["validator_owner"] == "0:0"
     assert evidence["validator_sha256"] == shadow_rollout.sha256(

@@ -1744,6 +1744,33 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
     }
     if any(command.count(fragment) != 1 for fragment in required_fragments):
         raise ContractMismatch("rollout.document.artifact_wiring")
+    recovery_fragments = [
+        "prepare_fixed_container_for_install() {",
+        "docker container inspect \"$fixed_container\" >\"$snapshot\"",
+        "source!=binding[\"source_sha\"]",
+        "config.get(\"Cmd\")!=expected",
+        "host.get(\"ReadonlyRootfs\") is not True",
+        "docker rm -- \"$fixed_container\"",
+        "fixed_container_recovery=removed",
+    ]
+    recovery_positions = [command.find(fragment) for fragment in recovery_fragments]
+    if (
+        any(position < 0 for position in recovery_positions)
+        or recovery_positions != sorted(recovery_positions)
+        or command.count(
+            "docker container ls --all --filter "
+            "'name=^/kiwoom-shadow-once$' --format '{{.Names}}'"
+        ) != 2
+        or command.count(
+            'if [[ "$action" == install ]]; then '
+            "prepare_fixed_container_for_install; fi"
+        ) != 1
+        or command.count(
+            '"fixed_container_recovery":sys.argv[5]'
+        ) != 1
+        or recovery_positions[-1] >= command.find("if [[ \"$action\" == readback ]]")
+    ):
+        raise ContractMismatch("rollout.document.fixed_container_recovery")
     ordered_pipeline = [
         'shadow_worker_control.sh" -o "$downloaded"',
         'shadow_runtime_evidence.py" -o "$validator_downloaded"',
