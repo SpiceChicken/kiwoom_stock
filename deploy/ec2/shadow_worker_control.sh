@@ -296,7 +296,11 @@ pull_image() {
     local image="$1"
     local attempt
     for attempt in 1 2; do
-        if timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}"; then
+        # SSM stdout is an evidence channel. Docker progress (for example
+        # Compose's `[+]` records) is not evidence and can look like malformed
+        # JSON to the strict remote validator, so never stream it there.
+        if timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \
+            >/dev/null 2>&1; then
             return 0
         fi
         if docker image inspect "${image}" >/dev/null 2>&1; then
@@ -455,6 +459,7 @@ run_shadow_once() {
         --project-name kiwoom-stock-shadow \
         --project-directory "${WORK_DIR}" \
         --file "${compose_file}" up --abort-on-container-exit --exit-code-from app \
+        >/dev/null 2>&1 \
         || {
             emit_runtime_failure_sentinel "$(docker logs "${CONTAINER_NAME}" 2>&1 || true)" || true
             fail "shadow-once container failed or timed out"
@@ -501,6 +506,7 @@ run_shadow_continuous() {
         --project-name kiwoom-stock-shadow \
         --project-directory "${WORK_DIR}" \
         --file "${compose_file}" up --detach --no-build app \
+        >/dev/null 2>&1 \
         || fail "continuous shadow container failed to start"
     deadline=$(( $(date +%s) + FIRST_TICK_TIMEOUT_SECONDS ))
     while (( $(date +%s) < deadline )); do

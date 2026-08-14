@@ -307,6 +307,36 @@ def test_shadow_host_executor_is_shell_valid_and_bounded():
         assert forbidden not in text.casefold()
 
 
+def test_shadow_host_executor_keeps_unvalidated_docker_progress_off_ssm_stdout():
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert (
+        'timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \\\n'
+        '            >/dev/null 2>&1'
+    ) in text
+    assert (
+        '--file "${compose_file}" up --abort-on-container-exit --exit-code-from app \\\n'
+        '        >/dev/null 2>&1 \\'
+    ) in text
+    assert (
+        '--file "${compose_file}" up --detach --no-build app \\\n'
+        '        >/dev/null 2>&1 \\'
+    ) in text
+
+    progress = json.dumps({
+        "Status": "Success",
+        "ResponseCode": 0,
+        "StandardOutputContent": (
+            "[+] Running 1/1\n" + json.dumps(_oneshot_evidence())
+        ),
+    })
+    rejected = _run_validator(
+        progress, "shadow-once", "oneshot", "ssm-invocation"
+    )
+    assert rejected.returncode != 0
+    assert rejected.stderr == "shadow evidence invalid: record_json_invalid\n"
+
+
 def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters():
     document = yaml.safe_load(DOCUMENT.read_text(encoding="utf-8"))
     parameters = document["parameters"]
