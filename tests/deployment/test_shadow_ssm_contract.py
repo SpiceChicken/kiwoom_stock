@@ -791,14 +791,16 @@ def test_rollout_document_fixed_identity_marker_drift_fails_closed(
     )
 
 
-@pytest.mark.parametrize("replacement", [
-    'reject("raw-docker-state")',
-    'reject("lifecycle" + "")',
-    'reject("lifecycle"); reject("lifecycle")',
-    'reject("lifecycle"); print("fixed-identity:rogue")',
+@pytest.mark.parametrize(("replacement", "category"), [
+    ('reject("raw-docker-state")', "rollout.document.fixed_container_recovery"),
+    ('reject("lifecycle" + "")', "rollout.document.fixed_container_recovery"),
+    ('reject("lifecycle"); reject("lifecycle")',
+     "rollout.document.fixed_container_recovery"),
+    ('reject("lifecycle"); print("fixed-identity:rogue")',
+     "rollout.document.capability_contract"),
 ])
 def test_rollout_document_nonliteral_or_duplicate_identity_reject_fails_closed(
-    contract_root: Path, replacement: str,
+    contract_root: Path, replacement: str, category: str,
 ):
     replace_once(
         contract_root, ROLLOUT_DOCUMENT,
@@ -806,8 +808,168 @@ def test_rollout_document_nonliteral_or_duplicate_identity_reject_fails_closed(
     )
 
     assert_failure(
+        run_checker(contract_root), 1, category,
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("len(cap_drop)!=1", "len(cap_drop)<1"),
+        ("len(cap_add)!=3", "len(cap_add)<3"),
+        (
+            '{"CAP_CHOWN","CAP_SETGID","CAP_SETUID"}',
+            '{"CHOWN","CAP_SETGID","CAP_SETUID"}',
+        ),
+        (
+            "set(cap_add) not in (legacy_cap_add,canonical_cap_add)",
+            "set(cap_add)!=legacy_cap_add",
+        ),
+    ],
+)
+def test_rollout_document_capability_invariant_drift_fails_closed(
+    contract_root: Path, old: str, new: str,
+):
+    replace_once(contract_root, ROLLOUT_DOCUMENT, old, new)
+
+    assert_failure(
         run_checker(contract_root), 1,
-        "rollout.document.fixed_container_recovery",
+        "rollout.document.capability_contract",
+    )
+
+
+@pytest.mark.parametrize("insertion", [
+    'host["CapAdd"]=["CHOWN","SETGID","SETUID"]',
+    "raise SystemExit(0)",
+])
+def test_rollout_document_capability_authority_insertion_fails_closed(
+    contract_root: Path, insertion: str,
+):
+    baseline = run_checker(contract_root)
+    assert baseline.returncode == 0
+
+    capability_read = (
+        '          cap_drop=host.get("CapDrop"); cap_add=host.get("CapAdd")'
+    )
+    replace_once(
+        contract_root, ROLLOUT_DOCUMENT, capability_read,
+        f"          {insertion}\n{capability_read}",
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.document.capability_contract",
+    )
+
+
+def test_rollout_document_decoy_identity_heredoc_fails_closed(
+    contract_root: Path,
+):
+    baseline = run_checker(contract_root)
+    assert baseline.returncode == 0
+
+    text = read(contract_root, ROLLOUT_DOCUMENT)
+    guard_start_marker = (
+        '            if ! python3 - "$snapshot" "$binding" '
+        '"$worker_target" "$validator_target" <<\'PY\'\n'
+    )
+    guard_end_marker = '            docker rm -- "$fixed_container"'
+    guard_start = text.index(guard_start_marker)
+    guard_end = text.index(guard_end_marker, guard_start)
+    normal_guard = text[guard_start:guard_end]
+    guard_lines = normal_guard.splitlines(keepends=True)
+    identity_end = guard_lines.index("          PY\n")
+    bypassed_guard = "".join(
+        guard_lines[:1]
+        + ["          raise SystemExit(0)\n"]
+        + guard_lines[identity_end:]
+    )
+    decoy_and_bypassed_guard = (
+        "            if false; then\n"
+        f"{normal_guard}"
+        "            fi\n"
+        f"{bypassed_guard}"
+    )
+    assert text.count(normal_guard) == 1
+    (contract_root / ROLLOUT_DOCUMENT).write_text(
+        text.replace(normal_guard, decoy_and_bypassed_guard, 1),
+        encoding="utf-8",
+    )
+
+    document = yaml.safe_load(read(contract_root, ROLLOUT_DOCUMENT))
+    command = document["mainSteps"][0]["inputs"]["runCommand"][0]
+    syntax = subprocess.run(
+        ["bash", "-n"], input=command, check=False,
+        capture_output=True, text=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.document.capability_contract",
+    )
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (
+        "          prepare_fixed_container_for_install() {",
+        "          prepare_fixed_container_for_install() {\n"
+        "          prepare_fixed_container_for_install() {",
+    ),
+    (
+        '          if [[ "$action" == install ]]; then '
+        "prepare_fixed_container_for_install; fi",
+        '          if [[ "$action" == install ]]; then '
+        "prepare_fixed_container_for_install; fi\n"
+        '          if [[ "$action" == install ]]; then '
+        "prepare_fixed_container_for_install; fi",
+    ),
+    (
+        '          }\n          if [[ "$action" == install ]]; then '
+        "prepare_fixed_container_for_install; fi",
+        '          }\n          :\n          if [[ "$action" == install ]]; then '
+        "prepare_fixed_container_for_install; fi",
+    ),
+])
+def test_rollout_document_recovery_envelope_boundary_drift_fails_closed(
+    contract_root: Path, old: str, new: str,
+):
+    baseline = run_checker(contract_root)
+    assert baseline.returncode == 0
+
+    replace_once(contract_root, ROLLOUT_DOCUMENT, old, new)
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.document.capability_contract",
+    )
+
+
+def test_rollout_document_python_command_shadow_fails_closed(
+    contract_root: Path,
+):
+    baseline = run_checker(contract_root)
+    assert baseline.returncode == 0
+
+    function_header = "          prepare_fixed_container_for_install() {"
+    python_shadow = (
+        '          python3() { if [[ "$1" == - && "$#" -eq 5 ]]; then '
+        'return 0; fi; command python3 "$@"; }'
+    )
+    replace_once(
+        contract_root, ROLLOUT_DOCUMENT, function_header,
+        f"{python_shadow}\n{function_header}",
+    )
+
+    document = yaml.safe_load(read(contract_root, ROLLOUT_DOCUMENT))
+    command = document["mainSteps"][0]["inputs"]["runCommand"][0]
+    syntax = subprocess.run(
+        ["bash", "-n"], input=command, check=False,
+        capture_output=True, text=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    assert_failure(
+        run_checker(contract_root), 1,
+        "rollout.document.capability_contract",
     )
 
 
