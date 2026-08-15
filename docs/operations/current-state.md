@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-15 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-08-16 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다.
 
@@ -43,8 +43,9 @@
 ## 현재 단일 운영 호스트
 
 기존 live host를 대체하기 위해 생성한 clean-rebuild 호스트다. 호스트 자체의
-cloud-init/SSH/Docker/SSM 검증과 설정 전용 production-check만 완료했으며,
-shadow worker와 실제 credential은 설치하거나 시작하지 않았다.
+cloud-init/SSH/Docker/SSM 검증, 설정 전용 production-check와 shadow artifact
+rollout/read-back을 완료했으며, shadow worker와 실제 credential은 시작하거나
+사용하지 않았다.
 
 | 항목 | 현재 값/판정 |
 |---|---|
@@ -57,7 +58,7 @@ shadow worker와 실제 credential은 설치하거나 시작하지 않았다.
 | Root volume | `vol-046bee674877fd983`, 8 GiB gp3, encrypted |
 | Key pair | `kiwoom-ec2-ssh-20260815` |
 | State file | `/home/pc/kiwoom-rebuild-state-20260815-run1.txt`, mode `0600` |
-| Host validation | cloud-init complete, `sshd -t` valid, Docker/SSM active, containers 0 |
+| Host validation | cloud-init complete, `sshd -t` valid, Docker/SSM active, containers 0; shadow artifact read-back success |
 | Kiwoom REST API allowlist | `54.116.97.199` 등록 완료 (사용자 확인) |
 
 EC2 console의 `KeyName`이 비어 있어도 현재 SSH가 끊긴다는 뜻은 아니다. 승인된
@@ -74,15 +75,17 @@ password/kbd-interactive/root login을 막고 public-key login만 허용한다. 
 |---|---|
 | Automation target | `i-0e42e09d6c087ba29` / `54.116.97.199` |
 | Production-check document | `KiwoomStock-ProductionCheck`, default/latest `3` |
-| Shadow activation document | `KiwoomStock-ShadowWorker`, default/latest `4` |
+| Shadow activation document | `KiwoomStock-ShadowWorker`, default/latest `5` |
 | Shadow rollout document | `KiwoomStock-ShadowWorkerRollout`, default/latest `6` |
 | GitHub OIDC target policies | production-check, shadow-activation, shadow-rollout 3건을 후보 ARN으로 갱신 |
-| Candidate config check | attempt `31870050000`, `Configuration OK`, `production check passed` |
+| Candidate config check | attempt `31891989562`, `Configuration OK`, `production check passed` |
 | Shadow activation | 미수행; 컨테이너 0개, 실제 키움 credential 미사용 |
 
 AWS read-back은 새 target과 문서 기본 버전을 확인했다. 로컬 workflow·검증 코드의
-새 ID 전환은 GitHub `main`의 `a5af080`에 merge됐고, 새 release tuple은
-production-check run `31891218024`에서 설정 전용 검증을 통과했다. 현재 상태에서
+새 ID 전환은 GitHub `main`의 `a5af080`에 merge됐고, 최신 release tuple은
+production-check run `31891989562`에서 설정 전용 검증을 통과했다. shadow rollout
+run `31892087046`은 현재 호스트에 worker/validator와 binding을 설치하고
+read-back했으며, 고정 shadow container는 `absent`로 확인됐다. 현재 상태에서
 shadow activation을 수동으로 우회 실행하지 않는다.
 
 ## 완료된 호스트 작업
@@ -104,14 +107,18 @@ shadow activation을 수동으로 우회 실행하지 않는다.
 - 종료된 기존 호스트에서 수행했던 shadow worker/validator/rollout artifact
   read-back 기록은 historical evidence로만 보존한다. 현재 단일 운영 호스트에서는
   shadow worker를 시작하지 않았고 컨테이너는 0개다.
+- 현재 단일 운영 호스트에 최신 tuple의 shadow worker/validator와 canonical
+  activation-document binding을 설치했다. worker SHA, validator SHA, document SHA,
+  source SHA, 소유자/권한, binding metadata를 read-back했고 rollout evidence의
+  `fixed_container_recovery`는 `absent`였다.
 
 ## 현재 immutable release tuple
 
 | 항목 | 값 |
 |---|---|
-| Source SHA | `e7bcb52e6326aa5f2504bfa2d4d380a1f9c82929` |
-| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:d4a2ec31e5ac5be99c9dc170f2fd600bbd6486eb05ac6b0f6f3bcde3dc115534` |
-| Build run | `31890737108` |
+| Source SHA | `ac2fa3f32bc412b0228ca5d7ed4f0db93976a49a` |
+| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:2e0332866de46824da071ce0f55fe058a2a58c7beeb2fdfd934ecb46c6b0fc96` |
+| Build run | `31891577816` |
 | Compose SHA | `f9e22dd6e8a91782db4b1bebe6cf1ba8824ab1a38076181826e9b6aa9f0971ed` |
 | Production Compose SHA | `d5695a07a0c9f5f1ee5a8ed079b704a76bad3f6a576139b397341989c54b0c34` |
 | Worker SHA | `beae99b83ede9ad757c77b03f932d7770943fda7ac2fb119631fa91b1f12852d` |
@@ -119,12 +126,13 @@ shadow activation을 수동으로 우회 실행하지 않는다.
 | Shadow document SHA | `0304beaa41b705ec808f09fcade2055d300c6a82a8d4cd2ef9a04abaa082d559` |
 | Previous production check attempt | `31870000000` |
 | Candidate target config-check attempt | `31870050000` |
-| Current merged-source production check attempt | `31891218024` |
-| Shadow rollout attempt | `31870020000` |
+| Current merged-source production check attempt | `31891989562` |
+| Shadow rollout attempt | `31892087046` (install/read-back success) |
 
-이 tuple은 merged `main` source와 새 image의 최신 설정 전용 production-check
-통과 tuple이다. shadow activation 승인 자체는 아니며, 다음 단계에서 shadow
-rollout artifact와 protected activation preflight를 별도로 통과해야 한다.
+이 tuple은 merged `main` source와 새 image의 최신 설정 전용 production-check 및
+shadow artifact rollout/read-back 통과 tuple이다. shadow activation 승인 자체는
+아니며, 다음 단계에서 protected activation admission과 bounded session evidence를
+별도로 통과해야 한다.
 
 ## 다음 실제 장 운영 창
 
@@ -144,8 +152,8 @@ preflight·복구·read-back에만 사용한다.
 
 ## 현재 남은 차단 항목
 
-- 새 tuple의 shadow rollout artifact 설치/read-back과 bounded activation admission
-  evidence가 아직 없음;
+- 새 tuple의 protected bounded activation admission 및 실제 장중 session evidence가
+  아직 없음;
 - 실제 장중 장시간 shadow run의 cycle/DB reopen/정상 stop evidence 미확보;
 - 실제 Slack `DELIVERED` evidence와 기존 운영 Slack 채널의 end-to-end 확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
