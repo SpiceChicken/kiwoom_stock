@@ -81,9 +81,9 @@ password/kbd-interactive/root login을 막고 public-key login만 허용한다. 
 | Shadow activation | 미수행; 컨테이너 0개, 실제 키움 credential 미사용 |
 
 AWS read-back은 새 target과 문서 기본 버전을 확인했다. 로컬 workflow·검증 코드의
-새 ID 전환은 GitHub `main`의 `a5af080`에 merge됐다. 다음 실제 workflow 실행
-전에는 변경된 source에 대응하는 새 release tuple로 preflight해야 한다. 현재
-상태에서 shadow activation을 수동으로 우회 실행하지 않는다.
+새 ID 전환은 GitHub `main`의 `a5af080`에 merge됐고, 새 release tuple은
+production-check run `31891218024`에서 설정 전용 검증을 통과했다. 현재 상태에서
+shadow activation을 수동으로 우회 실행하지 않는다.
 
 ## 완료된 호스트 작업
 
@@ -109,22 +109,22 @@ AWS read-back은 새 target과 문서 기본 버전을 확인했다. 로컬 work
 
 | 항목 | 값 |
 |---|---|
-| Source SHA | `5f71f5baba06af72fb2968250329e49d4c9f1896` |
-| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:5b0ba7c7ae6ee4def8b78a61cc8f998a60537cc1d45801f12d55311a7152e4e1` |
-| Build run | `31863884409` |
+| Source SHA | `e7bcb52e6326aa5f2504bfa2d4d380a1f9c82929` |
+| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:d4a2ec31e5ac5be99c9dc170f2fd600bbd6486eb05ac6b0f6f3bcde3dc115534` |
+| Build run | `31890737108` |
 | Compose SHA | `f9e22dd6e8a91782db4b1bebe6cf1ba8824ab1a38076181826e9b6aa9f0971ed` |
 | Production Compose SHA | `d5695a07a0c9f5f1ee5a8ed079b704a76bad3f6a576139b397341989c54b0c34` |
-| Worker SHA | `b3785499a90338e2936916ff898c34f62fd5b752ed3dfa7b3edca8c4af74f30a` |
+| Worker SHA | `beae99b83ede9ad757c77b03f932d7770943fda7ac2fb119631fa91b1f12852d` |
 | Validator SHA | `dbdd2bc0caa428abdda8d2e1d261afc452e32a497166d9493f8692c4370f09e4` |
-| Shadow document SHA | `226429a41bca525444e0fa6ef63f8638f6da6a0be9ec2874f4085889d5c9db5d` |
+| Shadow document SHA | `0304beaa41b705ec808f09fcade2055d300c6a82a8d4cd2ef9a04abaa082d559` |
 | Previous production check attempt | `31870000000` |
 | Candidate target config-check attempt | `31870050000` |
+| Current merged-source production check attempt | `31891218024` |
 | Shadow rollout attempt | `31870020000` |
 
-이 tuple은 target binding 변경 전 release의 historical tuple이다. 다음
-rollout/activation에는 GitHub protected Environment와 host read-back을 거친 새
-source/image/worker/document tuple만 사용한다. 기존 tuple을 부분 수정하지
-않는다.
+이 tuple은 merged `main` source와 새 image의 최신 설정 전용 production-check
+통과 tuple이다. shadow activation 승인 자체는 아니며, 다음 단계에서 shadow
+rollout artifact와 protected activation preflight를 별도로 통과해야 한다.
 
 ## 다음 실제 장 운영 창
 
@@ -144,8 +144,8 @@ preflight·복구·read-back에만 사용한다.
 
 ## 현재 남은 차단 항목
 
-- merge된 `main` source에 대응하는 새 source/image/worker/document hash tuple을
-  발행하고 protected preflight해야 함;
+- 새 tuple의 shadow rollout artifact 설치/read-back과 bounded activation admission
+  evidence가 아직 없음;
 - 실제 장중 장시간 shadow run의 cycle/DB reopen/정상 stop evidence 미확보;
 - 실제 Slack `DELIVERED` evidence와 기존 운영 Slack 채널의 end-to-end 확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
