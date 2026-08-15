@@ -28,7 +28,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: kiwoom-stock-shadow-i-02cb0a404794bd43a
+  group: kiwoom-stock-shadow-i-0e42e09d6c087ba29
   cancel-in-progress: false
 
 env:

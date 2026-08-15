@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TrustExactLocalUserTemporarySession",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "Null": {
+          "aws:TokenIssueTime": "false"
+        }
+      }
+    }
+  ]
+}

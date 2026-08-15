@@ -4,6 +4,12 @@
 컨테이너가 읽는 임시 파일로 바꾸는 절차를 정의한다. 이 단계에서는 GitHub
 Actions가 Kiwoom 키를 읽지 않으며, 실제 주문도 활성화하지 않는다.
 
+현재 host의 사람이 수행하는 설치·점검 shell은 직접 SSH로 연다. SSM Agent와
+instance role은 Parameter Store read와 GitHub 자동화의 SSM control plane을 위해
+필요할 수 있지만, 사람이 이 절차를 위해 `aws ssm start-session`을 사용하지
+않는다. SSH 접속은 [로컬 AWS 접근 가이드](aws-local-access.md)의 고정 helper를
+사용한다.
+
 ## 전달 경계
 
 ```text
@@ -22,7 +28,8 @@ parameter 값은 명령행, shell history, systemd unit, GitHub 변수, stdout, 
 
 ## 설치 전 조건
 
-- EC2는 SSM Session Manager로 접속 가능해야 한다.
+- EC2는 현재 운영 기준의 직접 SSH로 접속 가능해야 한다. GitHub 자동화가
+  사용하는 SSM Agent는 별도로 `Online`이어야 한다.
 - instance role에는 `AmazonSSMManagedInstanceCore`를 연결하지 않고
   `ec2-ssm-core-no-parameter-read-policy.json.example`의 custom core를 사용해야
   한다. managed policy의 wildcard parameter read와 exact runtime allow를 함께
@@ -120,7 +127,8 @@ entrypoint가 source를 읽어 별도 tmpfs staging에 복사하고 그 staging 
 낮춘다. host source를 UID 10001 소유로 만들거나 strict provider 계약을 완화하지
 않는다.
 파일 내용, 길이, 일부 문자열을 로그나 검증 출력에 포함하지 않는다. 서비스 실패 시
-애플리케이션을 시작하지 않고 SSM command 결과와 비민감 오류만 수집한다.
+애플리케이션을 시작하지 않고 host command 결과와 비민감 오류만 수집한다. GitHub
+workflow가 실행한 SSM command의 결과는 command ID로 별도 조회한다.
 
 ## 교체와 롤백
 

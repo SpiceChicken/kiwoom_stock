@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 from typing import Any, cast
+from urllib.parse import quote
 
 import yaml
 
@@ -188,7 +189,7 @@ def test_shadow_rollout_role_is_separate_and_exact():
     ]
 
 
-def test_local_user_can_only_assume_exact_operator_role():
+def test_local_user_can_only_assume_exact_local_roles():
     statements = _statements(
         _policy("local-user-assume-role-policy.json.example")
     )
@@ -203,6 +204,15 @@ def test_local_user_can_only_assume_exact_operator_role():
         ),
     }
     assert statements[1] == {
+        "Sid": "AssumeExactLocalProvisionerRole",
+        "Effect": "Allow",
+        "Action": ["sts:AssumeRole"],
+        "Resource": (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/"
+            "kiwoom-local-provisioner"
+        ),
+    }
+    assert statements[2] == {
         "Sid": "AuthorizeExactSameDeviceLocalLogin",
         "Effect": "Allow",
         "Action": [
@@ -232,7 +242,7 @@ def test_local_operator_trust_requires_exact_user_and_temporary_session():
     }
 
 
-def test_local_operator_is_read_only_except_exact_shell_session():
+def test_local_operator_is_read_only_and_has_no_human_ssm_shell():
     statements = _statements(
         _policy("local-operator-policy.json.example")
     )
@@ -241,47 +251,13 @@ def test_local_operator_is_read_only_except_exact_shell_session():
         for statement in statements
         for action in statement["Action"]
     }
-    start_session = next(
-        statement
-        for statement in statements
-        if statement["Sid"] == "StartDefaultShellOnExactInstance"
-    )
-
     assert actions == {
-        "ssm:StartSession",
-        "ssmmessages:OpenDataChannel",
-        "ssm:ResumeSession",
-        "ssm:TerminateSession",
         "ec2:DescribeInstances",
         "ec2:DescribeInstanceStatus",
         "ssm:DescribeInstanceInformation",
         "ssm:DescribeSessions",
         "ssm:GetConnectionStatus",
         "ssm:GetCommandInvocation",
-    }
-    assert start_session["Resource"] == [
-        (
-            "arn:aws:ec2:<AWS_REGION>:<AWS_ACCOUNT_ID>:instance/"
-            "<EC2_INSTANCE_ID>"
-        ),
-        (
-            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
-            "SSM-SessionManagerRunShell"
-        ),
-    ]
-    own_session_resources = {
-        statement["Resource"]
-        for statement in statements
-        if statement["Sid"] in {
-            "OpenOwnSessionDataChannel",
-            "ResumeAndTerminateOwnSessions",
-        }
-    }
-    assert own_session_resources == {
-        (
-            "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:session/"
-            "${aws:userid}-*"
-        )
     }
     wildcard_statements = [
         statement for statement in statements if statement["Resource"] == "*"
@@ -292,13 +268,69 @@ def test_local_operator_is_read_only_except_exact_shell_session():
         == {"StringEquals": {"aws:RequestedRegion": "<AWS_REGION>"}}
         for statement in wildcard_statements
     )
-    assert "ssm:StartSession" in actions
+    assert "ssm:StartSession" not in actions
+    assert "ssmmessages:OpenDataChannel" not in actions
     assert "ssm:SendCommand" not in actions
     assert not {
         action for action in actions if action.startswith("ssm:GetParameter")
     }
     assert not {action for action in actions if action.startswith("iam:")}
     assert not {action for action in actions if action.startswith("kms:")}
+
+
+def test_local_provisioner_is_bounded_to_rebuild_and_passrole():
+    trust = _policy("local-provisioner-trust-policy.json.example")
+    trust_statement = _statements(trust)[0]
+    assert trust_statement["Principal"] == {
+        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
+    }
+    assert trust_statement["Condition"] == {
+        "Null": {"aws:TokenIssueTime": "false"}
+    }
+
+    policy = _policy("local-provisioner-policy.json.example")
+    statements = _statements(policy)
+    actions = {
+        action for statement in statements for action in statement["Action"]
+    }
+    assert "iam:PassRole" in actions
+    assert actions - {"iam:PassRole"}
+    assert not {action for action in actions if action.startswith("ssm:")}
+    assert not {action for action in actions if action.startswith("ssmmessages:")}
+    assert not {action for action in actions if action in {
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy",
+        "ec2:TerminateInstances", "ec2:DeleteVpc", "ec2:ReleaseAddress",
+    }}
+    pass_role = next(
+        statement for statement in statements if statement["Sid"] == "PassOnlyKiwoomEc2Role"
+    )
+    assert pass_role["Resource"] == (
+        "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-stock-ec2-role"
+    )
+    bootstrap = (ROOT / "deploy/bootstrap_local_provisioner.py").read_text(
+        encoding="utf-8"
+    )
+    assert "iam delete-role" not in bootstrap
+    assert "iam delete-role-policy" not in bootstrap
+    assert "refusing overwrite" in bootstrap
+    assert "put-user-policy" in bootstrap
+    assert "SignInLocalDevelopmentAccess" in bootstrap
+    assert "get-policy-version" in bootstrap
+    assert "list-attached-user-policies" in bootstrap
+    assert "list-groups-for-user" in bootstrap
+    assert "unexpected permissions" in bootstrap
+    assert "update-reviewed-policy" in bootstrap
+    assert "_is_reviewed_policy_revision" in bootstrap
+
+
+def test_local_provisioner_decodes_iam_policy_readbacks():
+    from deploy import bootstrap_local_provisioner
+
+    document = {"Version": "2012-10-17", "Statement": []}
+    assert bootstrap_local_provisioner._decode_policy_document(document) == document
+    assert bootstrap_local_provisioner._decode_policy_document(
+        quote(json.dumps(document))
+    ) == document
 
 
 def test_custom_ssm_document_only_invokes_preinstalled_allowlisted_command():
@@ -333,7 +365,7 @@ def test_custom_ssm_document_only_invokes_preinstalled_allowlisted_command():
         r"^[1-9][0-9]{0,19}$"
     )
     assert parameters["ExpectedInstanceId"]["allowedPattern"] == (
-        r"^i-02cb0a404794bd43a$"
+        r"^i-0e42e09d6c087ba29$"
     )
     assert parameters["Region"]["allowedPattern"] == r"^ap-northeast-2$"
     steps = document["mainSteps"]
@@ -397,7 +429,7 @@ def test_custom_ssm_document_shell_quotes_render_exact_host_argv(tmp_path):
             "SSM_PromotionAttemptId": "987654321",
             "SSM_ComposeSha256": compose_sha,
             "SSM_ComposeProdSha256": compose_prod_sha,
-            "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+            "SSM_ExpectedInstanceId": "i-0e42e09d6c087ba29",
             "SSM_Region": "ap-northeast-2",
         }
     )
@@ -431,7 +463,7 @@ def test_custom_ssm_document_shell_quotes_render_exact_host_argv(tmp_path):
         "--compose-prod-sha256",
         compose_prod_sha,
         "--expected-instance-id",
-        "i-02cb0a404794bd43a",
+        "i-0e42e09d6c087ba29",
         "--region",
         "ap-northeast-2",
     ]

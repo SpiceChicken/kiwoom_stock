@@ -10,7 +10,7 @@
     "ExpectedWorkerSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
     "ExpectedValidatorSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
     "ExpectedShadowDocumentSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
-    "ExpectedInstanceId": {"type":"String","allowedPattern":"^i-02cb0a404794bd43a$","interpolationType":"ENV_VAR"},
+    "ExpectedInstanceId": {"type":"String","allowedPattern":"^i-0e42e09d6c087ba29$","interpolationType":"ENV_VAR"},
     "Region": {"type":"String","allowedPattern":"^ap-northeast-2$","interpolationType":"ENV_VAR"}
   },
   "mainSteps": [{

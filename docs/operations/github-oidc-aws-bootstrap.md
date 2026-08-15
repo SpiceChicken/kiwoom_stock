@@ -32,6 +32,13 @@
   `AmazonSSMReadOnlyAccess`, `AmazonS3FullAccess`가 연결돼 있지 않다. 아래 전환
   절차는 broad policy가 남아 있는 다른 role 또는 재구축 시 적용하는 일반 절차다.
 
+현재 EC2 사람용 운영 접속은 SSH로 분리돼 있다. 대상은
+`i-0e42e09d6c087ba29`의 `ubuntu@54.116.97.199`이며, repository 밖 private key와
+관리 PC `/32` TCP 22 규칙을 사용한다. [`SSH 접근 가이드`](aws-local-access.md)를
+따른다. SSM Agent/SSM document는 GitHub production-check·shadow 자동화의
+backend로 유지되므로, SSH 전환은 CI의 SSM 권한을 제거하거나 host SSM Agent를
+끄는 작업이 아니다.
+
 ## OIDC subject 확정
 
 GitHub는 2026-07-15 이후 생성되었거나 별도로 opt-in한 repository에 immutable
@@ -179,8 +186,9 @@ reviewer/verifier가 검토하며, 차이를 자동 반영하지 않는다.
    `AmazonSSMManagedInstanceCore`, `AmazonS3FullAccess`를 모두 제거한다.
 11. 제거 직후 attached managed policy `0`, inline policy가 위 두 개뿐인지
    read-back한다. broad policy가 하나라도 남으면 materializer를 시작하지 않는다.
-12. 제한된 검증 창 안에 SSM Online, 새 Session Manager session, side effect 없는
-    `/usr/bin/true` RunCommand와 `GetCommandInvocation=Success`를 확인한다.
+12. 제한된 자동화 검증 창 안에 SSM Online, account-owned document의
+    side-effect 없는 `/usr/bin/true` RunCommand와 `GetCommandInvocation=Success`를
+    확인한다. 이것은 사람용 Session Manager shell 접속을 의미하지 않는다.
 13. exact 두 parameter의 `GetParameters` allow와 이웃/out-of-scope parameter
     deny를 IAM simulation 및 read-only validator로 확인한다.
 14. Kiwoom SecureString은 운영자가 숨김 입력으로 생성하며 GitHub workflow가 값을
@@ -202,6 +210,10 @@ release는 이전 tuple을 유지하거나 교체하지 않고 새 approval tupl
 GitHub의 job-scoped `GITHUB_TOKEN`과 workflow의 `packages: write` 권한을 사용한다.
 EC2는 public package를 익명으로 pull하므로 `ec2-runtime-policy.json.example`에도
 ECR action이 없다.
+
+사람이 수행하는 SSH preflight·복구는 이 GitHub OIDC role을 사용하지 않는다. SSH
+작업 결과를 GitHub evidence로 위조하거나, GitHub workflow가 실패한 뒤 local AWS
+role로 SSM command를 재전송하는 것은 금지한다.
 
 AWS가 현재 신뢰하는 CA로 GitHub OIDC TLS chain을 검증할 수 있으면 IAM이 provider
 생성 시 certificate 정보를 가져온다. thumbprint 값을 오래된 예제에서 복사하지

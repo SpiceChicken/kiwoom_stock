@@ -1,15 +1,36 @@
 # Deployment boundary
 
-The approved target for the first container deployment is:
+The current automation target for the first container deployment is:
 
-- EC2 instance `i-02cb0a404794bd43a` in `ap-northeast-2`;
-- SSM-only administration with no inbound security-group rule;
+- EC2 instance `i-0e42e09d6c087ba29` in `ap-northeast-2`;
+- human administration through restricted SSH (TCP 22 from the current operator
+  `/32` only); GitHub automation remains on the exact SSM command plane;
 - one public GHCR image selected by an exact OCI digest;
 - one ephemeral `python -m kiwoom_stock --check-config` container.
 
 This approval is **check-only**. It is not approval to start a worker, schedule a
 process, query an account, place or revoke an order, write a production database,
 or invoke Slack, S3, or Gemini.
+
+## Human access versus automation access
+
+The access planes are intentionally separate:
+
+- Human operators use [`tools/ssh-direct-shell.sh`](../../tools/ssh-direct-shell.sh)
+  with the repository-external `ubuntu` SSH key. The host SSH daemon is public-key
+  only, and the security group admits only the current administrator's `/32`.
+- The local AWS role is used for AWS identity, inventory, health and read-back. It
+  is not a substitute for the SSH shell and operators must not use
+  `aws ssm start-session` for routine host access.
+- Protected GitHub workflows still use account-owned SSM documents for
+  production-check, shadow rollout and shadow activation. Their exact document,
+  instance, parameter and timeout boundaries remain unchanged. Switching human
+  access to SSH did not migrate or remove this CI backend.
+- SSM Agent therefore remains active on the host. “SSH management” means the
+  human path, not that SSM is disabled globally.
+
+The current host, disk-recovery result, SSH hardening and release tuple are recorded
+in [current-state.md](current-state.md).
 
 ## Five separate activation boundaries
 
@@ -460,7 +481,7 @@ reusable after host-side rollback, while an incomplete private staging directory
 does not occupy the attempt ID and a different tuple fails closed.
 
 Rollout and activation share concurrency group
-`kiwoom-stock-shadow-i-02cb0a404794bd43a` with cancellation disabled. Rollout
+`kiwoom-stock-shadow-i-0e42e09d6c087ba29` with cancellation disabled. Rollout
 success is not activation approval. Until validator evidence proves real AWS/EC2
 bootstrap, install/read-back, negative IAM decisions, and rollback, the external
 path remains unverified.

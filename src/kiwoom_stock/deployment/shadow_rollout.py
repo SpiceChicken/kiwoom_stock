@@ -19,7 +19,7 @@ from typing import Callable, Mapping, Sequence
 
 REPOSITORY = "SpiceChicken/kiwoom_stock"
 REGION = "ap-northeast-2"
-INSTANCE_ID = "i-02cb0a404794bd43a"
+INSTANCE_ID = "i-0e42e09d6c087ba29"
 ROLLOUT_DOCUMENT = "KiwoomStock-ShadowWorkerRollout"
 SHADOW_DOCUMENT = "KiwoomStock-ShadowWorker"
 ROLLOUT_ROLE_NAME = "kiwoom-stock-github-shadow-rollout"
@@ -131,7 +131,7 @@ parameters:
     interpolationType: ENV_VAR
   ExpectedInstanceId:
     type: String
-    allowedPattern: '^i-02cb0a404794bd43a$'
+    allowedPattern: '^i-0e42e09d6c087ba29$'
     interpolationType: ENV_VAR
   Region:
     type: String
@@ -241,7 +241,7 @@ def expected_rollout_document(source: bytes | None = None) -> dict[str, object]:
         "ValidatorSha256": "^[0-9a-f]{64}$",
         "ShadowDocumentSha256": "^[0-9a-f]{64}$",
         "RolloutAttemptId": "^[1-9][0-9]{0,19}$",
-        "ExpectedInstanceId": "^i-02cb0a404794bd43a$",
+        "ExpectedInstanceId": "^i-0e42e09d6c087ba29$",
         "Region": "^ap-northeast-2$",
     }
     parameters: dict[str, object] = {

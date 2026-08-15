@@ -23,7 +23,7 @@ def test_cloud_init_converts_apt_sources_to_https_before_update():
 def test_cloud_init_installs_required_host_packages_and_docker():
     text = SCRIPT.read_text(encoding="utf-8")
     packages = (
-        "python3-venv", "ca-certificates", "curl", "docker.io",
+        "python3-venv", "ca-certificates", "curl", "openssh-server", "docker.io",
         "docker-compose-v2",
     )
     for package in packages:
@@ -39,6 +39,23 @@ def test_cloud_init_requires_and_starts_either_ssm_agent_unit():
     assert "amazon-ssm-agent unit is missing" in text
     assert 'systemctl enable "$ssm_unit"' in text
     assert 'systemctl start "$ssm_unit"' in text
+
+
+def test_cloud_init_hardens_and_starts_ssh():
+    text = SCRIPT.read_text(encoding="utf-8")
+    for setting in (
+        "PasswordAuthentication no",
+        "KbdInteractiveAuthentication no",
+        "PermitRootLogin no",
+        "PubkeyAuthentication yes",
+        "X11Forwarding no",
+        "AllowUsers ubuntu",
+    ):
+        assert setting in text
+    assert "install -d -m 0755 /run/sshd" in text
+    assert "sshd -t" in text
+    assert "systemctl enable ssh.service" in text
+    assert "systemctl restart ssh.service" in text
 
 
 def test_cloud_init_is_host_only_and_has_completion_marker():

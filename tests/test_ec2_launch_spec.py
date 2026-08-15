@@ -12,7 +12,7 @@ def _read(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_network_contract_is_minimal_and_https_only():
+def test_network_contract_is_minimal_ssh_admin_and_https_only():
     spec = _read(NETWORK)
     assert spec["vpc"] == {
         "cidrBlock": "10.77.0.0/20",
@@ -24,7 +24,14 @@ def test_network_contract_is_minimal_and_https_only():
         "availabilityZone": "ap-northeast-2a",
         "mapPublicIpOnLaunch": False,
     }
-    assert spec["securityGroup"]["ingress"] == []
+    assert spec["securityGroup"]["ingress"] == [
+        {
+            "ipProtocol": "tcp",
+            "fromPort": 22,
+            "toPort": 22,
+            "cidrIpv4": "<SSH_ADMIN_IPV4>/32",
+        }
+    ]
     assert spec["securityGroup"]["egress"] == [
         {
             "ipProtocol": "tcp",
@@ -52,7 +59,15 @@ def test_launch_contract_is_t3_micro_standard_and_hardened():
     assert spec["imageId"] == "ami-05fa22e12f2cb12aa"
     assert spec["instanceType"] == "t3.micro"
     assert spec["creditSpecification"] == {"cpuCredits": "standard"}
-    assert spec["keyPair"] == "omitted"
+    assert spec["keyPair"] == "<EC2_SSH_KEY_PAIR_NAME>"
+    assert spec["ssh"] == {
+        "user": "ubuntu",
+        "adminCidr": "<SSH_ADMIN_IPV4>/32",
+        "passwordAuthentication": False,
+        "keyboardInteractiveAuthentication": False,
+        "permitRootLogin": False,
+        "publicKeyAuthentication": True,
+    }
     assert spec["network"]["associatePublicIpAddress"] is False
     assert spec["metadataOptions"]["httpTokens"] == "required"
     assert spec["metadataOptions"]["httpPutResponseHopLimit"] == 1
@@ -105,8 +120,9 @@ def test_apply_artifact_revokes_default_egress_and_checks_postcondition():
     launch = text.index("run-instances")
     assert revoke < authorize < read_back < launch
     assert '"IpProtocol":"-1"' in text
-    assert "group.get(\"IpPermissions\") != []" in text
-    assert "group.get(\"IpPermissionsEgress\") != expected" in text
+    assert '\"FromPort\\":22' in text
+    assert "group.get(\"IpPermissions\") != expected_ingress" in text
+    assert "group.get(\"IpPermissionsEgress\") != expected_egress" in text
 
 
 def test_apply_artifact_preassociates_eip_to_eni_before_launch():
@@ -142,5 +158,18 @@ def test_apply_artifact_has_exact_launch_and_safe_failure_contract():
     )
     for value in required:
         assert value in text
-    assert "--key-name" not in text
+    assert '--key-name "$KEY_PAIR_NAME"' in text
+    assert "--key-pair-name" in text
+    assert "--ssh-admin-cidr" in text
     assert "docker compose up" not in text
+    assert "--count 1" in text
+    assert "--min-count" not in text
+    assert "--max-count" not in text
+
+
+def test_apply_artifact_tags_instance_and_volume_separately():
+    text = APPLY.read_text(encoding="utf-8")
+    assert text.count("--tag-specifications") >= 3
+    assert 'ResourceType=instance' in text
+    assert 'ResourceType=volume' in text
+    assert "ERROR_RECORDED=0" in text

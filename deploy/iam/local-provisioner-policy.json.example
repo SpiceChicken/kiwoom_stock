@@ -1,0 +1,118 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadRebuildInputs",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeAddresses",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "CreateRebuildNetwork",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AllocateAddress",
+        "ec2:CreateInternetGateway",
+        "ec2:CreateNetworkInterface",
+        "ec2:CreateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateSubnet",
+        "ec2:CreateVpc"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ConfigureOnlyTaggedRebuildResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AssociateAddress",
+        "ec2:AssociateRouteTable",
+        "ec2:AttachInternetGateway",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:CreateRoute",
+        "ec2:ModifySubnetAttribute",
+        "ec2:ModifyVpcAttribute",
+        "ec2:RevokeSecurityGroupEgress"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>",
+          "ec2:ResourceTag/Project": "kiwoom-stock",
+          "ec2:ResourceTag/Environment": "production",
+          "ec2:ResourceTag/ManagedBy": "deploy-ec2-clean-rebuild"
+        }
+      }
+    },
+    {
+      "Sid": "TagOnlyRebuildResources",
+      "Effect": "Allow",
+      "Action": ["ec2:CreateTags"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>",
+          "aws:RequestTag/Project": "kiwoom-stock",
+          "aws:RequestTag/Environment": "production",
+          "aws:RequestTag/ManagedBy": "deploy-ec2-clean-rebuild"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": ["Project", "Environment", "ManagedBy"]
+        }
+      }
+    },
+    {
+      "Sid": "RunExactRebuildInstanceContract",
+      "Effect": "Allow",
+      "Action": ["ec2:RunInstances"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        },
+        "StringEqualsIfExists": {
+          "ec2:ImageID": "ami-05fa22e12f2cb12aa",
+          "ec2:InstanceType": "t3.micro",
+          "ec2:MetadataHttpTokens": "required",
+          "aws:RequestTag/Project": "kiwoom-stock",
+          "aws:RequestTag/Environment": "production",
+          "aws:RequestTag/ManagedBy": "deploy-ec2-clean-rebuild"
+        }
+      }
+    },
+    {
+      "Sid": "PassOnlyKiwoomEc2Role",
+      "Effect": "Allow",
+      "Action": ["iam:PassRole"],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-stock-ec2-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

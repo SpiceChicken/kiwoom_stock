@@ -8,6 +8,12 @@
       "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-local-operator"
     },
     {
+      "Sid": "AssumeExactLocalProvisionerRole",
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole"],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-local-provisioner"
+    },
+    {
       "Sid": "AuthorizeExactSameDeviceLocalLogin",
       "Effect": "Allow",
       "Action": [

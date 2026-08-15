@@ -1,13 +1,31 @@
-# AWS EC2 수동 생성 가이드
+# AWS EC2 수동 생성·복구 가이드
 
-이 문서는 AWS 콘솔에서 Kiwoom 운영 호스트를 **한 단계씩 직접 생성**하는
-절차다. 자동 생성 스크립트는 사용하지 않는다. 각 단계가 끝날 때 생성된 ID를
+이 문서는 AWS 콘솔에서 Kiwoom 호스트를 **한 단계씩 직접 생성하거나 복구**하는
+절차다. [`apply_clean_rebuild.sh`](../../deploy/ec2/apply_clean_rebuild.sh)를
+사용하는 경우에는 이 콘솔 절차와 섞지 않는다. 각 단계가 끝날 때 생성된 ID를
 기록하고, 같은 단계를 두 번 실행하지 않는다.
 
-현재 `deploy/ec2/apply_clean_rebuild.sh`는 재실행 안전성 검토를 통과하지
-못했으므로 실행하지 않는다. 이 문서의 AWS 콘솔 절차만 사용한다.
+## 현재 live 호스트 우선 기준
 
-## 1. 이번에 만들 리소스
+현재 운영 대상은
+[`현재 운영 기준선`](current-state.md)에 기록된
+`i-0e42e09d6c087ba29`다. 사람용 접속은 `ubuntu@54.116.97.199`에 대한 직접 SSH이며,
+다음 helper를 사용한다.
+
+```bash
+./tools/ssh-direct-shell.sh
+```
+
+현재 live 호스트에는 관리 PC의 TCP 22 `/32` inbound와 public-key SSH가
+설정돼 있다. SSM Agent/SSM command는 GitHub 자동화와 health 확인 때문에 남아
+있으며, 사람용 Session Manager shell은 사용하지 않는다.
+
+이 문서의 아래 생성 절차와 [`apply_clean_rebuild.sh`](../../deploy/ec2/apply_clean_rebuild.sh)는
+SSH key pair 주입, 관리 `/32`, cloud-init SSH hardening, SG read-back을 포함하는
+현재 재생성 계약이다. `--check`는 로컬 검증만 수행하며, `--apply`는 별도 승인된
+재생성 창에서만 실행한다. 현재 live host에는 재실행하지 않는다.
+
+## 1. 재생성에서 만들 리소스
 
 다음 리소스만 만든다.
 
@@ -17,7 +35,7 @@
 | Public subnet | `kiwoom-prod-public-2a` | `10.77.0.0/24`, Seoul `2a` |
 | Internet Gateway | `kiwoom-prod-igw` | VPC에 1개 연결 |
 | Route table | `kiwoom-prod-public-rt` | `0.0.0.0/0 → IGW` |
-| Security Group | `kiwoom-prod-https-egress` | inbound 없음, outbound TCP 443 |
+| Security Group | `kiwoom-prod-https-egress` | inbound TCP 22 관리 `/32`, outbound TCP 443 |
 | Network Interface | `kiwoom-prod-primary-eni` | 위 subnet과 SG 사용 |
 | Elastic IP | `kiwoom-prod-eip` | 위 ENI에 먼저 연결 |
 | EC2 | `kiwoom-stock-prod` | Ubuntu 24.04, `t3.micro` |
@@ -30,7 +48,7 @@
 - Load Balancer
 - RDS
 - Bastion host
-- SSH key pair
+- repository 안에서 private SSH key를 생성하거나 저장
 - Snapshot
 - 추가 EIP 또는 임시 public IPv4
 - 유료 상세 모니터링과 CloudWatch Logs
@@ -269,6 +287,10 @@ Routes:
 
 ## 7. Security Group 만들기
 
+현재 live 호스트와 재생성 계약 모두 사람용 SSH를 위해 관리 PC의 TCP 22 `/32`가
+필요하다. 현재 SG 상태를 변경할 때는 [현재 운영 기준선](current-state.md)과
+AWS `describe-security-groups` read-back을 기준으로 판단한다.
+
 1. EC2 콘솔 또는 VPC 콘솔에서 `Security Groups`를 연다.
 2. `Create security group`을 누른다.
 3. 다음 값을 입력한다.
@@ -276,11 +298,16 @@ Routes:
 | 화면 항목 | 입력값 |
 |---|---|
 | Security group name | `kiwoom-prod-https-egress` |
-| Description | `Kiwoom production HTTPS egress only` |
+| Description | `Kiwoom production SSH admin and HTTPS egress` |
 | VPC | `kiwoom-prod-vpc` |
 
-4. `Inbound rules`에는 아무 규칙도 추가하지 않는다.
-   - SSH 22를 추가하지 않는다.
+4. `Inbound rules`에는 다음 규칙을 정확히 하나만 추가한다.
+
+| Type | Protocol | Port | Source |
+|---|---|---:|---|
+| SSH | TCP | 22 | 현재 관리 PC의 정확한 IPv4 `/32` |
+
+   - `0.0.0.0/0` SSH는 추가하지 않는다.
    - HTTPS 443 inbound도 추가하지 않는다.
 5. 기본 `Outbound rules`의 `All traffic / 0.0.0.0/0` 규칙을 삭제한다.
 6. outbound 규칙을 정확히 하나만 추가한다.
@@ -294,19 +321,23 @@ Routes:
 9. 생성 후 다시 열어 다음 상태를 확인한다.
 
 ```text
-Inbound rules: 0개
+Inbound rules: TCP 22, current-admin-ip/32 한 개
 Outbound rules: TCP 443, 0.0.0.0/0 한 개
 ```
 
 규칙이 다르면 ENI와 EC2를 만들기 전에 수정한다.
 
-### 7.1 잘못 연결한 default Security Group 교체
+### 7.1 잘못 연결한 default Security Group 교체 (historical legacy host)
 
 Security Group은 EC2가 실행 중이어도 교체할 수 있다. 기존 group부터 삭제하지
 말고, 올바른 group을 연결하는 작업과 기존 group을 제거하는 작업을 같은 변경
 화면에서 수행한다.
 
-2026-07-26 read-only 확인 기준 현재 상태:
+2026-07-26 read-only 확인 기준의 이전 host snapshot:
+
+이 표의 instance/ENI/default SG는 현재 live host의 상태가 아니다. 현재 live
+호스트의 SG와 SSH `/32`는 AWS read-back과 [current-state.md](current-state.md)를
+기준으로 확인한다.
 
 | 구분 | Security Group ID | Group name | 규칙 |
 |---|---|---|---|
@@ -454,7 +485,7 @@ App Key와 Secret Key는 이 문서, 채팅, 터미널 명령, AWS 태그에 기
 | AMI owner 확인 | Canonical `099720109477` |
 | Architecture | `64-bit (x86)` |
 | Instance type | `t3.micro` |
-| Key pair | `Proceed without a key pair` |
+| Key pair | 기존 승인된 `<EC2_SSH_KEY_PAIR_NAME>` |
 
 AMI 검색 결과의 owner가 Canonical이 아니거나 이름·아키텍처가 다르면 중단한다.
 
@@ -529,7 +560,7 @@ AMI 검색 결과의 owner가 Canonical이 아니거나 이름·아키텍처가 
 Instances: 1
 AMI: Canonical Ubuntu 24.04 amd64
 Instance type: t3.micro
-Key pair: 없음
+Key pair: 기존 승인된 EC2 SSH key pair
 Existing primary ENI: kiwoom-prod-primary-eni
 Public IP 자동 할당: 꺼짐
 Root disk: encrypted gp3 8 GiB
@@ -542,6 +573,26 @@ Additional disk: 없음
 생성된 `i-...` Instance ID와 `vol-...` Volume ID를 기록한다.
 
 ## 12. 생성 직후 확인
+
+### 12.0 현재 live 호스트 점검
+
+현재 호스트의 점검은 새 instance를 만들지 않고 SSH로 수행한다.
+
+```bash
+./tools/ssh-direct-shell.sh
+cloud-init status --wait
+sudo systemctl is-active docker.service
+sudo systemctl is-active snap.amazon-ssm-agent.amazon-ssm-agent.service
+df -h /
+df -ih /
+docker ps -a
+docker image ls
+```
+
+SSM Online은 GitHub 자동화의 control-plane health로 별도 확인할 수 있지만,
+사람용 shell을 위해 `aws ssm start-session`을 실행하지 않는다. 현재 host의
+production-check와 shadow rollout은 SSH transport로 사전 검증됐고, GitHub
+workflow의 canonical execution backend는 계속 SSM이다.
 
 ### 12.1 EC2 콘솔
 
@@ -579,14 +630,12 @@ EC2 instance 상세에서 다음 값을 확인한다.
   `ssmmessages`/`ec2messages` channel 권한
 - EC2 system log와 cloud-init log
 
-### 12.3 Session Manager 접속
+### 12.3 Session Manager health (자동화 의존성)
 
-1. EC2 instance를 선택한다.
-2. `Connect`를 누른다.
-3. `Session Manager` 탭을 선택한다.
-4. `Connect`를 누른다.
-
-SSH 22나 key pair는 필요하지 않다.
+사람용 shell 접속 단계가 아니다. Systems Manager의 managed-node가 `Online`인지
+확인하는 자동화 의존성 점검으로만 남긴다. 현재 live host와 새 호스트의 사람용
+접속은 앞의 12.0절 SSH 절차를 사용한다. SSM Online과 SSH 연결을 모두 확인하기
+전에는 application이나 secret을 설치하지 않는다.
 
 접속 후 다음 명령만 실행한다.
 
@@ -620,7 +669,8 @@ AWS control-plane의 `Encrypted` 값이 `false`이면 host 명령이 모두 성�
 운영 admission은 실패다. 기존 EBS volume의 암호화 여부는 실행 중에 제자리에서
 바꿀 수 없다.
 
-2026-07-26 실제 검증에서 다음 상태가 확인됐다.
+2026-07-26에 기록된 다음 값은 이전 암호화 교체 대상의 **historical record**다.
+현재 live host의 ID와 혼동하지 않는다.
 
 | 항목 | 실제값 | 판정 |
 |---|---|---|
@@ -676,7 +726,7 @@ EIP 주소가 유지되므로 Kiwoom 허용 IP를 다시 등록할 필요는 없
 - KMS key는 `aws/ebs`
 - root `Delete on termination=Yes`
 - IMDSv2 required, hop limit 1
-- key pair 없음
+- 승인된 EC2 SSH key pair가 launch request와 일치함
 - 동일한 cloud-init user data
 
 새 instance가 Running이 된 뒤 AWS 콘솔의 volume 상세에서 `암호화됨=예`를
@@ -689,7 +739,7 @@ API 검증 또는 애플리케이션 배포를 진행하지 않는다.
 
 - [ ] 새 EIP가 EC2 primary ENI에 연결됨
 - [ ] 새 EIP가 Kiwoom 허용 IP에 등록됨
-- [ ] Security Group inbound 0개
+- [ ] Security Group inbound TCP 22이 현재 관리 PC의 정확한 `/32` 하나
 - [ ] Security Group outbound TCP 443 한 개
 - [ ] `t3.micro`, CPU credit `standard`
 - [ ] encrypted gp3 8 GiB 한 개
@@ -735,7 +785,11 @@ API 검증 또는 애플리케이션 배포를 진행하지 않는다.
 - Docker image와 패키지 예상 크기를 먼저 확인한다.
 - 8 GiB 운영이 불가능하면 비용 예외 변경 전까지 배포를 중단한다.
 
-## 15. 전체 삭제 절차
+## 15. 전체 삭제 절차 (별도 철거 승인 전용)
+
+현재 live host에는 이 절차를 적용하지 않는다. 실제 철거는 shadow/secret/image/
+volume/EIP/SSH 영향 분석과 별도 승인을 받은 뒤 exact target read-back 후에만
+수행한다.
 
 완전히 철거할 때는 다음 순서를 지킨다.
 

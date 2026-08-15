@@ -420,7 +420,7 @@ def test_activation_prelock_prevents_old_inode_execution(tmp_path):
         "SSM_ExpectedWorkerSha256": "c" * 64,
         "SSM_ExpectedValidatorSha256": "e" * 64,
         "SSM_ExpectedShadowDocumentSha256": "d" * 64,
-        "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+        "SSM_ExpectedInstanceId": "i-0e42e09d6c087ba29",
         "SSM_Region": "ap-northeast-2",
     })
     activation = subprocess.Popen(

@@ -2,30 +2,6 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "StartDefaultShellOnExactInstance",
-      "Effect": "Allow",
-      "Action": ["ssm:StartSession"],
-      "Resource": [
-        "arn:aws:ec2:<AWS_REGION>:<AWS_ACCOUNT_ID>:instance/<EC2_INSTANCE_ID>",
-        "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/SSM-SessionManagerRunShell"
-      ]
-    },
-    {
-      "Sid": "OpenOwnSessionDataChannel",
-      "Effect": "Allow",
-      "Action": ["ssmmessages:OpenDataChannel"],
-      "Resource": "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:session/${aws:userid}-*"
-    },
-    {
-      "Sid": "ResumeAndTerminateOwnSessions",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:ResumeSession",
-        "ssm:TerminateSession"
-      ],
-      "Resource": "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:session/${aws:userid}-*"
-    },
-    {
       "Sid": "ReadEc2AndSsmInventory",
       "Effect": "Allow",
       "Action": [

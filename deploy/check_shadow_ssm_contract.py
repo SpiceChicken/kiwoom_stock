@@ -33,7 +33,7 @@ ROLLOUT_POLICY = Path("deploy/iam/github-shadow-rollout-policy.json.example")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 
 REGION = "ap-northeast-2"
-INSTANCE_ID = "i-02cb0a404794bd43a"
+INSTANCE_ID = "i-0e42e09d6c087ba29"
 ACTIVATION_DOCUMENT_NAME = "KiwoomStock-ShadowWorker"
 ROLLOUT_DOCUMENT_NAME = "KiwoomStock-ShadowWorkerRollout"
 TERMINAL_STATUSES = {"Success", "Failed", "Cancelled", "TimedOut"}
@@ -72,7 +72,7 @@ FIXED_CONTAINER_RECOVERY_ENVELOPE_SHA256 = (
     "13c311fc8d45049d11886f6dc228f002a934172bdc119d3534440f746b72a869"
 )
 ROLLOUT_COMMAND_SOURCE_SHA256 = (
-    "2a02c602a2aa36378b51ef84e60d37076229bb82df546e111d8f3500c9e0f106"
+    "e80216f350c6493627236821d22f66c55a73dc268b3b740175422eab7b74b5da"
 )
 
 ACTIVATION_INPUT_ENV = {
@@ -1616,7 +1616,7 @@ def _verify_migration_boundary(
     }:
         raise ContractMismatch("migration.workflow.inputs")
     if workflow.get("concurrency") != {
-        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "group": "kiwoom-stock-shadow-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }:
         raise ContractMismatch("migration.workflow.concurrency")

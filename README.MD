@@ -2,6 +2,11 @@
 
 본 프로젝트는 키움증권 REST API를 기반으로 주가의 움직임을 질량을 가진 물체의 운동($F=ma$)으로 치환하여 분석하는 **차세대 물리적 퀀트 트레이딩 시스템(Physics-based Quant System)**입니다.
 
+> 운영 기준: 현재는 **shadow-only / no-live-trading** 상태다. 실제 주문·취소·계좌
+> 조회는 운영하지 않으며, 승인된 bounded shadow 실행과 설정·읽기 전용 검증만
+> 허용한다. 현재 EC2·release tuple·SSH/SSM 경계는
+> [현재 운영 기준선](docs/operations/current-state.md)을 기준으로 한다.
+
 **🔥 Major Update v2.6.4: Zero-Price Shield & Fuel Exhaustion Shield**
 
 V2.6.4 업데이트는 거래소의 VI(변동성 완화장치) 발동 시 발생하는 API 데이터 오염을 방어하고, 후행성 지표의 착시로 인한 휩쏘(Whipsaw) 장세의 뇌동매매를 '실시간 거래량 가속도'로 썰어버리는 무결점 방어 체계 완성 버전입니다.
@@ -30,7 +35,10 @@ V2.6.4 업데이트는 거래소의 VI(변동성 완화장치) 발동 시 발생
 
 ### 3. 상태 관리 제로화 & 자동 부검 파이프라인 (Auto Post-Mortem)
 * **L1 Cache:** 트레이딩 스레드는 시간/타이머에 의존하지 않고, 메모리의 $V_{t-1}$ 상태값만 참조하여 실시간 연산(Zero Latency)합니다. 특히 V2.6.4부터는 **실시간 1분 누적 거래량 가속도**를 추적하여 연료 고갈을 판단합니다.
-* **L3 Auto Post-Mortem:** 메인 엔진 무한 루프가 정상 종료되면, 시스템이 자동으로 당일 매매의 1분봉 추출 ➔ 물리 역학 검증(`trade_validator`) ➔ Gemini LLM을 통한 아키텍트 총평 작성 ➔ Slack 알림으로 이어지는 단방향 자동 부검 파이프라인을 구동합니다.
+* **L3 Auto Post-Mortem:** 로컬/legacy 애플리케이션 경로에는 정상 종료 후 당일
+  분석·Gemini·Slack 부검 흐름이 남아 있다. 현재 운영 호스트에서는 이 runtime
+  경로와 worker를 활성화하지 않으며, shadow 상태 알림은 보호된 workflow에서
+  별도로 관리한다.
 
 ---
 
@@ -78,7 +86,7 @@ Kiwoom-Stock/
 └── main.py                 # process entrypoint
 ```
 
-구조와 외부 경계는 [docs/architecture.md](docs/architecture.md), 핵심 규칙은 [docs/business-rules.md](docs/business-rules.md), 설정 표는 [docs/configuration.md](docs/configuration.md)를 기준으로 확인합니다.
+구조와 외부 경계는 [docs/architecture.md](docs/architecture.md), 핵심 규칙은 [docs/business-rules.md](docs/business-rules.md), 설정 표는 [docs/configuration.md](docs/configuration.md)를 기준으로 확인합니다. 운영 경계는 [현재 운영 기준선](docs/operations/current-state.md)과 [deployment boundary](docs/operations/deployment-boundary.md)를 따른다.
 
 ---
 
@@ -112,6 +120,7 @@ python -m pytest
 전체 로컬 검증 명령은 [docs/testing.md](docs/testing.md)를 기준으로 실행합니다.
 Docker 기반 dev/prod 분리와 현재 배포 경계는 [docs/container-development.md](docs/container-development.md) 및 [docs/operations/deployment-boundary.md](docs/operations/deployment-boundary.md)를 참고합니다.
 수동 GHCR → EC2 설정 검사 절차는 [docs/operations/github-ec2-container-deployment.md](docs/operations/github-ec2-container-deployment.md)를 따릅니다.
+EC2 사람용 관리 접속은 [SSH 접근 가이드](docs/operations/aws-local-access.md)와 [직접 SSH helper](tools/ssh-direct-shell.sh)를 사용하며, GitHub 자동화의 보호된 SSM command 경계와 구분합니다.
 키움 App/Secret Key는 대화·Git·`.env`·CI에 입력하지 말고 [자격증명 관리 정책](docs/security/kiwoom-credential-management.md)과 [회전·사고 대응 절차](docs/operations/credential-rotation.md)를 따릅니다.
 
 ### 4. 실행
@@ -120,7 +129,9 @@ Docker 기반 dev/prod 분리와 현재 배포 경계는 [docs/container-develop
 python main.py
 ```
 
-*(실행 후 메인 루프가 정상 종료되면 자동으로 일일 부검 리포트가 Slack으로 발송됩니다.)*
+*(로컬 실행은 개발·검증 목적이다. 현재 운영 호스트에서 worker/매매 capability를
+활성화하지 않는다. shadow 상태 알림은 보호된 GitHub workflow 경계를 통해서만
+허용된다.)*
 
 ---
 

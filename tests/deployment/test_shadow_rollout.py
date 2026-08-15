@@ -113,7 +113,7 @@ def test_rollout_workflow_is_source_only_protected_and_serialized():
     assert "default" not in inputs["source_sha"]
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {
-        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "group": "kiwoom-stock-shadow-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }
     job = workflow["jobs"]["rollout"]
@@ -186,7 +186,7 @@ def test_rendered_rollout_command_dispatches_argv_before_any_host_mutation():
         "SSM_ValidatorSha256": "d" * 64,
         "SSM_ShadowDocumentSha256": "c" * 64,
         "SSM_RolloutAttemptId": "123",
-        "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+        "SSM_ExpectedInstanceId": "i-0e42e09d6c087ba29",
         "SSM_Region": "ap-northeast-2",
     })
     completed = subprocess.run(
@@ -329,7 +329,7 @@ def _run_fixed_container_guard(
         "SSM_WorkerSha256": "b" * 64, "SSM_ValidatorSha256": "c" * 64,
         "SSM_ShadowDocumentSha256": "d" * 64,
         "SSM_RolloutAttemptId": "321",
-        "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+        "SSM_ExpectedInstanceId": "i-0e42e09d6c087ba29",
         "SSM_Region": "ap-northeast-2",
     })
     completed = subprocess.run(
@@ -543,7 +543,7 @@ def test_atomic_binding_publish_failure_restores_exact_prior_artifact_set(tmp_pa
         "SSM_ValidatorSha256": shadow_rollout.sha256(new_validator),
         "SSM_ShadowDocumentSha256": "c" * 64,
         "SSM_RolloutAttemptId": "789",
-        "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+        "SSM_ExpectedInstanceId": "i-0e42e09d6c087ba29",
         "SSM_Region": "ap-northeast-2",
     })
     completed = subprocess.run(
@@ -669,7 +669,7 @@ def test_publish_failure_restores_absent_and_mixed_prior_artifact_sets(
         "SSM_ValidatorSha256": shadow_rollout.sha256(new_validator.read_bytes()),
         "SSM_ShadowDocumentSha256": "d" * 64,
         "SSM_RolloutAttemptId": "654",
-        "SSM_ExpectedInstanceId": "i-02cb0a404794bd43a",
+        "SSM_ExpectedInstanceId": "i-0e42e09d6c087ba29",
         "SSM_Region": "ap-northeast-2",
     })
     completed = subprocess.run(

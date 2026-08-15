@@ -19,9 +19,10 @@ mkdir -p "$STATE_DIR" "$APP_DIR" /etc/systemd/journald.conf.d /etc/docker
 chmod 0755 "$APP_DIR"
 rm -f "$COMPLETE_MARKER"
 
-# The dedicated security group permits outbound TCP 443 only. Ubuntu 24.04
-# may ship HTTP apt URIs, so switch every configured apt source to HTTPS before
-# the first network operation. The stock AMI must already contain the CA bundle.
+# The dedicated security group permits restricted SSH administration and outbound
+# TCP 443. Ubuntu 24.04 may ship HTTP apt URIs, so switch every configured apt
+# source to HTTPS before the first network operation. The stock AMI must already
+# contain the CA bundle.
 test -r /etc/ssl/certs/ca-certificates.crt || {
   echo 'CA certificate bundle is required before HTTPS apt bootstrap' >&2
   exit 1
@@ -37,7 +38,25 @@ fi
 
 apt-get update
 apt-get install --yes --no-install-recommends \
-  python3-venv ca-certificates curl docker.io docker-compose-v2
+  python3-venv ca-certificates curl openssh-server docker.io docker-compose-v2
+
+# The EC2 launch key pair installs the ubuntu public key. Keep the SSH daemon
+# usable only with that key and the security group's administrator /32 rule.
+install -d -m 0755 /etc/ssh/sshd_config.d
+install -d -m 0755 /run/sshd
+cat > /etc/ssh/sshd_config.d/99-kiwoom-ssh-hardening.conf <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+X11Forwarding no
+AllowUsers ubuntu
+EOF
+sshd -t
+systemctl enable ssh.service
+systemctl restart ssh.service
+systemctl is-active --quiet ssh.service
 
 systemctl enable docker.service
 systemctl start docker.service

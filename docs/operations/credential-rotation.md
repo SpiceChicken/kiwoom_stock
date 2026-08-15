@@ -14,6 +14,12 @@ static key pair를 교체하고 사고를 통제하는 순서만 정의한다.
 Key custody, delivery, inventory, CI/repository governance는
 [Kiwoom credential management](../security/kiwoom-credential-management.md)가 소유한다.
 
+이 문서에서 말하는 `key pair`는 Kiwoom API App Key/Secret Key pair다. EC2 관리용
+SSH key는 별도 자산이며 이 회전 절차와 섞지 않는다. SSH key는
+[로컬 AWS 접근 가이드](aws-local-access.md)의 `authorized_keys`·Security Group
+`/32` 절차로 교체한다. SSH key를 바꿔도 Kiwoom API credential rotation evidence가
+생긴 것으로 보지 않는다.
+
 ## 계획 회전
 
 1. 변경 window, mock/prod 환경, owner, rollback owner를 기록한다. prod key를 mock에 사용하지 않는다.

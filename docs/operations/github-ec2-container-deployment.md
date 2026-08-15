@@ -3,6 +3,14 @@
 이 문서는 현재 코드를 public GHCR에 올리고 EC2에서 **설정 검사만** 수행하는
 절차를 설명한다. 실제 worker와 매매 기능은 시작하지 않는다.
 
+현재 운영 기준선은
+[`current-state.md`](current-state.md)에 있다. 사람이 수행한 최근 host
+preflight/production-check는 직접 SSH transport로 완료했지만, GitHub protected
+workflow의 canonical production-check 실행 backend는 여전히 exact SSM document다.
+따라서 SSH 전환을 이유로 `ssm:SendCommand`, SSM document, OIDC role 또는
+자동화 경계를 제거하지 않는다. 이 문서의 GitHub 절차를 로컬 `aws ssm
+send-command`로 우회해서도 안 된다.
+
 ## 한눈에 보는 흐름
 
 ```text
@@ -17,7 +25,7 @@ manual protected promotion workflow
   → trusted executor checkout + fixed tuple/audit preflight
   → Node 24 OIDC outputs로 authoritative run/job/artifact/Compose/image 검증
   → single exact SSM command + credential clear + evidence upload
-  → i-02cb0a404794bd43a에서 잠금/자원/secret metadata 검사
+  → i-0e42e09d6c087ba29에서 잠금/자원/secret metadata 검사
   → network/운영 volume/실제 key 없는 digest image로 일회성 --check-config
   → current/previous full release tuple을 하나의 JSON으로 기록
   → terminal success/failure/cancel 뒤 approval tuple 3개 삭제 및
@@ -128,6 +136,9 @@ post-OIDC provenance, artifact, Compose 또는 image 검증 실패는 SSM 전에
 tag나 arbitrary command는 입력 또는 SSM parameter로 전달하지 않는다.
 
 ### 2.3 Stage I legacy bootstrap 완료 이력
+
+아래 값은 당시 release의 역사 기록이며 현재 release tuple이 아니다. 현재 tuple은
+`current-state.md`의 read-back 값을 사용한다.
 
 manifest 도입 전에 게시된 아래 tuple의 1회 production check는 Stage I에서 완료됐다.
 

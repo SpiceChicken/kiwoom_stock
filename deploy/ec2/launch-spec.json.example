@@ -9,7 +9,15 @@
   "creditSpecification": {"cpuCredits": "standard"},
   "minCount": 1,
   "maxCount": 1,
-  "keyPair": "omitted",
+  "keyPair": "<EC2_SSH_KEY_PAIR_NAME>",
+  "ssh": {
+    "user": "ubuntu",
+    "adminCidr": "<SSH_ADMIN_IPV4>/32",
+    "passwordAuthentication": false,
+    "keyboardInteractiveAuthentication": false,
+    "permitRootLogin": false,
+    "publicKeyAuthentication": true
+  },
   "iamInstanceProfile": {"name": "<EC2_INSTANCE_PROFILE_NAME>"},
   "network": {
     "subnetId": "<PUBLIC_SUBNET_ID>",
