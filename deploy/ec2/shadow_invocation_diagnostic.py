@@ -25,6 +25,16 @@ COMMAND_RE = re.compile(
 )
 SSM_STATUSES = {"Success", "Failed", "Cancelled", "TimedOut"}
 SAFE_FAILURE_MARKERS = (
+    ("shadow worker failed: image_pull_category=image_pull_no_space",
+     "image_pull_no_space"),
+    ("shadow worker failed: image_pull_category=image_pull_auth",
+     "image_pull_auth"),
+    ("shadow worker failed: image_pull_category=image_pull_not_found",
+     "image_pull_not_found"),
+    ("shadow worker failed: image_pull_category=image_pull_network",
+     "image_pull_network"),
+    ("shadow worker failed: image_pull_category=image_pull_failed",
+     "image_pull_failed"),
     ("shadow container is absent", "container_absent"),
     ("container image mismatch", "container_identity_mismatch"),
     ("container source SHA mismatch", "container_identity_mismatch"),
