@@ -80,11 +80,10 @@ password/kbd-interactive/root login을 막고 public-key login만 허용한다. 
 | Candidate config check | attempt `31870050000`, `Configuration OK`, `production check passed` |
 | Shadow activation | 미수행; 컨테이너 0개, 실제 키움 credential 미사용 |
 
-AWS read-back은 새 target과 문서 기본 버전을 확인했다. 로컬 workflow·검증 코드도
-새 ID로 갱신했지만, 해당 변경은 아직 GitHub `main`에 publish/merge하지 않았다.
-따라서 다음 실제 workflow 실행 전에는 이 변경을 보호된 main에 반영하고, 새
-release tuple로 preflight해야 한다. 현재 상태에서 shadow activation을 수동으로
-우회 실행하지 않는다.
+AWS read-back은 새 target과 문서 기본 버전을 확인했다. 로컬 workflow·검증 코드의
+새 ID 전환은 GitHub `main`의 `a5af080`에 merge됐다. 다음 실제 workflow 실행
+전에는 변경된 source에 대응하는 새 release tuple로 preflight해야 한다. 현재
+상태에서 shadow activation을 수동으로 우회 실행하지 않는다.
 
 ## 완료된 호스트 작업
 
@@ -122,10 +121,10 @@ release tuple로 preflight해야 한다. 현재 상태에서 shadow activation�
 | Candidate target config-check attempt | `31870050000` |
 | Shadow rollout attempt | `31870020000` |
 
-이 tuple은 다음 rollout/activation 전에 GitHub protected Environment와 host
-read-back으로 다시 대조한다. target binding 변경분이 아직 GitHub `main`에
-반영되지 않았으므로 현재 shadow activation 승인 tuple로 사용하지 않는다. 값이
-다르면 새 release로 취급하며 기존 tuple을 부분 수정하지 않는다.
+이 tuple은 target binding 변경 전 release의 historical tuple이다. 다음
+rollout/activation에는 GitHub protected Environment와 host read-back을 거친 새
+source/image/worker/document tuple만 사용한다. 기존 tuple을 부분 수정하지
+않는다.
 
 ## 다음 실제 장 운영 창
 
@@ -145,8 +144,8 @@ preflight·복구·read-back에만 사용한다.
 
 ## 현재 남은 차단 항목
 
-- 로컬 target 전환 변경을 GitHub protected `main`에 반영한 뒤 새 source/image/
-  worker/document hash tuple을 발행해야 함;
+- merge된 `main` source에 대응하는 새 source/image/worker/document hash tuple을
+  발행하고 protected preflight해야 함;
 - 실제 장중 장시간 shadow run의 cycle/DB reopen/정상 stop evidence 미확보;
 - 실제 Slack `DELIVERED` evidence와 기존 운영 Slack 채널의 end-to-end 확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
