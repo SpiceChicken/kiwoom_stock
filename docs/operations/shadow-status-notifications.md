@@ -5,6 +5,14 @@ not inside the Kiwoom application container. The runtime therefore keeps its
 existing `slack=false` side-effect contract and cannot import or call the legacy
 buy/sell/report notifier.
 
+The existing Slack operating information is reused only through the protected
+`production-shadow` notification path: prefer
+`KIWOOM_SHADOW_SLACK_WEBHOOK_URL`, with the documented `CONFIG_JSON.webhook_url`
+compatibility fallback until that migration is closed. This does not mean that
+all historical application Slack/report delivery is restored. A delivery claim
+requires the workflow's redacted `DELIVERED` evidence. See
+[current-state.md](current-state.md) for the current no-live-trading status.
+
 ## Secret boundary
 
 Create one incoming webhook dedicated to a shadow-operations Slack channel.

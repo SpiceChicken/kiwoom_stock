@@ -11,12 +11,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: kiwoom-stock-shadow-i-02cb0a404794bd43a
+  group: kiwoom-stock-shadow-i-0e42e09d6c087ba29
   cancel-in-progress: false
 
 env:
   AWS_REGION: ap-northeast-2
-  EC2_INSTANCE_ID: i-02cb0a404794bd43a
+  EC2_INSTANCE_ID: i-0e42e09d6c087ba29
   ROLLOUT_DOCUMENT_NAME: KiwoomStock-ShadowWorkerRollout
   SHADOW_DOCUMENT_NAME: KiwoomStock-ShadowWorker
   EVIDENCE_FILENAME: shadow-rollout-evidence.json

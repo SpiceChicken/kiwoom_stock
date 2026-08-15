@@ -75,7 +75,7 @@ def test_shadow_rollout_cd_has_exact_protected_source_only_wiring():
     triggers = workflow.get("on", workflow.get(True))
     assert set(triggers["workflow_dispatch"]["inputs"]) == {"source_sha"}
     assert workflow["concurrency"] == {
-        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "group": "kiwoom-stock-shadow-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }
     text = SHADOW_ROLLOUT_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -96,7 +96,7 @@ def test_shadow_migration_cd_is_separate_protected_and_always_audited():
         "expected_current_version", "expected_current_canonical_sha256",
     }
     assert workflow["concurrency"] == {
-        "group": "kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "group": "kiwoom-stock-shadow-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }
     job = workflow["jobs"]["migrate"]
@@ -381,7 +381,7 @@ def test_cd_candidate_is_manual_unprivileged_and_serialized_without_cancel():
     assert "default" not in source_input
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {
-        "group": "kiwoom-stock-production-check-i-02cb0a404794bd43a",
+        "group": "kiwoom-stock-production-check-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }
     assert build["permissions"] == {
@@ -581,7 +581,7 @@ def test_promotion_has_exact_inputs_permissions_and_protected_tuple():
     )
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {
-        "group": "kiwoom-stock-production-check-i-02cb0a404794bd43a",
+        "group": "kiwoom-stock-production-check-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }
     assert promote["permissions"] == {
@@ -762,7 +762,7 @@ def test_promotion_preserves_fixed_allowlists_and_no_business_credentials():
     assert "KIWOOM_APP_KEY" not in text
     assert "KIWOOM_SECRET_KEY" not in text
     assert "arn:aws:iam::380648615401" not in text
-    assert "i-02cb0a404794bd43a" in text
+    assert "i-0e42e09d6c087ba29" in text
     assert "ap-northeast-2" in text
     assert "AWS-RunShellScript" not in text
     assert ":latest" not in text

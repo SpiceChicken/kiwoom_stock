@@ -29,7 +29,7 @@ parameters:
   ExpectedInstanceId:
     type: String
     description: Exact approved EC2 instance
-    allowedPattern: '^i-02cb0a404794bd43a$'
+    allowedPattern: '^i-0e42e09d6c087ba29$'
     interpolationType: ENV_VAR
   Region:
     type: String

@@ -1,7 +1,9 @@
 # 로컬 AWS 접근 운영 가이드
 
 이 문서는 개인 개발 PC에서 AWS root 계정을 일상적으로 사용하지 않고, MFA로
-인증한 IAM 사용자와 최소 권한 역할을 통해 지정 EC2에 접근하는 방법을 설명한다.
+인증한 IAM 사용자와 최소 권한 역할을 통해 지정 EC2를 조회·복구하는 방법을
+설명한다. 현재 사람의 EC2 shell 접속은 직접 SSH로 수행하며, GitHub Actions의
+자동화 명령에만 SSM command plane을 사용한다.
 추가 유료 서비스, 장기 Access Key, IAM Identity Center/Organizations는 사용하지
 않는다.
 
@@ -15,18 +17,42 @@ kiwoom-local-user (IAM console user)
   ├─ console password + MFA
   ├─ access key 없음
   ├─ 서울 리전 same-device `aws login` OAuth 권한
-  └─ kiwoom-local-operator 역할만 AssumeRole
+  └─ kiwoom-local-operator·kiwoom-local-provisioner만 AssumeRole
 
 kiwoom-local-operator (IAM role)
-  ├─ 지정 EC2의 기본 Session Manager shell
   ├─ EC2/SSM 상태와 기존 command 결과 조회
+  ├─ SSH bootstrap에 필요한 EC2 read-back
   ├─ 임시 credential에서만 AssumeRole 허용
   └─ IAM 변경, Parameter Store 값 조회, 임의 SendCommand 권한 없음
 
+kiwoom-local-provisioner (IAM role, 관리자 1회 bootstrap 후 사용)
+  ├─ reviewed EC2 clean-rebuild의 서울 리전 인프라 생성·구성·read-back
+  ├─ 정확한 kiwoom-stock-ec2-role만 iam:PassRole
+  └─ IAM 변경, 삭제/종료/release, SSM shell/command, Parameter Store 조회 권한 없음
+
 GitHub OIDC roles
-  ├─ 기존 배포·production-check·shadow activation 경계 유지
+  ├─ production-check·shadow rollout·shadow activation의 보호된 SSM command
   └─ 별도 shadow rollout role로 worker/document pair만 갱신
 ```
+
+### 현재 사람용 접속 경계
+
+- 대상: `i-0e42e09d6c087ba29`, `ap-northeast-2`, `ubuntu@54.116.97.199`
+- 접속 도구: [`tools/ssh-direct-shell.sh`](../../tools/ssh-direct-shell.sh)
+- 개인키: repository 밖 `/home/pc/.ssh/kiwoom-recovery`, mode `0600`
+- 네트워크: 현재 PC의 관리용 TCP 22 `/32`만 허용하며 `0.0.0.0/0`은 허용하지
+  않는다.
+- SSH 정책: password/kbd-interactive/root login 금지, public-key login만 허용
+- 사람용 `aws ssm start-session`은 사용하지 않는다. SSM Agent와 SSM IAM은
+  GitHub 자동화·상태 확인을 위해 남아 있을 수 있으므로, 이를 “SSM 완전 제거”로
+  해석하지 않는다.
+- 저장소의 `local-operator-policy.json.example`은 사람용 SSM session 권한을
+  포함하지 않는다. AWS에 이미 연결된 inline policy를 교체·삭제하는 작업은
+  별도 관리자 IAM 변경과 read-back 대상이다.
+
+현재 키는 EC2 console의 `KeyName` launch metadata와 별개로 `ubuntu`의
+`authorized_keys`에 설치돼 있다. 키를 교체할 때는 새 키로 별도 SSH 연결을
+확인한 뒤 기존 키를 제거한다.
 
 `aws login` 세션은 영구 로그인이 아니다. 최대 12시간인 임시 세션이므로 만료 시
 IAM 사용자로 다시 로그인한다. 운영 역할은 role chaining 제한에 맞춰 1시간씩
@@ -37,9 +63,10 @@ root가 아니라 권한이 제한된 사용자를 이용하고, Access Key/Secr
 일상적인 shadow worker rollout과 activation은 로컬 CLI 작업이 아니다. protected
 `production-shadow` GitHub Environment의 required reviewer 승인 뒤 각 workflow가
 OIDC 단기 credential을 새로 발급받는다. 따라서 bootstrap이 검증된 뒤에는 이 두
-작업을 위해 `kiwoom-aws-login`을 반복할 필요가 없다. 로컬 profile은 임의 진단과
-Session Manager에만 유지하며, rollout 실패를 로컬 `send-command`나 장기 Access
-Key로 우회하지 않는다.
+작업을 위해 `kiwoom-aws-login`을 반복할 필요가 없다. 로컬 profile은 AWS
+read-only 진단, SG/instance read-back 및 승인된 SSH bootstrap 확인에만 사용한다.
+rollout 실패를 로컬 `send-command`, 사람용 Session Manager 또는 장기 Access Key로
+우회하지 않는다.
 
 ## 1. 저장소 템플릿 렌더링
 
@@ -48,6 +75,8 @@ Key로 우회하지 않는다.
 - `deploy/iam/local-user-assume-role-policy.json.example`
 - `deploy/iam/local-operator-trust-policy.json.example`
 - `deploy/iam/local-operator-policy.json.example`
+- `deploy/iam/local-provisioner-trust-policy.json.example`
+- `deploy/iam/local-provisioner-policy.json.example`
 
 렌더링 파일은 Git 저장소 밖의 임시 디렉터리에 둔다. 아래 값만 치환한다.
 
@@ -135,11 +164,14 @@ aws ssm describe-instance-information \
   --filters Key=PingStatus,Values=Online \
   --region ap-northeast-2 \
   --profile kiwoom-local
-aws ssm start-session \
-  --target <EC2_INSTANCE_ID> \
-  --region ap-northeast-2 \
-  --profile kiwoom-local
+
+# 사람용 shell은 SSM이 아니라 repository helper를 사용한다.
+./tools/ssh-direct-shell.sh
 ```
+
+`describe-instance-information`은 GitHub 자동화용 SSM Agent health 확인일 뿐
+사람용 접속 경로가 아니다. helper는 고정된 host/user를 다시 확인하고 private
+key를 출력하지 않는다.
 
 정상 caller ARN은 다음 형태다.
 
@@ -148,6 +180,13 @@ arn:aws:sts::<AWS_ACCOUNT_ID>:assumed-role/kiwoom-local-operator/kiwoom-local
 ```
 
 `arn:aws:iam::<AWS_ACCOUNT_ID>:root`가 나오면 잘못된 profile이므로 즉시 중단한다.
+
+EC2 재생성까지 로컬에서 자동화해야 하면 관리자 세션에서
+[로컬 provisioner 1회 bootstrap](local-provisioner-bootstrap.md)을 먼저 수행한다.
+현재 `kiwoom-local`과 `kiwoom-admin-bootstrap`은 `kiwoom-local-user` 및
+`kiwoom-local-operator`만 사용할 수 있으므로 이 bootstrap을 직접 수행할 권한이
+없다. bootstrap 뒤에는 별도 `kiwoom-provisioner` profile을 사용하고,
+일상 진단에는 기존 `kiwoom-local`을 계속 사용한다.
 
 ## 4. 허용·거부 검증
 
@@ -165,16 +204,16 @@ aws ssm get-connection-status \
   --profile kiwoom-local
 ```
 
-Session Manager 연결은 실제 주문·외부 API 호출을 하지 않는 shell 연결만 확인하고
-즉시 `exit`한다. 기존 Run Command 결과는 알고 있는 command ID에 대해서만
-`get-command-invocation`으로 조회한다.
+SSH 연결은 실제 주문·외부 API 호출을 하지 않는 shell 연결만 확인하고 필요한
+점검 후 `exit`한다. 기존 SSM Run Command 결과는 GitHub workflow가 만든 알고
+있는 command ID에 대해서만 `get-command-invocation`으로 조회한다.
 
 거부 검증은 값을 출력하지 않는 요청으로 수행한다. 아래 작업은 모두
 `AccessDenied`여야 한다.
 
 - `aws iam list-users --profile kiwoom-local`
 - `aws ssm get-parameter --name /kiwoom-stock/prod/oauth/app-key --with-decryption ...`
-- 다른 EC2 instance를 대상으로 한 `ssm start-session`
+- 사람용 `ssm start-session` 사용
 - `ssm send-command`
 
 Parameter Store 거부 검사에서 오류 메시지만 확인하고 응답이나 shell trace를
@@ -189,6 +228,9 @@ artifact에 저장하지 않는다.
   identity, `aws login` 임시 session 여부를 확인한다.
 - `kiwoom-login` 자체로 운영 명령을 실행하지 않는다.
 - GitHub Actions 배포 실패를 로컬 role의 권한 확대로 우회하지 않는다.
+- SSH host/user/key helper의 고정 계약을 임의로 바꾸지 않는다.
+- 디스크 부족 시 `docker system prune --volumes`를 실행하지 않는다. 먼저
+  [운영 runbook](runbook.md)의 label-scoped 정리 절차를 따른다.
 
 ## 6. 롤백
 
@@ -205,6 +247,18 @@ AWS 쪽 롤백은 다음 순서다.
 
 GitHub OIDC role, EC2 instance role, VPC/EIP/EBS는 이 작업의 대상이 아니므로 변경하거나
 롤백하지 않는다.
+
+SSH 접근 자체를 폐기할 때는 다음을 별도 승인된 변경으로 취급한다.
+
+1. 새 키를 `authorized_keys`에 추가하고 새 SSH 연결을 확인한다.
+2. Security Group의 새 관리 `/32`를 추가·read-back한다.
+3. 기존 키와 기존 `/32`를 제거한다.
+4. `sshd -t`, daemon reload/restart, 새 연결과 기존 연결 종료를 확인한다.
+
+EC2 재생성 시에는 `apply_clean_rebuild.sh --apply`에 기존 AWS EC2 key pair 이름과
+현재 관리 PC의 정확한 IPv4 `/32`를 전달한다. 스크립트는 key pair 존재 여부와 SG
+ingress/egress를 read-back한 뒤에만 instance를 시작하고, 현재 live host에는
+절대 재실행하지 않는다. 적용 전·후 SSH 신규 연결을 별도로 확인한다.
 
 ## 공식 근거
 

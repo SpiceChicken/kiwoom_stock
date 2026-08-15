@@ -1,7 +1,9 @@
 # Kiwoom production read-only validation
 
 This validator is an explicitly confirmed production smoke test for the
-existing market-analysis path. It authenticates and performs only five
+existing market-analysis path. The linked execution record is historical
+evidence from 2026-08-02; it does not describe the current human SSH access
+boundary or authorize a new run. It authenticates and performs only five
 allowlisted market reads. It cannot construct an account or order service,
 revoke a token, write a database, send a report, or notify an external system.
 It is not an activation or order-capability test.
@@ -21,10 +23,15 @@ It is not an activation or order-capability test.
 - Confirm the target stock code. The fixed regime proxy is KODEX 200
   (`069500`).
 
-The approved read-only execution record for the current EC2 host is tracked in
+The historical read-only execution record for the EC2 host is tracked in
 [`E2E-20260802-shadow-live-run.md`](../codex/validator/E2E-20260802-shadow-live-run.md).
 It performed market reads only; no order, account, revoke, database,
 notification, report, or deployment side effect was started.
+
+The current host access and release status are owned by
+[`current-state.md`](current-state.md). Human host access uses restricted SSH;
+this validator remains separately approved read-only work and must not be
+re-run without a new explicit validation window.
 
 ## Run
 

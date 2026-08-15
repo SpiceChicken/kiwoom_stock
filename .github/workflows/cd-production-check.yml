@@ -11,7 +11,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: kiwoom-stock-production-check-i-02cb0a404794bd43a
+  group: kiwoom-stock-production-check-i-0e42e09d6c087ba29
   cancel-in-progress: false
 
 env:
@@ -19,7 +19,7 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
   AWS_REGION: ap-northeast-2
   AWS_MAX_ATTEMPTS: "3"
-  EC2_INSTANCE_ID: i-02cb0a404794bd43a
+  EC2_INSTANCE_ID: i-0e42e09d6c087ba29
   GHCR_REPOSITORY: ghcr.io/spicechicken/kiwoom_stock
   MAX_RUNTIME_IMAGE_MIB: "850"
 

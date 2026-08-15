@@ -7,7 +7,7 @@ set -Eeuo pipefail
 
 readonly EXPECTED_REPOSITORY="SpiceChicken/kiwoom_stock"
 readonly IMAGE_PREFIX="ghcr.io/spicechicken/kiwoom_stock@sha256:"
-readonly EXPECTED_INSTANCE_ID="i-02cb0a404794bd43a"
+readonly EXPECTED_INSTANCE_ID="i-0e42e09d6c087ba29"
 readonly EXPECTED_REGION="ap-northeast-2"
 readonly SHADOW_COMPOSE_NAME="compose.shadow.yaml"
 readonly STATE_DIR="${KIWOOM_SHADOW_STATE_DIR:-/opt/kiwoom-stock/shadow}"

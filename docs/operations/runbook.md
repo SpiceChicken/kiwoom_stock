@@ -1,5 +1,67 @@
 # Operations runbook
 
+## EC2 SSH recovery and disk-full handling
+
+The current host is `i-0e42e09d6c087ba29` at `54.116.97.199`. Human shell access
+uses the repository helper and the repository-external recovery key:
+
+```bash
+./tools/ssh-direct-shell.sh
+```
+
+This is the human access path. Do not open a human Session Manager shell or use a
+local `ssm send-command` as a fallback. GitHub's protected workflows still use
+their exact SSM documents for automation; that separate plane must remain intact.
+
+For a `no space left on device` or failed SSM session, connect over SSH and inspect
+before deleting anything:
+
+```bash
+df -h /
+df -ih /
+sudo du -xhd1 /var/lib/docker /var/log /var/cache 2>/dev/null | sort -h
+docker ps -a
+docker image ls
+docker volume ls
+sudo journalctl --disk-usage
+```
+
+The approved cleanup order is:
+
+1. Remove only exited, explicitly labelled check-only containers.
+2. Remove unused Docker images after confirming the current and recorded rollback
+   digests are present or otherwise intentionally retained.
+3. Prune build cache only when it is not needed for an in-progress build.
+4. Vacuum journald within its configured bound if necessary.
+5. Re-check `df -h`, `df -ih`, Docker daemon health and the preserved volume.
+
+Never use `docker system prune --volumes` on this host. Do not delete the shadow
+named volume, host credential directory, release state or rollout backup while
+recovering disk space. If the current image or rollback identity is uncertain,
+stop and record the exact image/container/volume inventory instead of pruning.
+
+After cleanup, run only the side-effect-free production check or a protected
+shadow preflight. A recovered SSM Agent does not itself prove that the original
+session or rollout completed.
+
+## SSH hardening recovery
+
+The expected host configuration is public-key-only SSH with password,
+keyboard-interactive, root login and X11 forwarding disabled. Before restarting
+the daemon, validate the file and keep one existing session open:
+
+```bash
+sudo sshd -t
+sudo systemctl restart ssh
+```
+
+Open a second SSH connection before closing the first. For key rotation, add and
+verify the new public key first, then remove the old key and update the SG admin
+`/32`; never replace both access controls at once.
+
+The current release tuple, rollout attempt, disk result and host identity are
+maintained in [current-state.md](current-state.md).
+
 ## Shadow evidence validator skew
 
 Shadow activation and stop require the rollout evidence tuple's worker,

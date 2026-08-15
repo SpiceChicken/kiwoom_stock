@@ -151,7 +151,7 @@ def test_deploy_script_has_valid_shell_syntax_and_exact_cli_boundaries():
 def test_release_validators_accept_only_exact_tuple_values():
     valid = _source(
         f"validate_release_values {DIGEST_A!r} {SOURCE_A} {COMMON_A} {PROD_A}; "
-        "validate_instance_id i-02cb0a404794bd43a; "
+        "validate_instance_id i-0e42e09d6c087ba29; "
         "validate_region ap-northeast-2; echo accepted"
     )
     mutable = _source(

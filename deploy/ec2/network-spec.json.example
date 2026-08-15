@@ -21,8 +21,15 @@
   "securityGroup": {
     "dedicated": true,
     "revokeDefaultAllowAllEgressBeforeAuthorize": true,
-    "postcondition": "ingress=0; ipv4-egress=exactly tcp/443/0.0.0.0/0; ipv6-egress=0",
-    "ingress": [],
+    "postcondition": "ingress=exactly tcp/22/<SSH_ADMIN_IPV4>/32; ipv4-egress=exactly tcp/443/0.0.0.0/0; ipv6-egress=0",
+    "ingress": [
+      {
+        "ipProtocol": "tcp",
+        "fromPort": 22,
+        "toPort": 22,
+        "cidrIpv4": "<SSH_ADMIN_IPV4>/32"
+      }
+    ],
     "egress": [
       {"ipProtocol": "tcp", "fromPort": 443, "toPort": 443, "cidrIpv4": "0.0.0.0/0"}
     ]

@@ -552,7 +552,7 @@ def test_rollout_workflow_executor_argv_drift_fails_closed(contract_root: Path):
 def test_rollout_executor_send_target_drift_fails_closed(contract_root: Path):
     replace_once(
         contract_root, ROLLOUT_EXECUTOR,
-        'INSTANCE_ID = "i-02cb0a404794bd43a"',
+        'INSTANCE_ID = "i-0e42e09d6c087ba29"',
         'INSTANCE_ID = "i-00000000000000000"',
     )
 
@@ -624,7 +624,7 @@ def test_rollout_migration_positive_and_negative_contracts_fail_closed(
 def test_migration_workflow_concurrency_drift_fails_closed(contract_root: Path):
     replace_once(
         contract_root, MIGRATION_WORKFLOW,
-        "  group: kiwoom-stock-shadow-i-02cb0a404794bd43a",
+        "  group: kiwoom-stock-shadow-i-0e42e09d6c087ba29",
         "  group: unsafe-independent-migration",
     )
     assert_failure(run_checker(contract_root), 1, "migration.workflow.concurrency")

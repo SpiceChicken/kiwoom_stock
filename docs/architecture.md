@@ -36,6 +36,26 @@ from `application.session`; the composition root permits post-market work only f
 user-interrupt outcomes and exits `1` immediately for a kill-switch outcome. Every path that constructed an engine
 attempts engine shutdown before post-market routing or process exit.
 
+## 운영 control-plane 분리
+
+현재 EC2 운영은 사람과 자동화를 서로 다른 transport로 분리한다.
+
+```text
+operator PC ── restricted SSH ──> ubuntu@EC2
+GitHub OIDC ── exact SSM document ──> root host command
+```
+
+사람용 SSH는 host 점검·복구·read-back에만 사용하며 repository 밖 public key와
+관리 PC `/32` TCP 22 규칙을 요구한다. GitHub의 production-check, shadow rollout,
+shadow activation은 기존 보호된 OIDC+SSM document 경계를 유지한다. SSH 전환은
+SSM Agent나 CI용 SSM 권한을 제거한 것이 아니며, local operator가 CI 명령을
+재전송하는 우회 경로도 만들지 않는다.
+
+현재 운영 범위는 shadow-only다. 실제 주문·취소·계좌 조회 capability는 이
+architecture에 포함되지 않고, side-effect-free check와 bounded shadow evidence만
+승인 대상이다. 호스트·release tuple의 실제 값은
+[current-state.md](operations/current-state.md)가 소유한다.
+
 ## Composition roots
 
 - `kiwoom_stock.application.runtime.create_trading_runtime(...)`

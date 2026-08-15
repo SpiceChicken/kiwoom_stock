@@ -27,7 +27,7 @@ parameters:
     interpolationType: ENV_VAR
   ExpectedInstanceId:
     type: String
-    allowedPattern: '^i-02cb0a404794bd43a$'
+    allowedPattern: '^i-0e42e09d6c087ba29$'
     interpolationType: ENV_VAR
   Region:
     type: String
@@ -56,7 +56,7 @@ mainSteps:
           fixed_container=kiwoom-shadow-once
           fixed_container_recovery=not-requested
           backup="${state}/${attempt}"
-          [[ "$instance" == i-02cb0a404794bd43a && "$region" == ap-northeast-2 ]]
+          [[ "$instance" == i-0e42e09d6c087ba29 && "$region" == ap-northeast-2 ]]
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$worker_sha" =~ ^[0-9a-f]{64}$ && "$validator_sha" =~ ^[0-9a-f]{64}$ && "$document_sha" =~ ^[0-9a-f]{64}$ && "$attempt" =~ ^[1-9][0-9]{0,19}$ ]]
           case "$action" in install|readback|rollback) ;; *) printf 'unsupported rollout action: %s\n' "$action" >&2; exit 64 ;; esac
           install -d -o root -g root -m 0700 "$state"

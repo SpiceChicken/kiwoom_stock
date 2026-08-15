@@ -36,7 +36,7 @@ ROLE_ARN = (
     "role/kiwoom-stock-github-production-check"
 )
 REGION = "ap-northeast-2"
-INSTANCE_ID = "i-02cb0a404794bd43a"
+INSTANCE_ID = "i-0e42e09d6c087ba29"
 DOCUMENT_NAME = "KiwoomStock-ProductionCheck"
 MAX_IMAGE_MIB = 850
 AWS_MAX_ATTEMPTS = "3"
