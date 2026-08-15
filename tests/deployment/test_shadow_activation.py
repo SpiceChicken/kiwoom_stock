@@ -339,7 +339,7 @@ def test_shadow_host_executor_keeps_unvalidated_docker_progress_off_ssm_stdout()
 
     assert (
         'timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \\\n'
-        '            >/dev/null 2>&1'
+        '            >"${PULL_LOG}" 2>&1'
     ) in text
     assert (
         '--file "${compose_file}" up --abort-on-container-exit --exit-code-from app \\\n'

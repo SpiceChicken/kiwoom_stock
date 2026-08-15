@@ -38,6 +38,11 @@ MAX_ARTIFACT_BYTES = 65_536
 MAX_LEGACY_CONFIG_BYTES = 65_536
 MAX_RESPONSE_BYTES = 64
 SAFE_FAILURE_CATEGORIES = {
+    "image_pull_no_space",
+    "image_pull_auth",
+    "image_pull_not_found",
+    "image_pull_network",
+    "image_pull_failed",
     "container_absent",
     "container_identity_mismatch",
     "graceful_stop_timeout",

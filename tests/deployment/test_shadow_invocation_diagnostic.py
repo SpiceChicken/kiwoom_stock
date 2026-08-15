@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 SCRIPT = Path("deploy/ec2/shadow_invocation_diagnostic.py")
 SOURCE_SHA = "a" * 40
@@ -88,6 +90,36 @@ def test_failed_invocation_is_classified_without_reflecting_stderr():
     assert diagnostic["ssm_status"] == "Failed"
     assert diagnostic["ssm_response_code"] == 1
     assert diagnostic["terminal"] is None
+
+
+@pytest.mark.parametrize(
+    ("marker", "category"),
+    [
+        ("image_pull_no_space", "image_pull_no_space"),
+        ("image_pull_auth", "image_pull_auth"),
+        ("image_pull_not_found", "image_pull_not_found"),
+        ("image_pull_network", "image_pull_network"),
+        ("image_pull_failed", "image_pull_failed"),
+    ],
+)
+def test_image_pull_failure_is_classified_without_reflecting_docker_output(
+    marker, category,
+):
+    secret = "registry response must not be reflected"
+    completed = _run(
+        {
+            "Status": "Failed",
+            "ResponseCode": 1,
+            "StandardOutputContent": "",
+            "StandardErrorContent": (
+                f"shadow worker failed: image_pull_category={marker}\n"
+                f"{secret}\n"
+            ),
+        }
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert secret not in completed.stdout
+    assert json.loads(completed.stdout)["failure_category"] == category
 
 
 def test_safe_failed_terminal_is_reduced_to_an_allowlisted_summary():

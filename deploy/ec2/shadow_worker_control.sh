@@ -29,6 +29,7 @@ readonly VALIDATOR_PATH="/usr/local/libexec/kiwoom-shadow-runtime-evidence.py"
 
 ACTIVE_CONTAINER_NAME=""
 WORK_DIR=""
+PULL_LOG=""
 
 fail() {
     printf 'shadow worker failed: %s\n' "$1" >&2
@@ -294,22 +295,42 @@ validate_image_revision() {
 
 pull_image() {
     local image="$1"
-    local attempt
+    local attempt category
+    PULL_LOG="${WORK_DIR}/.image-pull.log"
     for attempt in 1 2; do
         # SSM stdout is an evidence channel. Docker progress (for example
         # Compose's `[+]` records) is not evidence and can look like malformed
-        # JSON to the strict remote validator, so never stream it there.
+        # JSON to the strict remote validator, so capture it without exposing
+        # the raw registry response.
         if timeout "${PULL_TIMEOUT_SECONDS}" docker pull "${image}" \
-            >/dev/null 2>&1; then
+            >"${PULL_LOG}" 2>&1; then
+            rm -f -- "${PULL_LOG}"
+            PULL_LOG=""
             return 0
         fi
         if docker image inspect "${image}" >/dev/null 2>&1; then
+            rm -f -- "${PULL_LOG}"
+            PULL_LOG=""
             return 0
         fi
         if [[ "${attempt}" == 1 ]]; then
             sleep 5
         fi
     done
+    if grep -Eqi 'no space left on device|disk quota exceeded' "${PULL_LOG}"; then
+        category=image_pull_no_space
+    elif grep -Eqi 'unauthorized|authentication required|denied' "${PULL_LOG}"; then
+        category=image_pull_auth
+    elif grep -Eqi 'manifest unknown|not found' "${PULL_LOG}"; then
+        category=image_pull_not_found
+    elif grep -Eqi \
+        'network is unreachable|no route to host|connection timed out|i/o timeout|TLS handshake timeout|temporary failure in name resolution|no such host' \
+        "${PULL_LOG}"; then
+        category=image_pull_network
+    else
+        category=image_pull_failed
+    fi
+    printf 'shadow worker failed: image_pull_category=%s\n' "${category}" >&2
     return 1
 }
 
@@ -427,6 +448,8 @@ confirm_continuous_tick() {
 
 cleanup_work_dir() {
     if [[ -n "${WORK_DIR}" ]]; then
+        rm -f -- "${PULL_LOG}" 2>/dev/null || true
+        PULL_LOG=""
         rm -f -- "${WORK_DIR}/${SHADOW_COMPOSE_NAME}" 2>/dev/null || true
         rmdir -- "${WORK_DIR}" 2>/dev/null || true
         [[ ! -e "${WORK_DIR}" ]] || return 1
