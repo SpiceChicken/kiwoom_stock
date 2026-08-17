@@ -149,7 +149,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.14"]
+        include:
+          - python-version: "3.11"
+            lock_suffix: "311"
+          - python-version: "3.14"
+            lock_suffix: "314"
 
     steps:
       - name: Checkout
@@ -164,12 +168,12 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
-            requirements/locks/dev-py${{ matrix.python-version }}.txt
+            requirements/locks/dev-py${{ matrix.lock_suffix }}.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --require-hashes \
-            -r "requirements/locks/dev-py${{ matrix.python-version }}.txt"
+            -r "requirements/locks/dev-py${{ matrix.lock_suffix }}.txt"
           python -m pip install --no-deps --no-build-isolation -e .
 
       - name: Verify authoritative shadow SSM contracts

@@ -296,7 +296,10 @@ def test_ci_quality_job_uses_supported_python_matrix_and_pip_cache():
     steps = quality["steps"]
 
     assert quality["needs"] == "secret-scan"
-    assert quality["strategy"]["matrix"]["python-version"] == ["3.11", "3.14"]
+    assert quality["strategy"]["matrix"]["include"] == [
+        {"python-version": "3.11", "lock_suffix": "311"},
+        {"python-version": "3.14", "lock_suffix": "314"},
+    ]
     assert any(step.get("uses") == CHECKOUT_ACTION for step in steps)
 
     setup_steps = [step for step in steps if step.get("uses") == SETUP_PYTHON_ACTION]
@@ -304,7 +307,7 @@ def test_ci_quality_job_uses_supported_python_matrix_and_pip_cache():
     assert setup_steps[0]["with"]["cache"] == "pip"
     assert setup_steps[0]["with"]["cache-dependency-path"] == (
         "pyproject.toml\n"
-        "requirements/locks/dev-py${{ matrix.python-version }}.txt\n"
+        "requirements/locks/dev-py${{ matrix.lock_suffix }}.txt\n"
     )
 
     run_blocks = "\n".join(step.get("run", "") for step in steps)
