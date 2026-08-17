@@ -16,6 +16,7 @@ from kiwoom_stock.infrastructure.kiwoom_market_only import (
 )
 from kiwoom_stock.application.runtime import RuntimeDisabledError
 from kiwoom_stock.core import config
+from kiwoom_stock.core.config import report_output_dir_for
 from kiwoom_stock.infrastructure.reporting import (
     CollectorMinuteChartSource,
     CsvReportArtifactStore,
@@ -94,7 +95,7 @@ def _extract_and_save_1min_chart(
 
         minute_source = CollectorMinuteChartSource(collector)
         artifact_store = CsvReportArtifactStore(
-            Path(config_module.OUTPUT_DIR_STR),
+            report_output_dir_for(settings, now.date(), config_module),
             target_logger=target_logger,
         )
         saved_files = []

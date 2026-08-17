@@ -465,6 +465,14 @@ class PaperLedgerCharacterizationTests(unittest.TestCase):
             6.25,
         )
 
+    def test_legacy_score_label_remains_percentage_points(self):
+        manager = StockManager(_ForbiddenExternalFacade(), _PositionOnlyDatabase(), filter_config={})
+        manager.active_positions = {"A": Position(id=1, stock_code="A", stock_name="A",
+                                                   buy_price=100.0, sell_price=103.0,
+                                                   buy_time="2026-07-17 10:00:00",
+                                                   buy_regime="STABLE_BULL")}
+        self.assertEqual(manager.calculate_cumulative_trade_return_score(0.0), 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

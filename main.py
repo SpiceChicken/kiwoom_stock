@@ -2,9 +2,10 @@ import sys
 import logging
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from kiwoom_stock.application.lifecycle import (
+    DailyReporterLike,
     notify_monitor_crashed,
     notify_monitor_started,
     run_post_market_tasks,
@@ -139,19 +140,23 @@ def _close_runtime(runtime: Any) -> None:
         )
 
 
-def _reporter_factory_for_runtime(runtime: Any, monitor: Any) -> Callable[[Any], Any]:
+def _reporter_factory_for_runtime(
+    runtime: Any, monitor: Any
+) -> Callable[[Any], DailyReporterLike]:
     """Create the post-market reporter without doing I/O during import.
 
     The legacy class remains a patch seam for process-level tests and downstream
     callers; production uses the explicit typed composition graph.
     """
     if DailyReporter is not _DEFAULT_DAILY_REPORTER:
-        return DailyReporter
+        # The legacy class is an intentional patch/downstream compatibility
+        # seam.  Preserve the exact object while documenting its factory shape.
+        return cast(Callable[[Any], DailyReporterLike], DailyReporter)
 
     settings = runtime.settings
     database_path = settings.database.path
     output_dir = Path(runtime.output_dir_str)
-    def factory(notifier: Any) -> Any:
+    def factory(notifier: Any) -> DailyReporterLike:
         # Resolve the collector only when the reporter is actually built.  A
         # monitor may intentionally be a lightweight test double (or a
         # session that never reaches post-market work), so composing the
@@ -164,6 +169,7 @@ def _reporter_factory_for_runtime(runtime: Any, monitor: Any) -> Callable[[Any],
             narrator=notifier.ai_client,
             publisher=notifier,
             clock=lambda: datetime.now(),
+            settings=settings,
         )
 
     return factory

@@ -78,6 +78,26 @@ def next_krx_session(session_date: date) -> date:
         raise KrxCalendarError("next XKRX session is unavailable") from error
 
 
+def krx_session_ordinals(start: date, end: date) -> dict[date, int]:
+    """Return bounded, calendar-derived ordinals (never calendar-day ordinals)."""
+    if type(start) is not date or type(end) is not date or end < start:
+        raise KrxCalendarError("invalid XKRX session range")
+    try:
+        calendar = xcals.get_calendar("XKRX")
+        sessions = calendar.sessions_in_range(start.isoformat(), end.isoformat())
+        return {cast(date, label.date()): int(calendar.sessions.get_loc(label)) for label in sessions}
+    except Exception as error:
+        raise KrxCalendarError("XKRX session range is unavailable") from error
+
+
+def require_krx_session_range(start: date, end: date) -> dict[date, int]:
+    """Fail closed when either boundary is not a regular session."""
+    ordinals = krx_session_ordinals(start, end)
+    if start not in ordinals or end not in ordinals:
+        raise KrxCalendarError("XKRX range boundaries must be regular sessions")
+    return ordinals
+
+
 def is_krx_open_on(target_date: date) -> bool:
     """Legacy conservative wrapper around the strict session classifier."""
 

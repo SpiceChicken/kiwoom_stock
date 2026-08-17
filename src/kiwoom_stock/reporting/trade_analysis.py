@@ -2,11 +2,11 @@
 
 from datetime import datetime
 import logging
-from pathlib import Path
 from typing import Any, Optional
 
 from kiwoom_stock.application.reporting import analyze_trade_rows
 from kiwoom_stock.core import config
+from kiwoom_stock.core.config import report_output_dir_for
 from kiwoom_stock.infrastructure.reporting import (
     CsvReportArtifactStore,
     read_traded_targets as _read_traded_targets,
@@ -29,9 +29,8 @@ def _analyze_trade_efficiency(
     if target_date_str is None:
         target_date_str = datetime_type.now().strftime("%Y-%m-%d")
 
-    settings = config_module.configure_from_environment(
-        today=datetime_type.now().date()
-    )
+    runtime_date = datetime_type.now().date()
+    settings = config_module.configure_from_environment(today=runtime_date)
 
     targets = _read_traded_targets(
         target_date_str,
@@ -45,7 +44,7 @@ def _analyze_trade_efficiency(
         return None
 
     artifact_store = CsvReportArtifactStore(
-        Path(config_module.OUTPUT_DIR_STR),
+        report_output_dir_for(settings, runtime_date, config_module),
         target_logger=target_logger,
     )
     artifact = artifact_store.save_trade_analysis(

@@ -24,6 +24,16 @@ from kiwoom_stock.application.ports import (
     PhysicalStateRepository,
 )
 from kiwoom_stock.application.execution import ExecutionMode, ExecutionPolicy
+from kiwoom_stock.application.swing_shadow import (
+    SwingShadowEvidence,
+    SwingShadowInput,
+    assemble_shadow_input,
+    run_same_input_shadow,
+)
+from kiwoom_stock.application.swing_candidate import (
+    SwingCandidateContextFactory,
+    build_swing_candidate_evaluator,
+)
 from kiwoom_stock.application.shadow_worker import (
     CalendarDecision,
     ShadowAdmission,
@@ -36,6 +46,12 @@ from kiwoom_stock.application.shadow_lifecycle import (
     ShadowShutdownDeadlineExceeded,
     ShadowStopRequested,
 )
+from kiwoom_stock.application.shadow_preflight import (
+    SwingCandidatePreflightError,
+    build_swing_candidate_plan,
+    validate_swing_candidate_plan,
+)
+from kiwoom_stock.application.runtime_composition import build_trading_runtime_plan
 from kiwoom_stock.core import config as default_config
 from kiwoom_stock.core.database import TradeLogger
 from kiwoom_stock.infrastructure.physical_state_repository import (
@@ -92,10 +108,6 @@ class RuntimeDisabledError(RuntimeError):
 
 
 class ConfigModule(Protocol):
-    CONFIG: Mapping[str, Any]
-    STRATEGY_CONFIG: Mapping[str, Any]
-    OUTPUT_DIR_STR: str
-
     def configure_from_environment(self, today: date) -> Settings:
         """Validate environment and publish legacy config mappings."""
 
@@ -300,6 +312,12 @@ class ShadowRuntime:
         notifier: LocalShadowNotifier,
         db_path: Path,
         session: AllowlistedReadOnlySession,
+        shadow_input: SwingShadowInput | None = None,
+        swing_candidate_enabled: bool = False,
+        swing_candidate_evaluator: Callable[[SwingShadowInput], Mapping[str, Any]] | None = None,
+        swing_candidate_database_path: Path | None = None,
+        swing_candidate_portfolio_id: str | None = None,
+        swing_candidate_context_owner: Any | None = None,
         stop_event: threading.Event | None = None,
         deadline_remaining: Callable[[], float] | None = None,
     ) -> None:
@@ -309,6 +327,16 @@ class ShadowRuntime:
         self._notifier = notifier
         self._db_path = db_path
         self._session = session
+        self._shadow_input = shadow_input
+        self._swing_candidate_enabled = swing_candidate_enabled
+        self._swing_candidate_evaluator = swing_candidate_evaluator
+        self._swing_candidate_database_path = (
+            str(swing_candidate_database_path)
+            if swing_candidate_database_path is not None
+            else None
+        )
+        self._swing_candidate_portfolio_id = swing_candidate_portfolio_id
+        self._swing_candidate_context_owner = swing_candidate_context_owner
         self._stop_event = stop_event
         self._deadline_remaining = deadline_remaining
         self._state = "not-started"
@@ -322,12 +350,30 @@ class ShadowRuntime:
 
         primary: BaseException | None = None
         cycle: Mapping[str, Any] = {}
+        shadow_evidence: SwingShadowEvidence | None = None
         attempts = 0
         api_counts: Mapping[str, int] = {}
         local_counts: Mapping[str, int] = {}
         try:
             self._checkpoint_lifecycle()
-            cycle = self._monitor.run_shadow_cycle(self._policy.stock_code)
+            if self._shadow_input is None:
+                # Direct unit-test/runtime adapters from the legacy contract do
+                # not have a captured market snapshot. Keep that seam intact;
+                # production composition always supplies the immutable input.
+                cycle = self._monitor.run_shadow_cycle(self._policy.stock_code)
+            else:
+                shadow_run = run_same_input_shadow(
+                    snapshot=self._shadow_input,
+                    legacy_evaluator=lambda _snapshot: self._monitor.run_shadow_cycle(
+                        self._policy.stock_code
+                    ),
+                    candidate_evaluator=self._swing_candidate_evaluator,
+                    candidate_enabled=self._swing_candidate_enabled,
+                    candidate_database_path=self._swing_candidate_database_path,
+                    candidate_portfolio_id=self._swing_candidate_portfolio_id,
+                )
+                shadow_evidence = shadow_run.evidence
+                cycle = shadow_run.legacy_output or {}
             self._checkpoint_lifecycle()
             if cycle.get("cycles") != self._policy.max_cycles:
                 raise RuntimeError("shadow monitor violated the cycle budget")
@@ -340,6 +386,7 @@ class ShadowRuntime:
             self._monitor,
             self._client,
             self._session,
+            self._swing_candidate_context_owner,
         )
         with self._state_lock:
             self._state = "terminal"
@@ -396,6 +443,7 @@ class ShadowRuntime:
             local_counts=local_counts,
             continuity=continuity,
             decision_telemetry=decision_telemetry,
+            swing_shadow_evidence=shadow_evidence,
         )
 
     def _checkpoint_lifecycle(self) -> None:
@@ -436,13 +484,17 @@ def create_trading_runtime(
             "KIWOOM_API_MODE=disabled permits configuration checks only"
         )
     settings = config_module.activate_runtime_settings(settings, today=today)
-    app_config = {**config_module.CONFIG, **config_module.STRATEGY_CONFIG}
+    runtime_plan = build_trading_runtime_plan(
+        settings,
+        today=today,
+        compatibility_module=config_module,
+    )
 
     ledger: Optional[TradeLogger] = None
     physical_state_repository: Optional[PhysicalStateRepository] = None
     client: Any = None
     try:
-        ledger = ledger_factory(settings.database.path, clock)
+        ledger = ledger_factory(runtime_plan.database_path, clock)
         physical_state_repository = physical_state_repository_factory(ledger)
         endpoint = settings.kiwoom.endpoint
         credentials = preflight.credentials
@@ -453,11 +505,11 @@ def create_trading_runtime(
         market_gateway.preflight()
         monitor = engine_factory(
             client,
-            app_config,
+            runtime_plan.app_config,
             ledger=ledger,
             physical_state_repository=physical_state_repository,
             market_gateway=market_gateway,
-            target_stop_policy=settings.strategy.target_stop_policy,
+            target_stop_policy=runtime_plan.target_stop_policy,
             wall_clock=clock,
         )
     except BaseException:
@@ -478,8 +530,8 @@ def create_trading_runtime(
 
     return TradingRuntime(
         settings=settings,
-        app_config=app_config,
-        output_dir_str=config_module.OUTPUT_DIR_STR,
+        app_config=runtime_plan.app_config,
+        output_dir_str=runtime_plan.output_dir_str,
         monitor=monitor,
         _market_owner=client,
         _ledger=ledger,
@@ -504,8 +556,25 @@ def create_shadow_runtime(
     session_factory: Callable[..., AllowlistedReadOnlySession] = AllowlistedReadOnlySession,
     local_notifier_factory: Callable[[], LocalShadowNotifier] = LocalShadowNotifier,
     engine_factory: Callable[..., TradingEngine] = TradingEngine,
+    swing_candidate_enabled: bool | None = None,
+    swing_candidate_evaluator: Callable[[SwingShadowInput], Mapping[str, Any]] | None = None,
+    swing_candidate_context_factory: SwingCandidateContextFactory | None = None,
+    swing_candidate_database_path: Path | None = None,
+    swing_candidate_portfolio_id: str | None = None,
+    swing_candidate_context_owner: Any | None = None,
 ) -> ShadowRuntime:
     """Build the bounded shadow graph after calendar admission has succeeded."""
+
+    candidate_plan = build_swing_candidate_plan(
+        policy=policy,
+        settings=settings,
+        enabled=swing_candidate_enabled,
+        evaluator=swing_candidate_evaluator,
+        context_factory=swing_candidate_context_factory,
+        database_path=swing_candidate_database_path,
+        portfolio_id=swing_candidate_portfolio_id,
+        context_owner=swing_candidate_context_owner,
+    )
 
     if settings.execution.mode is not policy.mode:
         raise RuntimeDisabledError("CLI and KIWOOM_EXECUTION_MODE must select the same shadow mode")
@@ -537,6 +606,20 @@ def create_shadow_runtime(
     ):
         raise RuntimeError("shadow admission must contain one aware KST OPEN instant")
     policy.assert_broker_orders_disabled()
+    try:
+        candidate_plan = validate_swing_candidate_plan(
+            candidate_plan,
+            legacy_database_path=db_path,
+        )
+    except SwingCandidatePreflightError as error:
+        raise RuntimeDisabledError(str(error)) from None
+    swing_candidate_enabled = candidate_plan.enabled
+    swing_candidate_evaluator = candidate_plan.evaluator
+    swing_candidate_context_factory = candidate_plan.context_factory
+    swing_candidate_database_path = candidate_plan.database_path
+    swing_candidate_portfolio_id = candidate_plan.portfolio_id
+    swing_candidate_context_owner = candidate_plan.context_owner
+    candidate_semantics_version = candidate_plan.strategy_semantics_version
     if any(
         (
             settings.notification.slack_webhook_url,
@@ -578,6 +661,21 @@ def create_shadow_runtime(
             proxy_code=policy.proxy_code,
             market_gateway=live_gateway,
         )
+        assembly = assemble_shadow_input(
+            snapshot,
+            stock_code=policy.stock_code,
+            proxy_code=policy.proxy_code,
+            activation_id=policy.activation.activation_id,
+            decision_at=admission.now,
+            candidate_evaluator=swing_candidate_evaluator,
+            candidate_context_factory=swing_candidate_context_factory,
+            candidate_evaluator_factory=lambda version: build_swing_candidate_evaluator(
+                expected_strategy_semantics_version=version,
+            ),
+            expected_strategy_semantics_version=candidate_semantics_version,
+        )
+        shadow_input = assembly.shadow_input
+        effective_candidate_evaluator = assembly.candidate_evaluator
         admission.checkpoint()
         gateway = CachedMarketGateway(policy.stock_code, policy.proxy_code, snapshot)
         ledger = ledger_factory(db_path, admission.clock)
@@ -605,7 +703,7 @@ def create_shadow_runtime(
         )
     except BaseException as error:
         cleanup_types = _close_failed_shadow_resources(
-            repository, ledger, client, session
+            repository, ledger, client, session, swing_candidate_context_owner
         )
         raise ShadowExecutionFailure(
             _terminal_reason_after_cleanup(error, admission.deadline_remaining),
@@ -619,6 +717,12 @@ def create_shadow_runtime(
         notifier=notifier,
         db_path=db_path,
         session=session,
+        shadow_input=shadow_input,
+        swing_candidate_enabled=swing_candidate_enabled,
+        swing_candidate_evaluator=effective_candidate_evaluator,
+        swing_candidate_database_path=swing_candidate_database_path,
+        swing_candidate_portfolio_id=swing_candidate_portfolio_id,
+        swing_candidate_context_owner=swing_candidate_context_owner,
         stop_event=admission.stop_event,
         deadline_remaining=admission.deadline_remaining,
     )
@@ -653,6 +757,7 @@ def _close_failed_shadow_resources(
     ledger: PaperTradeLedger | None,
     client: Any,
     session: AllowlistedReadOnlySession | None,
+    swing_candidate_context_owner: Any | None = None,
 ) -> tuple[str, ...]:
     """Retire local work before clearing the market-only token owner."""
 
@@ -662,6 +767,7 @@ def _close_failed_shadow_resources(
         ("paper ledger", ledger),
         ("market-only client", client),
         ("market session finalizer", session),
+        ("swing candidate context owner", swing_candidate_context_owner),
     ):
         if resource is None or not hasattr(resource, "close"):
             continue

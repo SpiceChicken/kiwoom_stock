@@ -16,10 +16,21 @@ from typing import (
     runtime_checkable,
 )
 
+if TYPE_CHECKING:
+    from kiwoom_stock.domain.accounting import Fill, PortfolioSnapshot, PortfolioState
+    from kiwoom_stock.domain.swing_contracts import (
+        AdmissionEvent,
+        CorporateAction,
+        EpisodeRearmEvidence,
+        EpisodeSnapshot,
+        Mark,
+        SessionMarkEvidence,
+    )
+
 from kiwoom_stock.domain.models import Position, PositionStatus
 
 if TYPE_CHECKING:
-    from kiwoom_stock.application.reporting import (
+    from kiwoom_stock.application.reporting_contracts import (
         DailyReportRequest,
         DailyReportStats,
         NarrationResult,
@@ -387,6 +398,223 @@ class MarketDataGateway(Protocol):
 
 class PaperTradePersistenceError(RuntimeError):
     """A paper-position read or transition failed closed."""
+
+
+class SwingLedgerError(RuntimeError):
+    """Base error for the isolated candidate swing ledger."""
+
+
+class SwingIdempotencyConflictError(SwingLedgerError):
+    """An idempotency key was reused with a different canonical payload."""
+
+
+class SwingTransitionConflictError(SwingLedgerError):
+    """A candidate projection did not have the expected sequence."""
+
+
+class SwingIdentityConflictError(SwingLedgerError):
+    """A command or hydration request crossed its bound identity."""
+
+
+class SwingPortfolioNotRegisteredError(SwingLedgerError):
+    """The bound portfolio has not been registered in the candidate store."""
+
+
+class SwingIntegrityError(SwingLedgerError):
+    """Candidate history or projections failed verification."""
+
+
+class SwingSchemaIncompatibleError(SwingLedgerError):
+    """An existing candidate schema is not the canonical P2 shape."""
+
+
+class SwingPersistenceError(SwingLedgerError):
+    """A candidate transaction could not be durably completed."""
+
+
+class SwingCapabilityGapError(SwingLedgerError):
+    """A deliberately deferred P3 capability was requested."""
+
+    def __init__(self, capability: str | Enum, owner: str = "P3") -> None:
+        self.capability = capability
+        self.owner = owner
+        label = capability.value if isinstance(capability, Enum) else capability
+        super().__init__(f"{label} is owned by {owner}")
+
+
+class SwingAccountingDivergenceError(SwingLedgerError):
+    """The reducer and typed fill application produced different states."""
+
+
+class SwingCommandKind(str, Enum):
+    REGISTER_PORTFOLIO = "REGISTER_PORTFOLIO"
+    APPEND_FILL = "APPEND_FILL"
+    APPEND_MARK = "APPEND_MARK"
+    APPEND_CORPORATE_ACTION = "APPEND_CORPORATE_ACTION"
+    APPEND_EPISODE = "APPEND_EPISODE"
+
+
+@dataclass(frozen=True)
+class SwingFillCommand:
+    fill: "Fill"
+    idempotency_key: str
+    expected_portfolio_sequence: int
+    expected_position_sequence: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        for name, value in (("expected_portfolio_sequence", self.expected_portfolio_sequence),
+                            ("expected_position_sequence", self.expected_position_sequence)):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class SwingMarkCommand:
+    mark: "Mark"
+    idempotency_key: str
+    expected_portfolio_sequence: int
+    expected_position_sequence: int
+    expected_mark_revision: int
+    current_session: Optional[date] = None
+    session_evidence: Optional["SessionMarkEvidence"] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        if self.current_session is None and self.session_evidence is None:
+            mark_evidence = getattr(self.mark, "session_evidence", None)
+            if mark_evidence is not None:
+                object.__setattr__(self, "current_session", self.mark.session_date)
+                object.__setattr__(self, "session_evidence", mark_evidence)
+        if self.current_session is not None and not isinstance(self.current_session, date):
+            raise ValueError("current_session must be a date")
+        for name, value in (("expected_portfolio_sequence", self.expected_portfolio_sequence), ("expected_position_sequence",
+                            self.expected_position_sequence), ("expected_mark_revision", self.expected_mark_revision)):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class SwingEpisodeAppendCommand:
+    idempotency_key: str
+    episode_id: str
+    event: "AdmissionEvent"
+    expected_episode_sequence: int = 0
+    rearm_evidence: Optional["EpisodeRearmEvidence"] = None
+    current_session: Optional[date] = None
+    previous_session: Optional[date] = None
+
+    def __post_init__(self) -> None:
+        from kiwoom_stock.domain.swing_contracts import AdmissionEvent
+
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not isinstance(self.episode_id, str)
+            or not self.idempotency_key.strip()
+            or not self.episode_id.strip()
+        ):
+            raise ValueError("episode append identities are required")
+        if not isinstance(self.event, AdmissionEvent) or self.event.episode_id != self.episode_id:
+            raise ValueError("episode transition event identity is invalid")
+        if type(self.expected_episode_sequence) is not int or self.expected_episode_sequence < 0:
+            raise ValueError("expected_episode_sequence must be a non-negative integer")
+        if (self.current_session is None) != (self.previous_session is None):
+            raise ValueError("episode session evidence is incomplete")
+        if (
+            self.current_session is not None
+            and self.previous_session is not None
+            and self.previous_session >= self.current_session
+        ):
+            raise ValueError("episode session evidence is not ordered")
+
+
+@dataclass(frozen=True)
+class SwingCorporateActionCommand:
+    action: "CorporateAction"
+    decision_at: datetime
+    effective_session: date
+    idempotency_key: str
+    expected_portfolio_sequence: int
+    expected_position_sequence: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        if self.decision_at.tzinfo is None or not isinstance(self.effective_session, date):
+            raise ValueError("corporate-action timing must be aware/date typed")
+        for name, value in (("expected_portfolio_sequence", self.expected_portfolio_sequence),
+                            ("expected_position_sequence", self.expected_position_sequence)):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class SwingCommitReceipt:
+    portfolio_id: str
+    command_kind: SwingCommandKind
+    idempotency_key: str
+    payload_hash: str
+    committed_portfolio_sequence: int
+    committed_position_sequence: Optional[int]
+    committed_mark_revision: Optional[int]
+    committed_event_sequence: int
+    replayed: bool = False
+
+    @property
+    def sequence(self) -> int:
+        """Compatibility view; new consumers must use projection high-waters."""
+        return self.committed_event_sequence
+
+
+@dataclass(frozen=True)
+class SwingHydration:
+    portfolio_id: str
+    state: "PortfolioState"
+    snapshot: "PortfolioSnapshot"
+    verified_portfolio_sequence: int
+    verified_position_sequences: Tuple[Tuple[str, int], ...]
+    verified_mark_revisions: Tuple[Tuple[str, str, date, int], ...]
+    head_hash: str
+
+
+@dataclass(frozen=True)
+class SwingEpisodeHydration:
+    episode_id: str
+    snapshot: "EpisodeSnapshot"
+    verified_sequence: int
+    event_ids: Tuple[str, ...]
+    head_hash: str
+
+
+@runtime_checkable
+class SwingLedgerPort(Protocol):
+    """Append-only persistence contract for an isolated candidate portfolio."""
+
+    def register_portfolio(self, *, idempotency_key: str, expected_portfolio_sequence: int = 0) -> SwingCommitReceipt:
+        ...
+
+    def append_fill(self, command: SwingFillCommand) -> SwingCommitReceipt:
+        ...
+
+    def append_mark(self, command: SwingMarkCommand) -> SwingCommitReceipt:
+        ...
+
+    def append_corporate_action(self, command: SwingCorporateActionCommand) -> SwingCommitReceipt:
+        ...
+
+    def hydrate(self, *, portfolio_id: str, position_id: Optional[str] = None) -> SwingHydration:
+        ...
+
+    def close(self) -> None:
+        ...
+
+    def append_episode(self, command: SwingEpisodeAppendCommand) -> SwingCommitReceipt:
+        ...
+
+    def hydrate_episode(self, *, episode_id: str) -> SwingEpisodeHydration:
+        ...
 
 
 @dataclass(frozen=True)

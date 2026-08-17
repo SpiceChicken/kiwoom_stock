@@ -131,7 +131,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if settings.execution.mode is not requested_mode:
                 raise ExecutionPolicyError(
                     "CLI command and KIWOOM_EXECUTION_MODE must select the same shadow mode"
-                )
+            )
+            candidate_settings = getattr(settings, "swing_candidate", None)
+            candidate_enabled = bool(getattr(candidate_settings, "enabled", False))
+            if candidate_settings is None or not candidate_enabled:
+                candidate_database_path = None
+                candidate_portfolio_id = None
+            else:
+                candidate_database_path = candidate_settings.database_path
+                candidate_portfolio_id = candidate_settings.portfolio_id
             policy = ExecutionPolicy.for_request(
                 settings.execution.mode,
                 ActivationTuple(
@@ -139,6 +147,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     image_digest=args.image_digest,
                     activation_id=args.activation_id,
                 ),
+                swing_candidate_enabled=candidate_enabled,
+                swing_candidate_database_path=candidate_database_path,
+                swing_candidate_portfolio_id=candidate_portfolio_id,
             )
             runtime_factory = lambda admitted, admission: create_shadow_runtime(
                 policy=admitted,

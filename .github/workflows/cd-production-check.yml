@@ -85,7 +85,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/locks/dev-py314.txt
+            requirements/locks/runtime-py314.txt
 
       - name: Install checksum-verified Gitleaks
         shell: bash
@@ -118,8 +121,9 @@ jobs:
 
       - name: Install development dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install --require-hashes \
+            -r requirements/locks/dev-py314.txt
+          python -m pip install --no-deps --no-build-isolation -e .
 
       - name: Lint, type-check, and run full tests
         run: |
@@ -132,10 +136,11 @@ jobs:
       - name: Build package and smoke installed wheel
         run: |
           set -euo pipefail
-          python -m build
+          python -m build --no-isolation
           python -m venv .wheel-smoke
-          .wheel-smoke/bin/python -m pip install --upgrade pip
-          .wheel-smoke/bin/python -m pip install dist/*.whl
+          .wheel-smoke/bin/python -m pip install --require-hashes \
+            -r requirements/locks/runtime-py314.txt
+          .wheel-smoke/bin/python -m pip install --no-deps dist/*.whl
           wheel_python="${GITHUB_WORKSPACE}/.wheel-smoke/bin/python"
           (
             cd "${RUNNER_TEMP}"
@@ -156,6 +161,7 @@ jobs:
         run: |
           set -euo pipefail
           docker build --target test \
+            --build-arg PYTHON_LOCK=py314 \
             --tag kiwoom-stock:test-"${{ steps.release.outputs.source_sha }}" .
           docker run --rm \
             kiwoom-stock:test-"${{ steps.release.outputs.source_sha }}"
@@ -170,6 +176,7 @@ jobs:
           local_image="kiwoom-stock:runtime-${SOURCE_SHA}"
           remote_tag="${GHCR_REPOSITORY}:sha-${SOURCE_SHA}"
           docker build --target runtime \
+            --build-arg PYTHON_LOCK=py314 \
             --label io.kiwoom-stock.project=kiwoom-stock \
             --label org.opencontainers.image.revision="${SOURCE_SHA}" \
             --tag "${local_image}" .

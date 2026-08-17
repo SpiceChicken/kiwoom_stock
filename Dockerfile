@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
 ARG PYTHON_VERSION=3.14
+ARG PYTHON_LOCK=py314
 
 FROM python:${PYTHON_VERSION}-slim AS base
+
+ARG PYTHON_LOCK
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,18 +20,25 @@ RUN groupadd --gid 10001 kiwoom \
 
 FROM base AS builder
 
+ARG PYTHON_LOCK
+
 COPY pyproject.toml README.MD ./
+COPY requirements/locks/dev-${PYTHON_LOCK}.txt /tmp/dev-lock.txt
 COPY src ./src
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip build \
-    && python -m build
+    python -m pip install --require-hashes -r /tmp/dev-lock.txt \
+    && python -m build --no-isolation
 
 FROM base AS test
+
+ARG PYTHON_LOCK
 
 ENV CONTAINER_TEST_STAGE=1
 
 COPY pyproject.toml README.MD ./
+COPY requirements/locks/dev-${PYTHON_LOCK}.txt /tmp/dev-lock.txt
+COPY requirements/locks ./requirements/locks
 COPY src ./src
 COPY tests ./tests
 COPY main.py ./
@@ -46,19 +56,22 @@ COPY .github/workflows/ci.yml .github/workflows/cd-production-check.yml .github/
 RUN mkdir /app/.git
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip setuptools \
-    && python -m pip install -e ".[dev]"
+    python -m pip install --require-hashes -r /tmp/dev-lock.txt \
+    && python -m pip install --no-deps --no-build-isolation -e .
 
 CMD ["python", "-m", "pytest", "tests", "-q", "--basetemp=/tmp/pytest"]
 
 FROM base AS runtime
 
+ARG PYTHON_LOCK
+
 COPY --from=builder /app/dist/*.whl /tmp/
+COPY requirements/locks/runtime-${PYTHON_LOCK}.txt /tmp/runtime-lock.txt
 COPY docker/runtime_entrypoint.py /usr/local/bin/kiwoom-runtime-entrypoint.py
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir /tmp/*.whl \
+    python -m pip install --require-hashes -r /tmp/runtime-lock.txt \
+    && python -m pip install --no-cache-dir --no-deps /tmp/*.whl \
     && rm -f /tmp/*.whl
 
 USER 10001:10001

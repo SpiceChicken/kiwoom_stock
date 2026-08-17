@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from dataclasses import dataclass
 import hashlib
 import io
 import json
@@ -27,6 +26,14 @@ import time
 from typing import BinaryIO, cast, Mapping, Protocol, Sequence
 import urllib.parse
 import zipfile
+
+from kiwoom_stock.deployment.promotion_contracts import (
+    ArtifactContract,
+    BinaryCommandResult,
+    Candidate,
+    CommandResult,
+    ReleaseContract,
+)
 
 
 REPOSITORY = "SpiceChicken/kiwoom_stock"
@@ -79,52 +86,10 @@ class PromotionError(RuntimeError):
         self.category = category
 
 
-@dataclass(frozen=True)
-class Candidate:
-    """Immutable protected release tuple.
-
-    ``source_sha`` is a full Git object id, ``image_digest`` is an exact OCI
-    digest reference, and ``build_run_id`` is a positive GitHub run identifier.
-    """
-
-    source_sha: str
-    image_digest: str
-    build_run_id: int
-
-
 def parse_positive_decimal(value: str, category: str) -> int:
     if len(value) > 20 or re.fullmatch(r"[1-9][0-9]*", value) is None:
         raise PromotionError(category)
     return int(value)
-
-
-@dataclass(frozen=True)
-class ArtifactContract:
-    artifact_id: int
-    size_bytes: int
-    digest: str
-    build_job_id: int
-
-
-@dataclass(frozen=True)
-class ReleaseContract:
-    image_size_mib: int
-    compose_sha256: str
-    compose_prod_sha256: str
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-@dataclass(frozen=True)
-class BinaryCommandResult:
-    returncode: int
-    stdout: bytes
-    stderr: bytes
 
 
 class HttpClient(Protocol):

@@ -68,6 +68,8 @@ def test_docker_test_stage_has_complete_minimal_full_suite_manifest():
     copy_lines = [line for line in test_block.splitlines() if line.startswith("COPY ")]
     assert copy_lines == [
         "COPY pyproject.toml README.MD ./",
+        "COPY requirements/locks/dev-${PYTHON_LOCK}.txt /tmp/dev-lock.txt",
+        "COPY requirements/locks ./requirements/locks",
         "COPY src ./src",
         "COPY tests ./tests",
         "COPY main.py ./",
@@ -93,7 +95,8 @@ def test_docker_test_stage_has_complete_minimal_full_suite_manifest():
     assert test_block.count("ENV CONTAINER_TEST_STAGE=1") == 1
     assert text.count("ENV CONTAINER_TEST_STAGE=1") == 1
     assert test_block.count("RUN mkdir /app/.git") == 1
-    assert "python -m pip install --upgrade pip setuptools" in test_block
+    assert "python -m pip install --require-hashes -r /tmp/dev-lock.txt" in test_block
+    assert "python -m pip install --no-deps --no-build-isolation -e ." in test_block
     assert (
         'CMD ["python", "-m", "pytest", "tests", "-q", '
         '"--basetemp=/tmp/pytest"]' in test_block
@@ -112,6 +115,7 @@ def test_docker_runtime_stage_only_copies_the_builder_wheel():
     copy_lines = [line for line in runtime_block.splitlines() if line.startswith("COPY ")]
     assert copy_lines == [
         "COPY --from=builder /app/dist/*.whl /tmp/",
+        "COPY requirements/locks/runtime-${PYTHON_LOCK}.txt /tmp/runtime-lock.txt",
         "COPY docker/runtime_entrypoint.py /usr/local/bin/kiwoom-runtime-entrypoint.py",
     ]
     assert CONTAINER_TEST_STAGE_ENV not in runtime_block
@@ -426,6 +430,7 @@ def test_dev_compose_is_disabled_without_credentials_or_runtime_network():
 
     assert app["build"]["target"] == "test"
     assert app["build"]["args"]["PYTHON_VERSION"] == "3.14"
+    assert app["build"]["args"]["PYTHON_LOCK"] == "py314"
     assert app["network_mode"] == "none"
     assert app["read_only"] is False
     assert app["healthcheck"] == {"disable": True}

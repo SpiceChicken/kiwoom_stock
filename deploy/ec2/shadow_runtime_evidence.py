@@ -9,7 +9,7 @@ import json
 import math
 import re
 import sys
-from typing import Iterable, TextIO
+from typing import Iterable, TextIO, cast
 
 
 MAX_INPUT_BYTES = 1_048_576
@@ -42,11 +42,15 @@ ONESHOT_KEYS = {
     "http_attempts", "api_counts", "db_identity", "resources_closed",
     "side_effects", "local_counts", "continuity", "decision_telemetry",
 }
+SWING_SHADOW_KEY = "swing_shadow_evidence"
+CANDIDATE_DECISION_KEY = "candidate_decision"
+ONESHOT_OPTIONAL_KEYS = {SWING_SHADOW_KEY}
 CYCLE_KEYS = ONESHOT_KEYS | {
     "event", "cycle_index", "elapsed_seconds", "interval_seconds",
     "cycle_start_elapsed_seconds", "observed_interval_seconds", "db_reopened",
     "db_reopens",
 }
+CYCLE_OPTIONAL_KEYS = {SWING_SHADOW_KEY}
 TERMINAL_KEYS = {
     "schema_version", "event", "status", "mode", "source_sha", "image_digest",
     "activation_id", "cycles", "elapsed_seconds",
@@ -327,13 +331,87 @@ def _finite_float(value: object, *, minimum: float = 0.0) -> bool:
     return type(value) is float and math.isfinite(value) and value >= minimum
 
 
+def _valid_hash(value: object, *, allow_none: bool = False) -> bool:
+    if value is None and allow_none:
+        return True
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _valid_swing_shadow_evidence(value: object) -> bool:
+    expected = {
+        "snapshot_id", "input_hash", "legacy_output_hash", "candidate_output_hash",
+        "candidate_enabled", "candidate_database_path", "candidate_portfolio_id",
+        "side_effects",
+    }
+    if not isinstance(value, dict) or set(value) not in (
+        expected,
+        expected | {CANDIDATE_DECISION_KEY},
+    ):
+        return False
+    enabled = value.get("candidate_enabled")
+    if type(enabled) is not bool or not isinstance(value.get("snapshot_id"), str):
+        return False
+    if not value["snapshot_id"] or not _valid_hash(value.get("input_hash")):
+        return False
+    if not _valid_hash(value.get("legacy_output_hash"), allow_none=True):
+        return False
+    if not _valid_hash(value.get("candidate_output_hash"), allow_none=True):
+        return False
+    if value.get("side_effects") is not False:
+        return False
+    if CANDIDATE_DECISION_KEY in value:
+        decision = value.get(CANDIDATE_DECISION_KEY)
+        if not isinstance(decision, dict) or set(decision) != {
+            "decision_schema",
+            "action",
+            "reason",
+            "strategy_semantics_version",
+            "episode_id",
+            "holding_session_number",
+            "raw_executable_price_krw",
+        }:
+            return False
+        if (
+            decision.get("decision_schema") != "swing-decision-v1"
+            or decision.get("action") not in {
+                "HOLD", "ADMIT_ENTRY", "EXIT", "REARM",
+            }
+            or not isinstance(decision.get("reason"), str)
+            or not isinstance(decision.get("strategy_semantics_version"), str)
+            or not decision.get("strategy_semantics_version")
+            or not isinstance(decision.get("episode_id"), str)
+            or type(decision.get("holding_session_number")) is not int
+            or decision.get("holding_session_number", 0) <= 0
+            or (
+                decision.get("raw_executable_price_krw") is not None
+                and (
+                    type(decision.get("raw_executable_price_krw")) is not int
+                    or decision.get("raw_executable_price_krw", 0) <= 0
+                )
+            )
+        ):
+            return False
+    path = value.get("candidate_database_path")
+    portfolio = value.get("candidate_portfolio_id")
+    if enabled:
+        return (
+            isinstance(path, str) and path.startswith("/") and bool(path)
+            and isinstance(portfolio, str) and bool(portfolio)
+            and _valid_hash(value.get("candidate_output_hash"))
+        )
+    return value.get("candidate_output_hash") is None and path is None and portfolio is None
+
+
 def _exact_keys(item: dict[str, object], expected: set[str], category: str) -> None:
     if set(item) != expected:
         raise EvidenceError(category)
 
 
 def _validate_oneshot(item: dict[str, object]) -> None:
-    _exact_keys(item, ONESHOT_KEYS, "oneshot_keys_invalid")
+    if set(item) not in (ONESHOT_KEYS, ONESHOT_KEYS | ONESHOT_OPTIONAL_KEYS):
+        raise EvidenceError("oneshot_keys_invalid")
+    if SWING_SHADOW_KEY in item and not _valid_swing_shadow_evidence(item[SWING_SHADOW_KEY]):
+        raise EvidenceError("swing_shadow_evidence_invalid")
     attempts = item.get("http_attempts")
     counts = item.get("api_counts")
     local_counts = item.get("local_counts")
@@ -375,7 +453,10 @@ def _validate_oneshot(item: dict[str, object]) -> None:
 
 
 def _validate_cycle(item: dict[str, object]) -> None:
-    _exact_keys(item, CYCLE_KEYS, "cycle_keys_invalid")
+    if set(item) not in (CYCLE_KEYS, CYCLE_KEYS | CYCLE_OPTIONAL_KEYS):
+        raise EvidenceError("cycle_keys_invalid")
+    if SWING_SHADOW_KEY in item and not _valid_swing_shadow_evidence(item[SWING_SHADOW_KEY]):
+        raise EvidenceError("swing_shadow_evidence_invalid")
     integer_fields = (
         item.get("schema_version"), item.get("cycle_index"), item.get("cycles"),
         item.get("http_attempts"), item.get("db_reopens"),
@@ -441,13 +522,21 @@ def _validate_terminal_timing(
     if cycles == 1:
         if any(value is not None for value in (second, interval, minimum)):
             raise EvidenceError("terminal_single_cycle_invalid")
-    elif (
-        not _finite_float(second, minimum=60.0) or second - first < 60.0
-        or not _finite_float(interval, minimum=60.0)
-        or abs((second - first) - interval) > 0.000001
-        or not _finite_float(minimum, minimum=60.0)
-    ):
-        raise EvidenceError("terminal_multi_cycle_invalid")
+    else:
+        if (
+            not _finite_float(second, minimum=60.0)
+            or not _finite_float(interval, minimum=60.0)
+            or not _finite_float(minimum, minimum=60.0)
+        ):
+            raise EvidenceError("terminal_multi_cycle_invalid")
+        second_value = cast(float, second)
+        first_value = cast(float, first)
+        interval_value = cast(float, interval)
+        if (
+            second_value - first_value < 60.0
+            or abs((second_value - first_value) - interval_value) > 0.000001
+        ):
+            raise EvidenceError("terminal_multi_cycle_invalid")
 
 
 def _validate_terminal(item: dict[str, object]) -> None:
@@ -514,8 +603,8 @@ def validate(
     else:
         _validate_terminal(item)
     expected_keys = {
-        "oneshot": ONESHOT_KEYS,
-        "cycle": CYCLE_KEYS,
+        "oneshot": set(item),
+        "cycle": set(item),
         "terminal": set(item),
     }[event]
     return {key: item[key] for key in sorted(expected_keys)}

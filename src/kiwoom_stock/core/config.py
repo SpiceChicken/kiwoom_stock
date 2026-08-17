@@ -28,6 +28,42 @@ def _settings_snapshot(settings: Settings, today: date) -> _SettingsSnapshot:
     return system_config, strategy_config, scoring_config, output_dir_str
 
 
+def report_output_dir_for(
+    settings: Any,
+    today: date,
+    compatibility_module: Any = None,
+) -> Path:
+    """Resolve report output from typed settings, with a legacy-test fallback."""
+
+    legacy_output = getattr(compatibility_module, "OUTPUT_DIR_STR", "")
+    if isinstance(legacy_output, (str, Path)) and str(legacy_output):
+        return Path(legacy_output)
+    storage = getattr(settings, "storage", None)
+    output_root = getattr(storage, "output_dir", None)
+    if output_root is not None:
+        return Path(output_root) / "output" / today.strftime("%Y%m%d")
+    return Path(str(legacy_output)) if legacy_output else Path.cwd()
+
+
+def notification_credentials_for(
+    settings: Optional[Settings],
+    compatibility_module: Any = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve Slack credentials from explicit settings before the compatibility view."""
+
+    selected = settings or _CURRENT_SETTINGS
+    if selected is not None:
+        return (
+            selected.notification.slack_bot_token,
+            selected.notification.slack_channel_id,
+        )
+    legacy_config = getattr(compatibility_module, "CONFIG", {})
+    return (
+        legacy_config.get("slack_token"),
+        legacy_config.get("slack_channel"),
+    )
+
+
 def _publish_settings(
     settings: Settings,
     system_config: Mapping[str, Any],

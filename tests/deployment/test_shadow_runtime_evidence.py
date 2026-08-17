@@ -78,6 +78,73 @@ def _oneshot():
     }
 
 
+def _swing_shadow_evidence(*, enabled=False):
+    return {
+        "snapshot_id": "parallel-shadow-test:market-snapshot",
+        "input_hash": "1" * 64,
+        "legacy_output_hash": "2" * 64,
+        "candidate_output_hash": "3" * 64 if enabled else None,
+        "candidate_enabled": enabled,
+        "candidate_database_path": "/var/lib/kiwoom/swing-candidate.sqlite3" if enabled else None,
+        "candidate_portfolio_id": "swing-paper-v1" if enabled else None,
+        "side_effects": False,
+    }
+
+
+def test_optional_swing_shadow_evidence_is_validated_and_round_tripped():
+    value = {**_oneshot(), "swing_shadow_evidence": _swing_shadow_evidence()}
+    result = _run(value)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == value
+
+    enabled = {**_oneshot(), "swing_shadow_evidence": _swing_shadow_evidence(enabled=True)}
+    result = _run(enabled)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == enabled
+
+    malformed = {
+        **value,
+        "swing_shadow_evidence": {
+            **_swing_shadow_evidence(),
+            "input_hash": "not-a-hash",
+        },
+    }
+    assert _run(malformed).returncode != 0
+
+
+def test_swing_strategy_decision_evidence_is_validated_and_round_tripped():
+    value = {
+        **_oneshot(),
+        "swing_shadow_evidence": {
+            **_swing_shadow_evidence(enabled=True),
+            "candidate_decision": {
+                "decision_schema": "swing-decision-v1",
+                "action": "ADMIT_ENTRY",
+                "reason": "ENTRY_SIGNAL",
+                "strategy_semantics_version": "swing-v1",
+                "episode_id": "",
+                "holding_session_number": 1,
+                "raw_executable_price_krw": 70_000,
+            },
+        },
+    }
+    result = _run(value)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == value
+
+    malformed = {
+        **value,
+        "swing_shadow_evidence": {
+            **value["swing_shadow_evidence"],
+            "candidate_decision": {
+                **value["swing_shadow_evidence"]["candidate_decision"],
+                "action": "WRITE_ORDER",
+            },
+        },
+    }
+    assert _run(malformed).returncode != 0
+
+
 def _cycle():
     value = _oneshot()
     value.update({
@@ -103,7 +170,7 @@ def _terminal():
 
 
 def _run(value, *, mode="shadow-once", event="oneshot", input_format="json-lines",
-         output="accepted-record"):
+         output="accepted-record", activation_id=ACTIVATION_ID):
     content = value if isinstance(value, str) else json.dumps(value)
     if input_format == "ssm-invocation" and not isinstance(value, str):
         content = json.dumps({
@@ -113,10 +180,64 @@ def _run(value, *, mode="shadow-once", event="oneshot", input_format="json-lines
     return subprocess.run(
         [sys.executable, str(VALIDATOR), "--mode", mode, "--event", event,
          "--source-sha", SOURCE_SHA, "--image-digest", IMAGE,
-         "--activation-id", ACTIVATION_ID, "--input-format", input_format,
+         "--activation-id", activation_id, "--input-format", input_format,
          "--output", output], input=content, text=True, capture_output=True,
         check=False,
     )
+
+
+@pytest.mark.parametrize("activation_id", ["shadow:colon", "a" * 65, ""])
+def test_activation_id_boundary_matches_execution_policy_contract(activation_id):
+    completed = _run(_oneshot(), activation_id=activation_id)
+    assert completed.returncode == 2
+    assert completed.stderr == "shadow evidence setup failed\n"
+
+
+def test_activation_id_maximum_length_is_accepted_by_evidence_validator():
+    activation_id = "a" * 64
+    value = {**_oneshot(), "activation_id": activation_id}
+    completed = _run(value, activation_id=activation_id)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_all_evidence_shapes_and_activation_summary_have_exact_keysets():
+    oneshot_keys = {
+        "schema_version", "status", "mode", "kst_date", "calendar",
+        "source_sha", "image_digest", "activation_id", "stock_code",
+        "proxy_code", "cycles", "http_attempts", "api_counts", "db_identity",
+        "resources_closed", "side_effects", "local_counts", "continuity",
+        "decision_telemetry",
+    }
+    cycle_keys = oneshot_keys | {
+        "event", "cycle_index", "elapsed_seconds", "interval_seconds",
+        "cycle_start_elapsed_seconds", "observed_interval_seconds",
+        "db_reopened", "db_reopens",
+    }
+    terminal_keys = {
+        "schema_version", "event", "status", "mode", "source_sha",
+        "image_digest", "activation_id", "cycles", "elapsed_seconds",
+        "first_cycle_start_elapsed_seconds", "second_cycle_start_elapsed_seconds",
+        "second_cycle_interval_seconds", "minimum_cycle_interval_seconds",
+        "db_reopens", "resources_closed", "side_effects", "reason",
+    }
+    assert set(_oneshot()) == oneshot_keys
+    assert set(_cycle()) == cycle_keys
+    assert set(_terminal()) == terminal_keys
+
+    swing = _swing_shadow_evidence(enabled=True)
+    record = {**_oneshot(), "swing_shadow_evidence": swing}
+    accepted = _run(record)
+    assert accepted.returncode == 0, accepted.stderr
+    assert set(json.loads(accepted.stdout)) == oneshot_keys | {"swing_shadow_evidence"}
+
+    summary = _run(record, output="activation-summary")
+    assert summary.returncode == 0, summary.stderr
+    assert set(json.loads(summary.stdout)) == {
+        "runtime_status", "cycles", "http_attempts",
+        "first_cycle_start_elapsed_seconds", "second_cycle_start_elapsed_seconds",
+        "second_cycle_interval_seconds", "minimum_cycle_interval_seconds",
+        "db_reopens", "database", "decision_telemetry", "side_effects",
+    }
 
 
 @pytest.mark.parametrize(

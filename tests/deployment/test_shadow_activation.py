@@ -26,6 +26,7 @@ from kiwoom_stock.application.execution import (
 )
 from kiwoom_stock.domain.models import PhysicalContinuityEvidence
 from kiwoom_stock.domain.models import ShadowDecisionTelemetry
+from kiwoom_stock.application.swing_shadow import SwingShadowEvidence
 
 
 SCRIPT = Path("deploy/ec2/shadow_worker_control.sh")
@@ -83,6 +84,7 @@ def _decision_telemetry():
 
 
 def _oneshot_evidence(**updates):
+    swing_shadow_evidence = updates.pop("swing_shadow_evidence", None)
     result = ShadowRunResult(
         status="PASS",
         mode="shadow-once",
@@ -110,9 +112,38 @@ def _oneshot_evidence(**updates):
         local_counts=_local_counts(),
         continuity=_continuity(),
         decision_telemetry=_decision_telemetry(),
+        swing_shadow_evidence=swing_shadow_evidence,
     ).to_safe_dict()
     result.update(updates)
     return result
+
+
+def test_producers_match_literal_evidence_keysets_including_optional_swing():
+    oneshot = _oneshot_evidence()
+    assert set(oneshot) == {
+        "schema_version", "status", "mode", "kst_date", "calendar",
+        "source_sha", "image_digest", "activation_id", "stock_code",
+        "proxy_code", "cycles", "http_attempts", "api_counts", "db_identity",
+        "resources_closed", "side_effects", "local_counts", "continuity",
+        "decision_telemetry",
+    }
+
+    swing = SwingShadowEvidence(
+        snapshot_id="snapshot-1",
+        input_hash="1" * 64,
+        legacy_output_hash="2" * 64,
+        candidate_output_hash="3" * 64,
+        candidate_enabled=True,
+        candidate_database_path="/var/lib/kiwoom/swing-candidate.sqlite3",
+        candidate_portfolio_id="swing-paper-v1",
+    )
+    with_swing = _oneshot_evidence(swing_shadow_evidence=swing)
+    assert set(with_swing) == set(oneshot) | {"swing_shadow_evidence"}
+    assert set(with_swing["swing_shadow_evidence"]) == {
+        "snapshot_id", "input_hash", "legacy_output_hash",
+        "candidate_output_hash", "candidate_enabled",
+        "candidate_database_path", "candidate_portfolio_id", "side_effects",
+    }
 
 
 def _cycle_evidence(**updates):
@@ -946,6 +977,23 @@ def test_actual_continuous_emitter_cycle_and_terminal_round_trip_consumers(
     assert len(emitted) == 1
     cycle = emitted[0]
     terminal = terminal_result.to_safe_dict()
+
+    assert set(cycle) == {
+        "schema_version", "event", "status", "mode", "kst_date", "calendar",
+        "source_sha", "image_digest", "activation_id", "stock_code",
+        "proxy_code", "cycle_index", "cycles", "http_attempts", "api_counts",
+        "local_counts", "db_identity", "elapsed_seconds", "interval_seconds",
+        "cycle_start_elapsed_seconds", "observed_interval_seconds",
+        "db_reopened", "db_reopens", "continuity", "decision_telemetry",
+        "resources_closed", "side_effects",
+    }
+    assert set(terminal) == {
+        "schema_version", "event", "status", "mode", "source_sha",
+        "image_digest", "activation_id", "cycles", "elapsed_seconds",
+        "first_cycle_start_elapsed_seconds", "second_cycle_start_elapsed_seconds",
+        "second_cycle_interval_seconds", "minimum_cycle_interval_seconds",
+        "db_reopens", "resources_closed", "side_effects", "reason",
+    }
 
     assert _run_host_cycle_parser(cycle, tmp_path).returncode == 0
     assert _run_workflow_cycle_parser(cycle).returncode == 0

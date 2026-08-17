@@ -5,6 +5,7 @@ services:
       target: test
       args:
         PYTHON_VERSION: "3.14"
+        PYTHON_LOCK: "py314"
     image: kiwoom-stock:dev
     read_only: false
     network_mode: none

@@ -28,6 +28,21 @@ infrastructure adapters
   kiwoom_stock.utils.*
 ```
 
+The current structural seams are intentionally narrow and compatibility-preserving:
+
+- settings contracts, sources, and precedence resolution live in `settings_contracts.py`,
+  `settings_sources.py`, and `settings_resolver.py`; `settings.py` remains the import facade;
+- runtime admission and construction are represented by `shadow_preflight.py` and
+  `runtime_composition.py` without introducing a service locator;
+- paper/swing persistence schema, query, command, and SQLite writer ownership are separated into
+  `core/paper_*`, `core/swing_*`, and `infrastructure/sqlite_write_owner.py` while legacy table names remain;
+- normal engine session context and cycle ordering are isolated in `monitoring/engine_lifecycle.py` and
+  `monitoring/engine_cycle.py`; `TradingEngine` remains the compatibility facade;
+- rollout and promotion identity/result values are isolated in `deployment/rollout_contracts.py` and
+  `deployment/promotion_contracts.py`; command runners remain unchanged;
+- report narration uses the modern `google-genai` adapter only. No live Gemini, Slack, Kiwoom, AWS, or order
+  capability is enabled by these structural boundaries.
+
 `main.py` is the process composition root. It validates a frozen settings snapshot without mutation, reads one startup
 date, passes that date to the KRX calendar, and activates the runtime graph only on an open session. It is also the outer
 composition root for `DailyReporter`, `S3Manager`, legacy retention, and identity-scoped cleanup;
@@ -159,7 +174,7 @@ These are structural `Protocol` contracts. No framework-level dependency injecti
 | S3 upload | `kiwoom_stock.utils.s3_manager` | injected client seam; no-follow descriptor upload; typed per-target identity receipt |
 | Filesystem cleanup/output | `kiwoom_stock.utils.file_manager`, tools | production cleanup pins root/date descriptors and rechecks archived inode/metadata before descriptor-relative unlink; local retention and tools still perform real file I/O by design |
 | Clock/market calendar | startup uses an injected date provider and explicit-date XKRX adapter; engine/other consumers still use system time | partially isolated |
-| Gemini | `kiwoom_stock.utils.gemini_client` | still legacy; not called in tests |
+| Gemini | `kiwoom_stock.utils.gemini_client` | modern `google-genai` adapter; tests use a fake client |
 
 ## Persistence invariants
 
@@ -182,7 +197,11 @@ active positions, closes persistence resources, and skips post-market work.
 - Real order execution is still marked TBD; no production execution gateway has been introduced.
 - Compose supports only one application process/replica owning a local named SQLite volume. Multiple processes,
   replicas, hosts, or shared/network storage require a PostgreSQL-class backend and a separately planned migration.
-- The application has no SIGTERM-to-session-shutdown adapter. Docker stop grace and `STOPSIGNAL` declarations are not
-  evidence that the queue drains under an actual container stop.
-- Docker runtime checks require an explicitly approved Docker/daemon execution; this change has only static Compose/YAML
-  evidence and does not claim build, render, start, or stop behavior.
+- The bounded shadow lifecycle has a SIGTERM/SIGINT adapter through
+  `ShadowStopController` and the managed shadow worker; unit tests cover the
+  signal-to-shutdown budget and in-process close ordering. A credentialed
+  production-like shadow worker stop, named-volume ownership, and external
+  read-only staging run remain unverified.
+- Docker test/runtime images and the disabled dev Compose build/start/exit path
+  have been executed successfully. Production-like shadow activation and
+  external integration checks remain separate release gates.

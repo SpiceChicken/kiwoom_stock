@@ -82,6 +82,68 @@ Boundary behavior is covered by characterization tests, including inclusive thre
     database-write, or scheduler-sleep work.
 - Profit lock-in starts once profit reaches the configured threshold and combines velocity loss with a protected profit floor.
 
+## G0 swing candidate contract (normative SSOT; inactive)
+
+The following is a characterization/contract boundary for an isolated candidate that remains disabled by default. It
+does not change, enable, or reinterpret any legacy shadow-paper rule above. Candidate runtime/evidence wiring exists
+behind an explicit opt-in and immutable strategy-context provider; the bounded composition calls the pure
+`evaluate_swing()` evaluator and records its typed decision alongside input/output hashes. A missing context provider
+or a candidate state/position/episode-identity mismatch fails closed. Candidate state hydration is read-only, and no broker execution
+is available. This section is the only
+normative source for the inactive candidate contract;
+configuration documentation must reference it and must not copy its terms. Planner shorthand is non-normative when
+it differs from this section. The exact UTF-8 text between the canonical markers below is the policy text to hash.
+
+<!-- G0-POLICY-CANONICAL-BEGIN -->
+1. Session counting: `session_date` is an XKRX regular-session date and `holding_session_number = 1 +` the number
+   of actual XKRX session ordinals after entry; entry is 1, thesis/time exits are `>= 2`, and time-exit eligibility
+   is `>= 20`. Hard-risk is the session-1 exception; calendar-day arithmetic is invalid.
+2. Hard-risk: the only allowlisted reasons are exactly `CATASTROPHIC_PRICE_RISK` and `PORTFOLIO_RISK_LIMIT`.
+   Either reason requires both a raw executable price and a versioned risk threshold. Missing marks and accounting
+   errors block new entry and are never liquidation evidence or a synthesized liquidation.
+3. Fill timing: admission uses a completed D-1 slow context and a completed fast bar; the next eligible XKRX
+   regular-session bar open after the decision is the all-or-none fill point and `decision_at <= fill_at`. An
+   unfilled or rejected admission has no fill and no cash movement, and consumes the episode.
+4. Lot policy: one active lot per portfolio and symbol, with positive integer quantity; pyramiding and partial fills
+   are not allowed.
+5. Mark policy: mark quality is exactly `OFFICIAL_CLOSE`, `PROVISIONAL_LAST_VALID_REGULAR`,
+   `SUSPENDED_CARRY_FORWARD`, or `MISSING`. Every mark stores `source_id`, `available_at`, `computed_at`,
+   `revision`, and `supersedes_id`. `OFFICIAL_CLOSE` is canonical; a provisional regular mark is revised by the
+   subsequent official close with `supersedes_id` linking the prior revision. `SUSPENDED_CARRY_FORWARD` and
+   `MISSING` are `INCOMPLETE` and block new entries. `MISSING` never creates a zero-KRW mark or liquidation.
+6. Cash and flow: initial cash is fixed, external flow is exactly `0`, and accounting is trade-date accounting.
+   Gross, base, and stress cost views are versioned; the official rate remains `TBD` here.
+7. Cost policy: raw executable price is authoritative for execution and accounting; adjusted price is feature-only.
+   Price, cash, and cost are integer KRW; ratios are Decimal strings or bps, never an implicit binary float contract.
+8. Corporate actions: a known action is usable only when its point-in-time `available_at <= decision_at` and it is
+   applied at the effective XKRX session boundary as one atomic quantity, cost-basis, and cash event. An unknown
+   action is `INSUFFICIENT_DATA`, is not applied, and blocks fill/NAV acceptance and new entry; it is never estimated
+   after the fact and cannot produce a terminal value.
+9. Episode lifecycle: `ARMED -> ACTIVE -> CONSUMED -> COOLDOWN -> ARMED`; activation requires a false-to-true
+   rising edge and an episode cannot re-arm unless the position is flat. Exit or rejection enters `COOLDOWN`; a
+   persistent signal does not re-arm. Re-arm requires a false slow predicate, two completed fast bars that are false,
+   and one XKRX cooldown session. A strategy semantic-version change is a terminal event.
+10. Legacy unknowns: unknown corporate action or missing legacy quantity, cost, episode, horizon, or mark is exactly
+    `INSUFFICIENT_DATA`; no value may be inferred. Every instant is aware KST or canonical wire time.
+11. Temporal evidence: the entry ordinal is 1, thesis/time candidates require ordinal `>= 2`, and a time candidate
+    requires ordinal `>= 20`. Only completed D-1 slow context and a completed fast bar may inform a decision; a fill
+    cannot precede its decision, and only the next eligible regular-session bar open may fill it.
+<!-- G0-POLICY-CANONICAL-END -->
+
+## Offline swing economics evaluation boundary
+
+- Economic evaluation aggregates by `episode_id`, not by individual tick or signal. One episode may contain one
+  complete entry lot and at most one complete exit; repeated same-symbol entries remain separate episodes and are
+  not silently netted together.
+- Gross, base, and stress cash deltas are kept separately. Base/stress cost is derived from typed accounting output,
+  and stress cost cannot be lower than base cost.
+- A closed episode reports realized after-cost P&L. An open episode requires a complete identity-bound mark and
+  reports marked unrealized after-cost P&L; missing or incomplete marks fail closed.
+- Comparison evidence reports episode count, fill count, base/stress P&L, cost totals, loss-episode count, and
+  average holding sessions. A comparison is valid only when baseline and candidate use the same dataset identity.
+- This evaluator is offline research evidence only. It does not create orders, mutate the ledger, call a broker, or
+  claim that marked/unrealized P&L is a realized account result.
+
 ## Operational rules
 
 - Startup validates all settings before reading the startup date or checking the KRX calendar. Missing or invalid
