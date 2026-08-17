@@ -21,7 +21,7 @@ _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(
     r"^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$"
 )
-_ACTIVATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_ACTIVATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class ExecutionPolicyError(RuntimeError):
@@ -74,6 +74,9 @@ class ExecutionPolicy:
     oauth_revoke: bool = False
     external_notifications: bool = False
     reports: bool = False
+    swing_candidate_enabled: bool = False
+    swing_candidate_database_path: Path | None = None
+    swing_candidate_portfolio_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in (
@@ -97,12 +100,35 @@ class ExecutionPolicy:
         )
         if not expected:
             raise ExecutionPolicyError("shadow capability invariant was modified")
+        if self.swing_candidate_enabled:
+            if (
+                self.swing_candidate_database_path is None
+                or not isinstance(self.swing_candidate_database_path, Path)
+                or not self.swing_candidate_database_path.is_absolute()
+                or self.swing_candidate_database_path == self.shadow_database_path
+                or not isinstance(self.swing_candidate_portfolio_id, str)
+                or not self.swing_candidate_portfolio_id.strip()
+            ):
+                raise ExecutionPolicyError(
+                    "enabled swing candidate requires an isolated database and portfolio"
+                )
+        elif (
+            self.swing_candidate_database_path is not None
+            or self.swing_candidate_portfolio_id is not None
+        ):
+            raise ExecutionPolicyError(
+                "disabled swing candidate cannot carry candidate identity"
+            )
 
     @classmethod
     def for_request(
         cls,
         mode: ExecutionMode,
         activation: ActivationTuple | None,
+        *,
+        swing_candidate_enabled: bool = False,
+        swing_candidate_database_path: Path | None = None,
+        swing_candidate_portfolio_id: str | None = None,
     ) -> "ExecutionPolicy":
         if mode is ExecutionMode.LIVE:
             raise LiveActivationNotImplemented("live execution is not implemented")
@@ -110,7 +136,28 @@ class ExecutionPolicy:
             raise ExecutionPolicyError("an admitted shadow execution mode is required")
         if activation is None:
             raise ExecutionPolicyError("shadow execution requires the exact activation tuple")
-        return cls(mode=mode, activation=activation)
+        return cls(
+            mode=mode,
+            activation=activation,
+            swing_candidate_enabled=swing_candidate_enabled,
+            swing_candidate_database_path=swing_candidate_database_path,
+            swing_candidate_portfolio_id=swing_candidate_portfolio_id,
+        )
+
+    def assert_swing_candidate_identity(
+        self,
+        *,
+        enabled: bool,
+        database_path: Path | None,
+        portfolio_id: str | None,
+    ) -> None:
+        if self.swing_candidate_enabled is not enabled:
+            raise ExecutionPolicyError("swing candidate enablement drifted between policy and settings")
+        if enabled and (
+            self.swing_candidate_database_path != database_path
+            or self.swing_candidate_portfolio_id != portfolio_id
+        ):
+            raise ExecutionPolicyError("swing candidate identity drifted between policy and settings")
 
     def assert_paper_transition(self) -> None:
         """Authorize only the isolated shadow paper-ledger transition."""

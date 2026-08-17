@@ -148,10 +148,11 @@ When the alert or local critical log appears:
 6. Start a new runtime only after exposure, ledger consistency, configuration, and the process supervisor's restart policy
    have been reviewed.
 
-The current implementation and temp-SQLite tests prove the in-process queue drain/join/connection-close ordering. They do
-not prove actual Slack delivery, real market-hour scheduling, Kiwoom-session shutdown, SIGTERM routing, named-volume
-permissions, or worker/DB close during a real container stop. Those real-path checks remain activation gates; local
-tests must not be treated as production readiness.
+The current implementation and temp-SQLite tests prove the in-process queue drain/join/connection-close ordering, and the
+Docker test/runtime smoke proves the disabled image and Compose lifecycle. They do not prove actual Slack delivery, real
+market-hour scheduling, credentialed Kiwoom-session shutdown, named-volume permissions, or worker/DB close during a
+production-like shadow container stop. Those staging checks remain activation gates; local tests must not be treated as
+production readiness.
 
 ## Normal terminal outcomes
 

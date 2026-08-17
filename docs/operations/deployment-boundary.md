@@ -502,9 +502,9 @@ classify it as a normal holiday.
 ## SQLite and container first-activation gate
 
 Local B6 tests prove the configured-path composition, same-file ledger/physical rows, queue drain, worker join,
-idempotent close, close-before-post-market routing, and short-lived report readers with temporary SQLite files. They do
-not prove the production named volume, host permissions, supervisor signals, an operational container command, or real
-external report integrations.
+idempotent close, close-before-post-market routing, and short-lived report readers with temporary SQLite files. Docker
+test/runtime images and the disabled dev Compose build/start/exit path have also been executed. These checks do not
+prove the production named volume, credentialed shadow worker, external report integrations, or real staging API path.
 
 The current common/prod Compose contract uses exactly:
 
@@ -514,9 +514,10 @@ The current common/prod Compose contract uses exactly:
 - no raw `scale`/`deploy.replicas` request.
 
 These declarations do not enforce a replica limit or graceful shutdown. `docker compose --scale` can still create an
-unsupported second SQLite owner. The image command and healthcheck run only `python -m kiwoom_stock --check-config`,
-which exits without starting a worker. `STOPSIGNAL SIGTERM` is present, but the application has no SIGTERM adapter that
-routes to `TradingEngine.close()`. Therefore actual Docker C1/C3/C4 status remains RED.
+unsupported second SQLite owner. The common image command and healthcheck run only `python -m kiwoom_stock --check-config`,
+which exits without starting a worker. The bounded shadow worker has a `ShadowStopController` SIGTERM/SIGINT adapter
+that feeds the shutdown budget and runtime close path, but a credentialed production-like container stop has not yet
+been executed. Docker build/disabled Compose checks are PASS; staging C1/C3/C4 evidence remains open.
 
 Before enabling any worker command, obtain explicit approval and validate in an isolated non-production volume:
 

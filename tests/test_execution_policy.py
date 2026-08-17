@@ -59,6 +59,41 @@ def test_shadow_policy_is_fixed_and_fail_closed():
         )
 
 
+def test_swing_candidate_is_explicitly_opt_in_and_isolated(tmp_path):
+    candidate_path = (tmp_path / "swing-candidate.sqlite3").resolve()
+    policy = ExecutionPolicy.for_request(
+        ExecutionMode.SHADOW_ONCE,
+        _activation(),
+        swing_candidate_enabled=True,
+        swing_candidate_database_path=candidate_path,
+        swing_candidate_portfolio_id="swing-test-v1",
+    )
+
+    assert policy.swing_candidate_enabled is True
+    assert policy.swing_candidate_database_path == candidate_path
+    assert policy.swing_candidate_portfolio_id == "swing-test-v1"
+    policy.assert_swing_candidate_identity(
+        enabled=True,
+        database_path=candidate_path,
+        portfolio_id="swing-test-v1",
+    )
+    with pytest.raises(ExecutionPolicyError, match="drifted"):
+        policy.assert_swing_candidate_identity(
+            enabled=True,
+            database_path=candidate_path,
+            portfolio_id="other",
+        )
+
+    with pytest.raises(ExecutionPolicyError, match="isolated"):
+        ExecutionPolicy.for_request(
+            ExecutionMode.SHADOW_ONCE,
+            _activation(),
+            swing_candidate_enabled=True,
+            swing_candidate_database_path=SHADOW_DATABASE_PATH,
+            swing_candidate_portfolio_id="swing-test-v1",
+        )
+
+
 def test_continuous_policy_reuses_exact_frozen_shadow_capabilities():
     once = ExecutionPolicy.for_request(ExecutionMode.SHADOW_ONCE, _activation())
     continuous = ExecutionPolicy.for_request(
@@ -217,7 +252,11 @@ def test_continuous_cli_dispatches_only_the_frozen_continuous_policy(monkeypatch
     assert len(captured) == 1
     assert captured[0].mode is ExecutionMode.SHADOW_CONTINUOUS
     assert captured[0].max_cycles == 1
-    assert '"status": "STOPPED"' in capsys.readouterr().out
+    captured_output = capsys.readouterr()
+    assert captured_output.out == (
+        '{"event": "terminal", "mode": "shadow-continuous", "status": "STOPPED"}\n'
+    )
+    assert captured_output.err == ""
 
 
 @pytest.mark.parametrize(
@@ -226,6 +265,8 @@ def test_continuous_cli_dispatches_only_the_frozen_continuous_policy(monkeypatch
         ("source_sha", "A" * 40),
         ("image_digest", "example.invalid/image@sha256:" + "b" * 64),
         ("activation_id", "contains whitespace"),
+        ("activation_id", "shadow:colon"),
+        ("activation_id", "a" * 65),
     ],
 )
 def test_activation_tuple_rejects_unapproved_identity(field, value):
@@ -237,3 +278,12 @@ def test_activation_tuple_rejects_unapproved_identity(field, value):
     values[field] = value
     with pytest.raises(ExecutionPolicyError):
         ActivationTuple(**values)
+
+
+def test_activation_tuple_accepts_the_maximum_deployment_identity_length():
+    values = {
+        "source_sha": "a" * 40,
+        "image_digest": "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "b" * 64,
+        "activation_id": "a" * 64,
+    }
+    assert ActivationTuple(**values).activation_id == "a" * 64

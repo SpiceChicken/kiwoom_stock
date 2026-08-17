@@ -23,8 +23,8 @@ The implementation is in
 
 ## 현재 개장일과 사전 점검
 
-현재 기준일은 2026-08-15 (토)이며 2026-08-17 (월)은 광복절 대체공휴일이다.
-따라서 다음 실제 KRX 개장일은 2026-08-18 (화)다. cron은 평일 calendar time을
+현재 기준일은 2026-08-17 (월)이며 오늘은 광복절 대체공휴일이다. 다음 실제 KRX
+개장일은 2026-08-18 (화)다. cron은 평일 calendar time을
 예약할 뿐 한국 거래소 휴장일을 자동으로 제거하지 않으므로, start workflow가
 실행되더라도 calendar guard가 `CLOSED/calendar-closed`로 fail-closed 하는지
 먼저 확인한다. 휴장일을 우회해 수동 `continuous`를 시작하지 않는다.
@@ -42,6 +42,12 @@ The implementation is in
 
 호스트에 별도 systemd/cron timer를 추가하지 않는다. 현재 SSH는 preflight·복구
 transport이고, protected GitHub workflow가 schedule과 SSM automation의 SSOT다.
+
+8/17 schedule run `31980723090`은 `production-shadow` 보호 리뷰 대기 중이었고,
+휴장일 실행과 내일 concurrency 충돌을 막기 위해 취소했다. 내일 08:50 KST
+schedule은 현재 등록된 source/image/build tuple로 생성되며, 보호 reviewer가
+tuple과 개장일을 확인한 뒤 승인해야 SSM bounded activation이 진행된다. 보호
+review를 제거하거나 EC2에서 직접 continuous worker를 시작하지 않는다.
 
 ## Bounded execution contract
 

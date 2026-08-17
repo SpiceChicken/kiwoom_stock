@@ -20,7 +20,6 @@ from kiwoom_stock.settings import (
     KiwoomSettings,
     RuntimeSettings,
     Settings,
-    StrategySettings,
     SettingsValidationError,
     KiwoomEndpoint,
     load_settings_from_environment,
@@ -136,6 +135,35 @@ def test_from_mapping_happy_path_and_defaults():
     assert settings.strategy.cumulative_trade_return_score_floor == -5.0
     assert settings.storage.output_dir == Path("/tmp/kiwoom-output")
     assert settings.database.path == Path("trades.db")
+    assert settings.swing_candidate.enabled is False
+    assert settings.swing_candidate.portfolio_id == "swing-paper-v1"
+    assert settings.swing_candidate.strategy_semantics_version == "swing-v1"
+
+
+def test_swing_candidate_settings_require_absolute_isolated_path_when_enabled(tmp_path):
+    settings = Settings.from_mapping(
+        {
+            **valid_mapping(),
+            "KIWOOM_SWING_CANDIDATE_ENABLED": "true",
+            "KIWOOM_SWING_CANDIDATE_DB_PATH": str(
+                (tmp_path / "swing-candidate.sqlite3").resolve()
+            ),
+            "KIWOOM_SWING_CANDIDATE_PORTFOLIO_ID": "portfolio-test-v1",
+        }
+    )
+
+    assert settings.swing_candidate.enabled is True
+    assert settings.swing_candidate.database_path.is_absolute()
+    assert settings.swing_candidate.portfolio_id == "portfolio-test-v1"
+
+    with pytest.raises(SettingsValidationError, match="KIWOOM_SWING_CANDIDATE_DB_PATH"):
+        Settings.from_mapping(
+            {
+                **valid_mapping(),
+                "KIWOOM_SWING_CANDIDATE_ENABLED": "true",
+                "KIWOOM_SWING_CANDIDATE_DB_PATH": "relative.sqlite3",
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -1617,3 +1645,39 @@ def test_setting_registry_matches_example_and_documentation():
     assert next(
         spec.consumer for spec in SETTING_SPECS if spec.name == "KIWOOM_DB_PATH"
     ) == "runtime and post-market SQLite"
+
+
+def test_setting_registry_contract_metadata_snapshot_for_execution_and_swing_boundaries():
+    expected = {
+        "KIWOOM_EXECUTION_MODE": (
+            "enum", "no", "check-only", "execution policy", False, ("local", "dev", "test", "staging", "prod", "production-like")
+        ),
+        "KIWOOM_SWING_CANDIDATE_ENABLED": (
+            "strict boolean", "no", "false", "isolated swing shadow candidate", False, ("local", "dev", "test", "staging", "prod", "production-like")
+        ),
+        "KIWOOM_SWING_CANDIDATE_DB_PATH": (
+            "file path", "candidate enabled", "./runtime/swing-candidate.sqlite3", "isolated swing candidate ledger", False, ("local", "dev", "test", "staging", "prod", "production-like")
+        ),
+        "KIWOOM_SWING_CANDIDATE_PORTFOLIO_ID": (
+            "string", "candidate enabled", "swing-paper-v1", "isolated swing candidate portfolio", False, ("local", "dev", "test", "staging", "prod", "production-like")
+        ),
+        "KIWOOM_IMAGE_DIGEST": (
+            "OCI image digest", "shadow execution", None, "shadow activation attestation", False, ("prod", "production-like")
+        ),
+        "KIWOOM_CREDENTIALS_DIR": (
+            "absolute directory path", "for mock/prod", None, "strict credential provider", False, ("staging", "prod", "production-like")
+        ),
+    }
+    actual = {
+        spec.name: (
+            spec.value_type,
+            spec.required,
+            spec.default,
+            spec.consumer,
+            spec.sensitive,
+            spec.environments,
+        )
+        for spec in SETTING_SPECS
+        if spec.name in expected
+    }
+    assert actual == expected

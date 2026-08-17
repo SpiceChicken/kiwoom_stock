@@ -10,7 +10,7 @@ import threading
 import time as time_mod
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union, cast
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from kiwoom_stock.application.ports import (
     MarketDataGateway,
@@ -36,12 +36,15 @@ from kiwoom_stock.domain.models import (
     ShadowDecisionTelemetry,
 )
 from kiwoom_stock.domain.strategy import TargetStopPolicy
-from kiwoom_stock.utils.market_cal import (
-    KrxCalendarError,
-    current_krx_session,
-    require_aware_kst,
-    seoul_now,
+from kiwoom_stock.utils.market_cal import current_krx_session, seoul_now
+from kiwoom_stock.monitoring.engine_cycle import (
+    TradingCycleCoordinator,
+    acknowledge_due_targets,
+    complete_cycle_targets,
+    evaluate_cycle_stocks,
+    fresh_active_marks,
 )
+from kiwoom_stock.monitoring.engine_lifecycle import resolve_cycle_context
 
 logger = logging.getLogger(__name__)
 
@@ -380,17 +383,10 @@ class TradingEngine:
 
     def _create_cycle_context(self) -> Optional[CycleContext]:
         """Read the normal-cycle wall clock exactly once and resolve its session."""
-
-        try:
-            now = require_aware_kst(self._wall_clock(), "normal cycle clock")
-            session_date = current_krx_session(now)
-        except KrxCalendarError:
-            raise
-        except Exception as error:
-            raise KrxCalendarError("normal cycle context is unavailable") from error
-        if session_date is None:
-            return None
-        return CycleContext(now=now, xkrx_session_date=session_date)
+        return resolve_cycle_context(
+            self._wall_clock,
+            session_resolver=current_krx_session,
+        )
 
     def _run_normal_cycle(
         self,
@@ -404,55 +400,64 @@ class TradingEngine:
         )
         if terminal is not None:
             return terminal
-        if not self._check_monitoring_status(context):
-            return TradingSessionResult(reason=SessionEndReason.MARKET_CLOSED)
+        coordinator = TradingCycleCoordinator(
+            check_monitoring_status=self._check_monitoring_status,
+            reconcile_overnight_positions=self._reconcile_cycle_positions,
+            refresh_global_state=self._refresh_global_state,
+            get_due_targets=self._get_due_targets,
+            complete_targets=self._complete_cycle_targets,
+            prepare_cycle=self._prepare_cycle,
+            fresh_active_marks=self._fresh_active_marks,
+            check_terminal_status=self._check_terminal_status,
+            acknowledge_targets=self._ack_due_targets,
+            evaluate_stocks=self._evaluate_stocks,
+            process_decisions=self._process_cycle_decisions,
+            flush_status=self._flush_status,
+            market_regime_value=self._market_regime_value,
+        )
+        outcome = coordinator.run(
+            context,
+            selected_at,
+            float(getattr(self, "_last_global_update", 0.0)),
+        )
+        self._last_global_update = outcome.next_global_update
+        return outcome.terminal_result
 
+    def _refresh_global_state(self) -> None:
+        """Refresh slow-changing market state at the scheduler watermark."""
+        self.analyzer.update_regime()
+        self.strategy.update_context(self.analyzer.market_regime)
+        self.stock_mgr.update_target_stocks()
+
+    def _reconcile_cycle_positions(self, context: CycleContext) -> None:
         self.stock_mgr.reconcile_overnight_positions(context)
 
-        if selected_at - getattr(self, '_last_global_update', 0) >= 60.0:
-            self.analyzer.update_regime()
-            self.strategy.update_context(self.analyzer.market_regime)
-            self.stock_mgr.update_target_stocks()
-            self._last_global_update = selected_at
+    def _market_regime_value(self) -> str:
+        return self.analyzer.market_regime.value
 
-        due_targets = self._get_due_targets()
-        if not due_targets:
-            return None
+    def _flush_status(self, market_regime: str) -> None:
+        self.notifier.flush_status(market_regime)
 
-        batch_targets = self._complete_cycle_targets(due_targets)
-        self._prepare_cycle(batch_targets)
-        fresh_marks = self._fresh_active_marks(batch_targets)
-        terminal = self._check_terminal_status(context, fresh_marks)
-        if terminal is not None:
-            return terminal
-
-        self._ack_due_targets(due_targets, selected_at)
-        verdicts = self._evaluate_stocks(batch_targets)
+    def _process_cycle_decisions(
+        self,
+        verdicts: List[Dict],
+        context: CycleContext,
+    ) -> None:
         self._process_decisions(verdicts, context)
-        self.notifier.flush_status(self.analyzer.market_regime.value)
-        return None
 
     def _complete_cycle_targets(self, due_targets: List[str]) -> List[str]:
         """Include every active code in one deterministic fresh batch generation."""
 
-        if not due_targets or len(due_targets) != len(set(due_targets)):
-            raise ValueError("due targets must be a non-empty unique batch")
-        return sorted(set(due_targets).union(self.stock_mgr.active_positions))
+        return complete_cycle_targets(due_targets, self.stock_mgr.active_positions)
 
     def _fresh_active_marks(self, batch_targets: List[str]) -> Mapping[str, float]:
         """Extract exact marks only from the just-published complete batch."""
 
-        batch_codes = set(batch_targets)
-        active_codes = set(self.stock_mgr.active_positions)
-        if not active_codes.issubset(batch_codes):
-            raise RuntimeError("fresh batch omitted an active position")
-        marks: Dict[str, float] = {}
-        for code in sorted(active_codes):
-            metrics = self.analyzer.supply_cache.get(code)
-            if metrics is None:
-                raise RuntimeError(f"fresh active mark is unavailable: {code}")
-            marks[code] = metrics.cur_prc
-        return marks
+        return fresh_active_marks(
+            batch_targets,
+            self.stock_mgr.active_positions,
+            self.analyzer.supply_cache,
+        )
 
     def _assert_open_for_work(self) -> None:
         if (
@@ -601,15 +606,12 @@ class TradingEngine:
     def _ack_due_targets(self, targets: List[str], selected_at: float) -> None:
         """Advance polling timestamps only after one successful batch publish."""
 
-        if not targets or len(targets) != len(set(targets)):
-            raise ValueError("polling acknowledgement targets must be unique")
-        if any(code not in self.stock_mgr.stocks for code in targets):
-            raise ValueError("polling acknowledgement target is not selected")
-        if isinstance(selected_at, bool) or not isinstance(selected_at, (int, float)):
-            raise TypeError("polling acknowledgement timestamp must be numeric")
-        next_check_time = dict(self._last_check_time)
-        next_check_time.update({code: float(selected_at) for code in targets})
-        self._last_check_time = next_check_time
+        self._last_check_time = acknowledge_due_targets(
+            targets,
+            selected_at,
+            self.stock_mgr.stocks,
+            self._last_check_time,
+        )
 
     def _check_monitoring_status(self, context: CycleContext) -> bool:
         """Check only terminal/session monitoring admission for this context."""
@@ -691,26 +693,18 @@ class TradingEngine:
 
     def _evaluate_stocks(self, targets: List[str]) -> List[Dict]:
         """[Parallel] 워커 스레드를 통한 전략 평가"""
-        self._checkpoint_shadow_lifecycle()
-        self._assert_open_for_work()
-        results = []
-        futures = {self.executor.submit(self._worker_task, code): code for code in targets}
-        
-        for f in as_completed(futures):
-            try:
-                self._checkpoint_shadow_lifecycle()
-                if res := f.result(): results.append(res)
-            except Exception as e:
-                stop_event = getattr(self, "_stop_event", None)
-                if stop_event is not None and stop_event.is_set():
-                    raise
-                try:
-                    self._checkpoint_shadow_lifecycle()
-                except RuntimeError:
-                    raise
-                logger.error(f"Eval Error ({futures[f]}): {e}")
-        self._checkpoint_shadow_lifecycle()
-        return sorted(results, key=lambda verdict: verdict["stock_code"])
+        stop_event = getattr(self, "_stop_event", None)
+        return evaluate_cycle_stocks(
+            targets,
+            executor=self.executor,
+            worker_task=self._worker_task,
+            checkpoint=self._checkpoint_shadow_lifecycle,
+            assert_open_for_work=self._assert_open_for_work,
+            stop_requested=(
+                lambda: stop_event is not None and stop_event.is_set()
+            ),
+            log_evaluation_error=logger.error,
+        )
 
     def _worker_task(self, code: str) -> Optional[Dict]:
         """[Worker] 단위 작업: 데이터 조회 + 전략 계산"""

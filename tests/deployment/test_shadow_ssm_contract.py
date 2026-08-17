@@ -1350,9 +1350,9 @@ def test_ci_commented_checker_command_fails_closed(contract_root: Path):
 def test_ci_build_before_checker_fails_closed(contract_root: Path):
     replace_once(
         contract_root, CI_WORKFLOW,
-        '          python -m pip install -e ".[dev]"\n\n'
+        '          python -m pip install --no-deps --no-build-isolation -e .\n\n'
         "      - name: Verify authoritative shadow SSM contracts",
-        '          python -m pip install -e ".[dev]"\n'
+        '          python -m pip install --no-deps --no-build-isolation -e .\n'
         "          python -m build\n\n"
         "      - name: Verify authoritative shadow SSM contracts",
     )
@@ -1391,9 +1391,9 @@ def test_ci_normalized_build_launcher_before_checker_fails_closed(
 ):
     replace_once(
         contract_root, CI_WORKFLOW,
-        '          python -m pip install -e ".[dev]"\n\n'
+        '          python -m pip install --no-deps --no-build-isolation -e .\n\n'
         "      - name: Verify authoritative shadow SSM contracts",
-        '          python -m pip install -e ".[dev]"\n'
+        '          python -m pip install --no-deps --no-build-isolation -e .\n'
         f"          {build_command}\n\n"
         "      - name: Verify authoritative shadow SSM contracts",
     )

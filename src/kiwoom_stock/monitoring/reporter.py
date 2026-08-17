@@ -5,27 +5,29 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Callable
 
 from kiwoom_stock.core import config
+from kiwoom_stock.core.config import notification_credentials_for
 from kiwoom_stock.monitoring.notifier import Notifier, SlackUploader
 from kiwoom_stock.reporting.trade_analysis import analyze_trade_efficiency
 from kiwoom_stock.reporting.minute_chart import extract_and_save_1min_chart
 from kiwoom_stock.application.reporting import DailyReportRequest, PostMarketReportUseCase
+from kiwoom_stock.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 class DailyReporter:
     """Compatibility facade with optional pure application use case."""
     def __init__(self, notifier: Notifier, *, use_case: Optional[PostMarketReportUseCase] = None,
-                 clock: Optional[Callable[[], datetime]] = None):
+                 clock: Optional[Callable[[], datetime]] = None,
+                 settings: Optional[Settings] = None):
         self.notifier = notifier
         self._use_case = use_case
         self._clock = clock or (lambda: datetime.now())
+        self._settings = settings
 
     # 💡 [변경] 디렉토리 경로 대신 명시적인 'minute_chart_list'를 파라미터로 받습니다.
     def execute_slack_telemetry(self, trade_csv_path: Optional[str], minute_chart_list: list):
         """ EC2 Slack Telemetry 파이프라인 가동기"""
-        system_config = getattr(config, 'CONFIG', {})
-        token = system_config.get("slack_token")
-        channel = system_config.get("slack_channel")
+        token, channel = notification_credentials_for(self._settings, config)
         
         if not token or not channel:
             logger.warning("⚠️ 슬랙 토큰(slack_token) 또는 채널 ID(slack_channel)가 설정되지 않아 파일 업로드를 건너뜁니다.")

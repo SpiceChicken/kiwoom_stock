@@ -45,6 +45,10 @@ The following table is checked against the machine-readable `SETTING_SPECS` regi
 | Name | Type | Required | Default | Consumer | Sensitive | Environments | Validation |
 |---|---|---|---|---|---:|---|---|
 | `KIWOOM_EXECUTION_MODE` | enum | no | `check-only` | execution policy | no | all | `check-only`, `shadow-once`, or `shadow-continuous`; live unavailable |
+| `KIWOOM_SWING_CANDIDATE_ENABLED` | strict boolean | no | `false` | isolated swing shadow candidate | no | all | exactly `true` or `false`; fail-closed default |
+| `KIWOOM_SWING_CANDIDATE_DB_PATH` | file path | candidate enabled | `./runtime/swing-candidate.sqlite3` | isolated swing candidate ledger | no | all | absolute isolated path when enabled |
+| `KIWOOM_SWING_CANDIDATE_PORTFOLIO_ID` | string | candidate enabled | `swing-paper-v1` | isolated swing candidate portfolio | no | all | non-empty isolated identity |
+| `KIWOOM_SWING_STRATEGY_SEMANTICS_VERSION` | string | no | `swing-v1` | swing candidate policy | no | all | non-empty immutable version |
 | `KIWOOM_IMAGE_REF` | OCI image digest | shadow execution | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
 | `KIWOOM_IMAGE_DIGEST` | OCI image digest | shadow execution | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
 | `KIWOOM_REQUIRE_SHADOW_VOLUME` | strict boolean | shadow execution | none | shadow volume attestation | no | prod/prod-like | exactly `1` when required |
@@ -94,10 +98,59 @@ Old-only input emits a warning, new-only input is canonical, matching old and ne
 and conflicting values fail startup. Runtime compatibility mappings publish only
 `cumulative_trade_return_score_floor`.
 
+## CSV artifact path contract
+
+`KIWOOM_OUTPUT_DIR` is the artifact root. After startup activates settings for session date `YYYYMMDD`, legacy report
+CSVs are written directly under:
+
+```text
+<KIWOOM_OUTPUT_DIR>/output/YYYYMMDD/<filename>.csv
+```
+
+Examples are `physics_trade_analysis_YYYYMMDD.csv` and `<stock_name>_<stock_code>_1min_YYYYMMDD.csv`. The replay
+artifact locator exposes this same path without creating directories; CSV paths are included in evidence manifests.
+Slack/S3 upload is downstream handling and does not change the local source path. If archive is unavailable, local CSV
+outputs remain the source of truth.
+
+## PIT replay CSV input contract
+
+Historical replay input is separate from the legacy post-market report CSVs. The approved PIT replay loader reads
+only a regular absolute non-symlink file from the standard artifact path and never creates or modifies the file.
+The header must exactly be:
+
+```text
+schema_version,event_id,session_date,decision_at,available_at,source_snapshot_id,payload_json
+```
+
+Every row uses `swing-pit-replay-v1`, timezone-aware ISO instants, a unique event ID, and a JSON object in
+`payload_json`. Rows must already be chronological; missing/extra columns, invalid JSON, naive timestamps,
+duplicate IDs, and future/unordered availability fail closed. The JSON payload must carry the explicit
+`swing-context-v1` context before it can enter the candidate evaluator; the loader does not infer features from
+raw bars. The implementation is `CsvPITReplaySource.from_artifact()` in
+`src/kiwoom_stock/infrastructure/point_in_time_replay.py`.
+
+The complete offline staging composition is `run_csv_swing_staging_hash_parity()` in
+`src/kiwoom_stock/infrastructure/swing_pit_staging.py`. It binds the CSV event set to the typed context adapter,
+opens the isolated candidate ledger read-only for each parity run, invokes the real swing evaluator, and verifies
+candidate enabled/disabled and side-effect-free evidence. It does not call Kiwoom, AWS, Slack, broker/order, or
+create a runtime artifact.
+
 `KIWOOM_S3_BUCKET_NAME` remains optional. In both `prod` and `production-like`, an unset bucket is an explicit
 `NOT_CONFIGURED` archive outcome: no S3 client or cleanup is started, local outputs are preserved, and the returned
 post-market result requires attention. Operators must configure and validate a bucket before first production archive
 activation.
+
+## G0 swing candidate configuration notice (inactive by default)
+
+The four `KIWOOM_SWING_*` values only describe an isolated candidate boundary. The candidate remains disabled unless
+`KIWOOM_SWING_CANDIDATE_ENABLED=true` and a complete immutable strategy context is explicitly supplied to the bounded
+shadow composition. The recommended provider opens the isolated candidate SQLite database read-only, hydrates the
+portfolio/episode state, and then builds the real `evaluate_swing()` candidate evaluator. The persisted episode identity
+is carried through the typed context into decision evidence, and a context/ledger identity mismatch fails closed. The
+resulting typed decision is recorded in shadow evidence. A lower-level evaluator callback remains an explicit test/adapter seam; the CLI does
+not invent strategy state and therefore fails closed if the context provider is absent. Enabling it never enables
+broker orders, Slack, AWS, or legacy ledger writes. The complete contract remains in
+[`docs/business-rules.md`](business-rules.md#g0-swing-candidate-contract-normative-ssot-inactive).
 
 ## SQLite path contract
 

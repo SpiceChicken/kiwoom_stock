@@ -34,6 +34,18 @@ from kiwoom_stock.domain.state import (
     PhysicalStateWrite,
     PhysicalTrackerState,
 )
+from kiwoom_stock.infrastructure.sqlite_write_owner import SqliteWriterOwner
+from kiwoom_stock.core.paper_schema import initialize_paper_schema
+from kiwoom_stock.core.paper_queries import (
+    fetch_active_rows,
+    fetch_cumulative_score,
+    fetch_last_sell_row,
+    fetch_traded_targets,
+)
+from kiwoom_stock.core.paper_commands import (
+    record_buy_command,
+    transition_position_command,
+)
 from kiwoom_stock.utils.market_cal import (
     KST,
     KrxCalendarError,
@@ -405,9 +417,16 @@ class TradeLogger:
         self._sentinel_enqueued = False
         self._main_connection_closed = False
         self._worker_connection_closed = False
+        self._writer_owner_closed = False
         self._shutdown_deadline: Optional[Callable[[], float]] = None
 
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._writer_owner = SqliteWriterOwner(self.db_path)
+        try:
+            connection = sqlite3.connect(self.db_path, check_same_thread=False)
+        except BaseException:
+            self._writer_owner.close()
+            raise
+        self.conn = connection
         self.conn.row_factory = sqlite3.Row
         worker_conn: Optional[sqlite3.Connection] = None
         try:
@@ -424,6 +443,7 @@ class TradeLogger:
             if worker_conn is not None:
                 worker_conn.close()
             self.conn.close()
+            self._writer_owner.close()
             raise
 
     def _now(self) -> datetime:
@@ -438,136 +458,11 @@ class TradeLogger:
 
     def _create_table(self):
         """Atomically initialize schema and strict legacy lifecycle metadata."""
-        query_trades = """
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            stock_code TEXT,
-            stock_name TEXT,
-            buy_price REAL,
-            thrust REAL,
-            gravity REAL,
-            drag REAL,
-            magnetic REAL,
-            jerk REAL,
-            impulse REAL,
-            net_force REAL,
-            buy_time TEXT,
-            buy_regime TEXT,
-            sell_price REAL,
-            profit_rate REAL,
-            sell_time TEXT,
-            sell_reason TEXT,
-            status TEXT DEFAULT 'OPEN',
-            owning_session_date TEXT,
-            state_changed_at TEXT
+        initialize_paper_schema(
+            self.conn,
+            validate_active_rows=self._validated_active_rows,
+            verify_lifecycle_shape=self._verify_lifecycle_shape,
         )
-        """
-        query_physics = """
-        CREATE TABLE IF NOT EXISTS physics_state (
-            stock_code TEXT PRIMARY KEY,
-            velocity REAL,
-            thrust REAL,
-            gravity REAL,
-            drag REAL,
-            magnetic REAL,
-            jerk REAL,
-            impulse REAL,
-            net_force REAL,
-            last_updated TEXT
-        )
-        """
-        query_tracker_v1 = """
-        CREATE TABLE IF NOT EXISTS physical_tracker_state_v1 (
-            stock_code TEXT PRIMARY KEY,
-            schema_version INTEGER NOT NULL,
-            velocity REAL NOT NULL,
-            last_cumulative_volume REAL NOT NULL,
-            last_price REAL NOT NULL,
-            interval_volume_history TEXT NOT NULL,
-            last_observed_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            projection_generation TEXT NOT NULL,
-            projection_velocity REAL NOT NULL,
-            projection_thrust REAL NOT NULL,
-            projection_gravity REAL NOT NULL,
-            projection_drag REAL NOT NULL,
-            projection_magnetic REAL NOT NULL,
-            projection_jerk REAL NOT NULL,
-            projection_impulse REAL NOT NULL,
-            projection_net_force REAL NOT NULL,
-            projection_last_updated TEXT NOT NULL
-        )
-        """
-        try:
-            self.conn.execute("BEGIN IMMEDIATE")
-            self.conn.execute(query_trades)
-            self.conn.execute(query_physics)
-            self.conn.execute(query_tracker_v1)
-            trade_columns = {
-                row[1]: row
-                for row in self.conn.execute("PRAGMA table_info(trades)")
-            }
-            for column in ("owning_session_date", "state_changed_at"):
-                existing = trade_columns.get(column)
-                if existing is not None and existing[2] != "TEXT":
-                    raise PaperTradePersistenceError(
-                        f"trades.{column} must have TEXT affinity"
-                    )
-            for column in ("owning_session_date", "state_changed_at"):
-                if column not in trade_columns:
-                    self.conn.execute(
-                        f"ALTER TABLE trades ADD COLUMN {column} TEXT"
-                    )
-            existing_tracker_columns = {
-                row[1]
-                for row in self.conn.execute(
-                    "PRAGMA table_info(physical_tracker_state_v1)"
-                )
-            }
-            for column in (
-                "projection_thrust",
-                "projection_gravity",
-                "projection_drag",
-                "projection_magnetic",
-                "projection_jerk",
-                "projection_impulse",
-                "projection_net_force",
-            ):
-                if column not in existing_tracker_columns:
-                    self.conn.execute(
-                        f"ALTER TABLE physical_tracker_state_v1 ADD COLUMN {column} REAL"
-                    )
-
-            _, backfills = self._validated_active_rows()
-            if backfills:
-                cursor = self.conn.executemany(
-                    """
-                    UPDATE trades
-                    SET owning_session_date = ?, state_changed_at = ?
-                    WHERE id = ? AND stock_code = ? AND status = 'OPEN'
-                      AND owning_session_date IS NULL
-                      AND state_changed_at IS NULL
-                    """,
-                    backfills,
-                )
-                if cursor.rowcount != len(backfills):
-                    raise PaperTradePersistenceError(
-                        "legacy OPEN metadata backfill identity mismatch"
-                    )
-            self._verify_lifecycle_shape()
-            _, pending_backfills = self._validated_active_rows()
-            if pending_backfills:
-                raise PaperTradePersistenceError(
-                    "legacy OPEN metadata backfill verification failed"
-                )
-            self.conn.commit()
-        except Exception as error:
-            self.conn.rollback()
-            if isinstance(error, PaperTradePersistenceError):
-                raise
-            raise PaperTradePersistenceError(
-                "paper ledger initialization failed"
-            ) from error
 
     # =========================================================
     # 비동기 물리 상태 백업 (L2 Backup)
@@ -1168,12 +1063,26 @@ class TradeLogger:
                     self._main_connection_closed = True
 
         with self._state_lock:
+            writer_owner_closed = self._writer_owner_closed
+        if not writer_owner_closed:
+            try:
+                self._writer_owner.close()
+            except BaseException as error:
+                self._record_close_failure("SQLite writer ownership close", error)
+                with self._state_lock:
+                    self._writer_owner_closed = self._writer_owner.closed
+            else:
+                with self._state_lock:
+                    self._writer_owner_closed = True
+
+        with self._state_lock:
             terminal = (
                 not self._worker_thread.is_alive()
                 and self._async_queue.unfinished_tasks == 0
                 and self._async_queue.empty()
                 and self._worker_connection_closed
                 and self._main_connection_closed
+                and self._writer_owner_closed
             )
             self._closed = terminal
 
@@ -1561,9 +1470,7 @@ class TradeLogger:
     def _validated_active_rows(
         self,
     ) -> Tuple[list[Dict[str, Any]], list[Tuple[str, str, int, str]]]:
-        rows = self.conn.execute(
-            "SELECT * FROM trades WHERE status IS NULL OR status != 'CLOSED'"
-        ).fetchall()
+        rows = fetch_active_rows(self.conn)
         decoded: list[Dict[str, Any]] = []
         backfills: list[Tuple[str, str, int, str]] = []
         seen_codes: set[str] = set()
@@ -1605,73 +1512,15 @@ class TradeLogger:
 
     def record_buy(self, data: Dict) -> int:
         """상세 점수를 포함하여 매수 기록"""
-        stock_code = self._strict_required_string(
-            data.get("stock_code"), "stock_code"
+        return record_buy_command(
+            self.conn,
+            data,
+            strict_required_string=self._strict_required_string,
+            strict_finite_number=self._strict_finite_number,
+            strict_buy_time=self._strict_buy_time,
+            strict_session_date=self._strict_session_date,
+            strict_state_time=self._strict_state_time,
         )
-        stock_name = self._strict_required_string(
-            data.get("stock_name"), "stock_name"
-        )
-        buy_price = self._strict_finite_number(
-            data.get("buy_price"), "buy_price", positive=True
-        )
-        buy_time = self._strict_required_string(
-            data.get("buy_time"), "buy_time"
-        )
-        self._strict_buy_time(buy_time)
-        buy_regime = self._strict_required_string(
-            data.get("buy_regime"), "buy_regime"
-        )
-        forces = {
-            field_name: self._strict_finite_number(
-                data.get(field_name), field_name
-            )
-            for field_name in _ACTIVE_FORCE_FIELDS
-        }
-        owner_raw = data.get("owning_session_date")
-        changed_raw = data.get("state_changed_at")
-        if owner_raw is None and changed_raw is None:
-            owner_text = None
-            changed_text = None
-        elif owner_raw is None or changed_raw is None:
-            raise PaperTradePersistenceError("partial buy state metadata")
-        else:
-            owner_text = self._strict_session_date(owner_raw).isoformat()
-            changed_text = self._strict_state_time(changed_raw).isoformat()
-        query = """
-        INSERT INTO trades (
-            stock_code, stock_name, buy_price,
-            thrust, gravity, drag, magnetic, jerk, impulse, net_force,
-            buy_time, buy_regime, status, owning_session_date, state_changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        params = (
-            stock_code,
-            stock_name,
-            buy_price,
-            forces["thrust"],
-            forces["gravity"],
-            forces["drag"],
-            forces["magnetic"],
-            forces["jerk"],
-            forces["impulse"],
-            forces["net_force"],
-            buy_time,
-            buy_regime,
-            PositionStatus.OPEN.value,
-            owner_text, changed_text,
-        )
-        try:
-            cursor = self.conn.execute(query, params)
-            row_id = int(cursor.lastrowid) if cursor.lastrowid is not None else 0
-            if row_id <= 0:
-                raise PaperTradePersistenceError("paper buy did not return an id")
-            self.conn.commit()
-            return row_id
-        except Exception as error:
-            self.conn.rollback()
-            if isinstance(error, PaperTradePersistenceError):
-                raise
-            raise PaperTradePersistenceError("paper buy commit failed") from error
 
     def _transition_position(
         self,
@@ -1686,51 +1535,19 @@ class TradeLogger:
         profit_rate: object = None,
         sell_reason: Optional[str] = None,
     ) -> PositionTransitionReceipt:
-        owner = self._strict_session_date(owning_session_date)
-        changed = self._strict_state_time(state_changed_at)
-        try:
-            cursor = self.conn.execute(
-                """
-                UPDATE trades
-                SET status = ?, owning_session_date = ?, state_changed_at = ?,
-                    sell_price = COALESCE(?, sell_price),
-                    sell_time = COALESCE(?, sell_time),
-                    profit_rate = COALESCE(?, profit_rate),
-                    sell_reason = COALESCE(?, sell_reason)
-                WHERE id = ? AND stock_code = ? AND status = ?
-                """,
-                (
-                    status.value,
-                    owner.isoformat(),
-                    changed.isoformat(),
-                    sell_price,
-                    sell_time,
-                    profit_rate,
-                    sell_reason,
-                    pos.id,
-                    pos.stock_code,
-                    expected.value,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise PaperTradePersistenceError(
-                    "paper position transition identity/status mismatch"
-                )
-            self.conn.commit()
-        except Exception as error:
-            self.conn.rollback()
-            if isinstance(error, PaperTradePersistenceError):
-                raise
-            raise PaperTradePersistenceError(
-                "paper position transition commit failed"
-            ) from error
-        return PositionTransitionReceipt(
-            position_id=pos.id,
-            stock_code=pos.stock_code,
-            previous_status=expected,
+        return transition_position_command(
+            self.conn,
+            pos,
+            expected=expected,
             status=status,
-            owning_session_date=owner,
-            state_changed_at=changed,
+            owning_session_date=owning_session_date,
+            state_changed_at=state_changed_at,
+            sell_price=sell_price,
+            sell_time=sell_time,
+            profit_rate=profit_rate,
+            sell_reason=sell_reason,
+            strict_session_date=self._strict_session_date,
+            strict_state_time=self._strict_state_time,
         )
 
     def record_sell(
@@ -1798,14 +1615,7 @@ class TradeLogger:
             raise TypeError("session_date must be a date")
         if not is_krx_session(session_date):
             raise ValueError("session_date must be an XKRX session date")
-        query = (
-            "SELECT SUM(profit_rate) AS cumulative_realized_trade_return_score "
-            "FROM trades WHERE status = 'CLOSED' AND sell_time LIKE ?"
-        )
-        result = self.conn.execute(
-            query,
-            (f"{session_date.isoformat()}%",),
-        ).fetchone()
+        result = fetch_cumulative_score(self.conn, session_date)
         score = result["cumulative_realized_trade_return_score"]
         return float(score) if score is not None else 0.0
 
@@ -1821,19 +1631,8 @@ class TradeLogger:
 
     def get_last_sell_time(self, stock_code: str) -> Optional[datetime]:
         """해당 종목의 가장 최근 매도(CLOSED) 기록 시간을 반환합니다."""
-        query = """
-            SELECT sell_time 
-            FROM trades 
-            WHERE stock_code = ? AND status = 'CLOSED' 
-            ORDER BY sell_time DESC 
-            LIMIT 1
-        """
-        cursor = self.conn.execute(query, (stock_code,))
+        row = fetch_last_sell_row(self.conn, stock_code)
         
-        # 1. fetchone()으로 데이터 한 행을 가져옴
-        row = cursor.fetchone()
-        
-        # 2. 데이터가 존재하고 컬럼값이 있는지 확인
         if row and row['sell_time']:
             return datetime.strptime(row['sell_time'], '%Y-%m-%d %H:%M:%S')
             
@@ -1847,18 +1646,8 @@ class TradeLogger:
         if target_date_str is None:
             target_date_str = self._now().strftime('%Y-%m-%d')
         
-        # DISTINCT를 사용하여 동일한 종목이 여러 번 거래되었더라도 한 번만 가져옵니다.
-        query = """
-            SELECT DISTINCT *
-            FROM trades 
-            WHERE buy_time LIKE ? OR sell_time LIKE ?
-        """
-        
         try:
-            cursor = self.conn.execute(query, (f"{target_date_str}%", f"{target_date_str}%"))
-            rows = cursor.fetchall()
-            
-            return rows
+            return fetch_traded_targets(self.conn, target_date_str)
         except Exception as e:
             logger.info(f"오늘 거래 종목 타겟 추출 실패: {e}")
             return {}

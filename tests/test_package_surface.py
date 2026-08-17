@@ -32,6 +32,41 @@ def test_domain_models_are_reexported_from_legacy_paths():
     assert LegacyPosition is Position
 
 
+def test_reporting_contracts_preserve_legacy_import_identity():
+    from kiwoom_stock.application import reporting as legacy
+    from kiwoom_stock.application import reporting_contracts as contracts
+
+    for name in (
+        "DailyReportRequest",
+        "DailyReportResult",
+        "DailyReportStats",
+        "NarrationResult",
+        "NarrationStatus",
+        "ReportArtifact",
+        "ReportStageResult",
+    ):
+        assert getattr(legacy, name) is getattr(contracts, name)
+
+
+def test_operational_public_import_matrix_remains_loadable():
+    """Freeze the module paths used by current callers and operators."""
+
+    from kiwoom_stock.api.services.account import AccountService
+    from kiwoom_stock.application.execution import ExecutionPolicy
+    from kiwoom_stock.core.config import Settings as LegacySettings
+    from kiwoom_stock.core.database import TradeLogger
+    from kiwoom_stock.core.swing_ledger import SwingLedger
+    from kiwoom_stock.monitoring.reporter import DailyReporter
+    from kiwoom_stock.settings import Settings
+
+    assert LegacySettings is Settings
+    assert AccountService.__module__ == "kiwoom_stock.api.services.account"
+    assert ExecutionPolicy.__module__ == "kiwoom_stock.application.execution"
+    assert TradeLogger.__module__ == "kiwoom_stock.core.database"
+    assert SwingLedger.__module__ == "kiwoom_stock.core.swing_ledger"
+    assert DailyReporter.__module__ == "kiwoom_stock.monitoring.reporter"
+
+
 def test_position_field_contract_and_profit_calculation_are_preserved():
     expected_fields = [
         "id",

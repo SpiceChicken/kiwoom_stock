@@ -11,8 +11,9 @@
 Run these commands from the repository root:
 
 ```bash
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install --require-hashes \
+  -r requirements/locks/dev-py314.txt
+python -m pip install --no-deps --no-build-isolation -e .
 python -m flake8 src tests tools main.py --count --select=E9,F63,F7,F82 --show-source --statistics
 python -m mypy src/kiwoom_stock
 python -m mypy main.py
@@ -42,6 +43,92 @@ status=$?
 set -e
 test "${status}" -eq 1
 ```
+
+## Refactoring regression packets
+
+The following focused checks cover the current refactoring boundaries without
+calling live Kiwoom, Slack, Gemini, AWS, or order capabilities:
+
+```bash
+python -m pytest \
+  tests/test_swing_replay.py \
+  tests/test_swing_purge_policy.py \
+  tests/test_swing_pit_staging.py \
+  tests/test_swing_pit_csv.py \
+  tests/test_swing_economics.py -q
+
+python -m pytest \
+  tests/test_read_path_measurement.py \
+  tests/test_market_input_correctness.py \
+  tests/test_engine.py \
+  tests/test_engine_lifecycle_contract.py \
+  tests/test_runtime_composition.py \
+  tests/test_runtime_shutdown_contract.py \
+  tests/test_overnight_lifecycle.py \
+  tests/test_overnight_downgrade_preflight.py \
+  tests/test_postmarket_reporting.py -q
+
+python -m pytest \
+  tests/test_dependency_contract.py \
+  tests/test_report_delivery_adapters.py \
+  tests/characterization/test_report_delivery_characterization.py -q
+
+python -m pytest \
+  tests/characterization/test_f1_contract_freeze.py \
+  tests/test_package_surface.py \
+  tests/deployment/test_shadow_activation.py \
+  tests/deployment/test_shadow_runtime_evidence.py \
+  tests/deployment/test_shadow_status_notification.py \
+  tests/test_swing_parallel_shadow.py \
+  tests/test_swing_ledger.py -q
+```
+
+`test_swing_purge_policy.py` fixes the replay selection receipt and purge
+boundary as an explicit policy contract. It does not claim a trading result or
+validate a live session. `test_read_path_measurement.py` records request count,
+latency, and terminal 429 behavior using an injected read-only sender; live
+Kiwoom latency remains an external measurement gate.
+
+Engine close and lifecycle characterization is split between
+`test_engine.py` (engine behavior) and `test_engine_lifecycle_contract.py`
+(resource close ordering, retry, concurrency, and process-control propagation).
+The latter imports only the existing test helpers and preserves the original
+test names and assertions.
+
+Runtime shutdown ownership is isolated in
+`test_runtime_shutdown_contract.py`; overnight lifecycle tests are split from
+the read-only downgrade preflight/file-snapshot contract in
+`test_overnight_downgrade_preflight.py`.
+
+`test_f1_contract_freeze.py` holds the independent CLI success/failure JSON,
+candidate identity forwarding, and complete settings metadata snapshot.
+Deployment evidence tests also compare literal oneshot/cycle/terminal key sets
+with the actual serializers, while swing ledger tests hold the schema trigger
+catalog and candidate cleanup error precedence. `test_package_surface.py` freezes
+the operational legacy import matrix, and the deployment notification tests use
+exact success/failure Slack message goldens. These are contract tests only; they
+do not invoke external services.
+
+The dependency contract requires the modern `google-genai` path and rejects
+legacy `google.generativeai` imports in production source. The repository keeps
+hash-pinned runtime and development locks for both supported CI interpreters.
+For a Python 3.11 clean environment, use the matching lock and then install the
+local project without dependency resolution:
+
+```bash
+python3.11 -m venv /tmp/kiwoom-py311
+/tmp/kiwoom-py311/bin/python -m pip install --require-hashes \
+  -r requirements/locks/dev-py311.txt
+/tmp/kiwoom-py311/bin/python -m pip install \
+  --no-deps --no-build-isolation -e .
+```
+
+The Python 3.14 commands use `dev-py314.txt` in the same way. The lock
+contract test checks all four files and their hash coverage. Docker-enabled
+validation uses the same lock through `PYTHON_LOCK=py314` in the Dockerfile;
+the dev Compose build passes that argument explicitly. Real external services
+and staging shadow execution remain separate release gates; local no-live tests
+do not close those gates.
 
 Raw credential and endpoint environment variables are forbidden even when
 empty. Check each name separately without supplying a credential value:
@@ -137,15 +224,18 @@ parent replacement races, uploaded-file identity replacement, validation atomici
 per-path unlink failure. Real AWS/IAM/bucket behavior remains an explicit pre-deployment validation gap; local fake
 tests do not close it.
 
-Local SQLite/thread tests likewise do not prove named-volume ownership, host permissions, real supervisor signals, or
-container stop behavior. No test may use an operational DB file. An actual Docker/SIGTERM validation remains RED until a
-Docker-enabled isolated environment is explicitly approved.
+Local SQLite/thread tests do not by themselves prove named-volume ownership,
+host permissions, real supervisor signals, or container stop behavior. The
+Docker-enabled test image and dev Compose build/start/exit path have now been
+executed with no-live settings. Production-like shadow SIGTERM drain, named
+runtime-volume ownership, and real external read-only staging remain separate
+gates. No test may use an operational DB file.
 
 ## Container static contract
 
-Without starting Docker, the repository can validate YAML shape, the exact configured SQLite path and named-volume
-mount, hardening, stop-grace declaration, absence of raw replica expansion, config-check command, and settings-document
-consumer sync:
+The repository can validate YAML shape, the exact configured SQLite path and
+named-volume mount, hardening, stop-grace declaration, absence of raw replica
+expansion, config-check command, and settings-document consumer sync:
 
 ```bash
 python -m pytest tests/test_container_contract.py tests/test_settings.py -q
@@ -167,9 +257,12 @@ for name in (
 PY
 ```
 
-These are static checks. `command` and `healthcheck` currently run only `--check-config`; neither starts the trading
-worker nor demonstrates SIGTERM queue drain. The raw Compose files omit replica expansion, but cannot prevent an
-operator from passing `docker compose --scale`. Scaling the SQLite app is unsupported.
+These static checks complement the executed Docker test image and dev Compose
+path. `command` and `healthcheck` currently run only `--check-config`; the
+production-like shadow worker still requires an isolated staging invocation to
+demonstrate bounded SIGTERM queue drain. The raw Compose files omit replica
+expansion, but cannot prevent an operator from passing `docker compose --scale`.
+Scaling the SQLite app is unsupported.
 
 ## CI contract
 
@@ -183,7 +276,8 @@ operator from passing `docker compose --scale`. Scaling the SQLite app is unsupp
 - a redacted full-history scan plus generated underscore/hyphen/compact positive
   and placeholder/file-variable negative cases;
 - quality checks on Python 3.11 and Python 3.14;
-- pip cache keyed by `pyproject.toml`;
+- pip cache keyed by the Python-version-specific development lock and
+  `pyproject.toml`;
 - critical lint;
 - package-wide mypy;
 - full pytest with JUnit report upload;

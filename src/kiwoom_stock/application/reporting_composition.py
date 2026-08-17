@@ -15,6 +15,7 @@ from kiwoom_stock.infrastructure.reporting import (
     TradeLoggerReportDataSource,
 )
 from kiwoom_stock.monitoring.reporter import DailyReporter
+from kiwoom_stock.settings import Settings
 
 
 def build_post_market_use_case(
@@ -48,6 +49,7 @@ def build_daily_reporter(
     publisher: Any,
     clock: Optional[Callable[[], datetime]] = None,
     database_factory: Any = None,
+    settings: Optional[Settings] = None,
 ) -> DailyReporter:
     """Build the compatibility facade with the typed reporting use case."""
     use_case = build_post_market_use_case(
@@ -58,4 +60,4 @@ def build_daily_reporter(
         publisher=publisher,
         database_factory=database_factory,
     )
-    return DailyReporter(publisher, use_case=use_case, clock=clock)
+    return DailyReporter(publisher, use_case=use_case, clock=clock, settings=settings)

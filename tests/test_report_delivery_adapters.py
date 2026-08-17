@@ -64,17 +64,23 @@ class _LegacyGeminiSDK:
         self.upload_calls = []
         self.uploaded_file = object()
 
-    def configure(self, *, api_key):
+        class _Models:
+            def generate_content(inner_self, **kwargs):
+                return self.model.generate_content(kwargs["contents"])
+
+        class _Files:
+            def upload(inner_self, **kwargs):
+                self.upload_calls.append(
+                    (kwargs["file"], kwargs["config"]["mime_type"])
+                )
+                return self.uploaded_file
+
+        self.models = _Models()
+        self.files = _Files()
+
+    def Client(self, *, api_key):
         self.configure_calls.append(api_key)
-
-    def GenerativeModel(self, model_name):
-        self.model_names.append(model_name)
-        return self.model
-
-    def upload_file(self, *, path, mime_type):
-        self.upload_calls.append((path, mime_type))
-        return self.uploaded_file
-
+        return self
 
 class _ModernModels:
     def __init__(self, response):
@@ -182,7 +188,6 @@ def test_gemini_narrator_maps_success_date_and_artifact_reference(monkeypatch):
 
     assert result == NarrationResult.succeeded("모델 총평")
     assert sdk.configure_calls == ["fake-key"]
-    assert sdk.model_names == ["gemini-2.5-flash"]
     assert sdk.upload_calls == [
         (TRADE_ARTIFACT.reference, "text/csv"),
     ]

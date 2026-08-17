@@ -62,17 +62,23 @@ class _FakeLegacyGeminiSDK:
         self.upload_calls = []
         self.uploaded_file = object()
 
-    def configure(self, *, api_key):
+        class _Models:
+            def generate_content(inner_self, **kwargs):
+                return self.model.generate_content(kwargs["contents"])
+
+        class _Files:
+            def upload(inner_self, **kwargs):
+                self.upload_calls.append(
+                    (kwargs["file"], kwargs["config"]["mime_type"])
+                )
+                return self.uploaded_file
+
+        self.models = _Models()
+        self.files = _Files()
+
+    def Client(self, *, api_key):
         self.configure_calls.append(api_key)
-
-    def GenerativeModel(self, model_name):
-        self.model_names.append(model_name)
-        return self.model
-
-    def upload_file(self, *, path, mime_type):
-        self.upload_calls.append((path, mime_type))
-        return self.uploaded_file
-
+        return self
 
 def _prompt_bytes(name):
     prompt = resources.files("kiwoom_stock.resources.prompts").joinpath(name)
@@ -126,7 +132,6 @@ def test_packaged_prompt_bytes_and_daily_report_rendering_are_golden(
 
     assert client.model_name == "gemini-2.5-flash"
     assert sdk.configure_calls == ["fake-gemini-key"]
-    assert sdk.model_names == ["gemini-2.5-flash"]
     assert sdk.upload_calls == [(str(csv_path), "text/csv")]
     assert model.calls == [[sdk.uploaded_file, expected_prompt]]
     assert result == {"success": True, "output": "냉정한 분석 결과", "error": None}

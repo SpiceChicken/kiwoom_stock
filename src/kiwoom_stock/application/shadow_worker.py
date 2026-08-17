@@ -36,6 +36,7 @@ from kiwoom_stock.domain.models import (
     PhysicalContinuityEvidence,
     ShadowDecisionTelemetry,
 )
+from kiwoom_stock.application.swing_shadow import SwingShadowEvidence
 from kiwoom_stock.utils.market_cal import (
     KrxCalendarError,
     is_krx_session,
@@ -126,18 +127,23 @@ class ShadowExecutionReceipt:
     local_counts: Mapping[str, int]
     continuity: PhysicalContinuityEvidence | None = None
     decision_telemetry: ShadowDecisionTelemetry | None = None
+    swing_shadow_evidence: SwingShadowEvidence | None = None
 
 
 class ShadowRuntimePort(Protocol):
-    def execute_once(self) -> ShadowExecutionReceipt: ...
+    def execute_once(self) -> ShadowExecutionReceipt:
+        ...
 
 
 class StopEventPort(Protocol):
-    def set(self) -> None: ...
+    def set(self) -> None:
+        ...
 
-    def is_set(self) -> bool: ...
+    def is_set(self) -> bool:
+        ...
 
-    def wait(self, timeout: float | None = None) -> bool: ...
+    def wait(self, timeout: float | None = None) -> bool:
+        ...
 
 
 class RuntimeStopEvent:
@@ -203,9 +209,10 @@ class ShadowRunResult:
     local_counts: Mapping[str, int]
     continuity: PhysicalContinuityEvidence | None = None
     decision_telemetry: ShadowDecisionTelemetry | None = None
+    swing_shadow_evidence: SwingShadowEvidence | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": SHADOW_EVIDENCE_SCHEMA_VERSION,
             "status": self.status,
             "mode": self.mode,
@@ -234,6 +241,9 @@ class ShadowRunResult:
                 else None
             ),
         }
+        if self.swing_shadow_evidence is not None:
+            result["swing_shadow_evidence"] = self.swing_shadow_evidence.to_safe_dict()
+        return result
 
 
 @dataclass(frozen=True)
@@ -442,6 +452,7 @@ def run_shadow_once(
         local_counts=receipt.local_counts,
         continuity=receipt.continuity,
         decision_telemetry=receipt.decision_telemetry,
+        swing_shadow_evidence=receipt.swing_shadow_evidence,
         **common,
     )
 

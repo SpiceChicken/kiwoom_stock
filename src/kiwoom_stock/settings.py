@@ -5,8 +5,6 @@ Pydantic Settings is confined to that source boundary; the application receives
 frozen standard-library dataclasses.
 """
 
-import importlib.resources as resources
-import json
 import math
 import os
 import re
@@ -30,9 +28,26 @@ from kiwoom_stock.domain.strategy import (
 )
 
 
-CONFIGURATION_HELP = ".env.example and docs/configuration.md"
-ALL_ENVIRONMENTS = ("local", "dev", "test", "staging", "prod", "production-like")
-
+from kiwoom_stock.settings_contracts import (
+    ALL_ENVIRONMENTS,
+    CONFIGURATION_HELP,
+    MISSING,
+    SETTING_SPEC_BY_NAME,
+    SETTING_SPECS,
+    SettingSpec,
+    SettingsIssue,
+    SettingsValidationError,
+)
+from kiwoom_stock.settings_sources import (
+    EnvironmentSnapshot,
+    load_legacy_documents,
+)
+from kiwoom_stock.settings_resolver import (
+    LEGACY_CANDIDATES as _LEGACY_CANDIDATES,
+    SettingsResolver as _Resolver,
+    all_equal as _all_equal,
+    lookup as _lookup,
+)
 
 class KiwoomApiMode(str, Enum):
     DISABLED = "disabled"
@@ -59,7 +74,7 @@ _FORBIDDEN_NORMALIZED_KEYS = frozenset(
         "kiwoombaseurl",
     }
 )
-_MISSING = object()
+_MISSING = MISSING
 _TARGET_STOP_CANONICAL_NAMES = (
     "KIWOOM_TARGET_STOP_UNIT_VERSION",
     "KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS",
@@ -75,116 +90,13 @@ _TARGET_STOP_COMPATIBILITY_KEYS = (
     *_AMBIGUOUS_TARGET_STOP_KEYS,
     *_TARGET_STOP_CANONICAL_MAPPING_KEYS,
 )
-_CUMULATIVE_SCORE_CANONICAL_NAME = (
-    "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR"
-)
+_CUMULATIVE_SCORE_CANONICAL_NAME = "KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR"
 _CUMULATIVE_SCORE_DEPRECATED_ENV_NAME = "KIWOOM_TOTAL_LOSS_LIMIT"
 _CUMULATIVE_SCORE_MAPPING_KEYS = (
     "cumulative_trade_return_score_floor",
     "total_loss_limit",
 )
 
-
-@dataclass(frozen=True)
-class SettingSpec:
-    """Machine-readable contract for one canonical environment variable."""
-
-    name: str
-    value_type: str
-    required: str
-    default: Optional[str]
-    consumer: str
-    sensitive: bool
-    environments: Tuple[str, ...]
-    validation: str
-
-
-def _spec(
-    name: str,
-    value_type: str,
-    required: str,
-    default: Optional[str],
-    consumer: str,
-    sensitive: bool,
-    validation: str,
-    environments: Tuple[str, ...] = ALL_ENVIRONMENTS,
-) -> SettingSpec:
-    return SettingSpec(
-        name, value_type, required, default, consumer, sensitive, environments, validation
-    )
-
-
-_SETTING_SPEC_ROWS: Tuple[Tuple[Any, ...], ...] = (
-    ("KIWOOM_EXECUTION_MODE", "enum", "no", "check-only", "execution policy", False,
-     "one of check-only/shadow-once/shadow-continuous; live unavailable"),
-    ("KIWOOM_IMAGE_REF", "OCI image digest", "shadow execution", None,
-     "shadow activation attestation", False,
-     "exact ghcr.io/spicechicken/kiwoom_stock@sha256 digest", ("prod", "production-like")),
-    ("KIWOOM_IMAGE_DIGEST", "OCI image digest", "shadow execution", None,
-     "shadow activation attestation", False,
-     "exact ghcr.io/spicechicken/kiwoom_stock@sha256 digest", ("prod", "production-like")),
-    ("KIWOOM_REQUIRE_SHADOW_VOLUME", "strict boolean", "shadow execution", None,
-     "shadow volume attestation", False,
-     "exactly 1 when the admitted named volume is required", ("prod", "production-like")),
-    ("KIWOOM_API_MODE", "enum", "no", "disabled", "runtime composition", False,
-     "one of disabled/mock/prod"),
-    ("KIWOOM_PROCESS_NAME", "string", "yes", None, "runtime lifecycle", False, "non-empty"),
-    ("KIWOOM_APP_ENV", "enum", "no", "local", "retention policy", False,
-     "one of local/dev/test/staging/prod/production-like"),
-    ("KIWOOM_CREDENTIALS_DIR", "absolute directory path", "for mock/prod", None,
-     "strict credential provider", False,
-     "absolute external directory for mock/prod", ("staging", "prod", "production-like")),
-    ("KIWOOM_OUTPUT_DIR", "directory path", "no", "current working directory", "report output", False,
-     "non-empty, no traversal, not filesystem root"),
-    (
-        "KIWOOM_DB_PATH", "file path", "no", "trades.db",
-        "runtime and post-market SQLite", False,
-        "non-empty, no traversal, not filesystem root",
-    ),
-    ("KIWOOM_SLACK_WEBHOOK_URL", "URL", "no", None, "Slack webhook", True,
-     "http(s) URL with host when set"),
-    ("KIWOOM_SLACK_BOT_TOKEN", "string", "with channel ID", None, "Slack file upload", True,
-     "non-empty and paired with channel ID"),
-    ("KIWOOM_SLACK_CHANNEL_ID", "string", "with bot token", None, "Slack file upload", False,
-     "non-empty and paired with bot token"),
-    ("KIWOOM_GEMINI_API_KEY", "string", "no", None, "Gemini reports", True, "non-empty when set"),
-    ("KIWOOM_S3_BUCKET_NAME", "string", "no; production-class missing preserves outputs", None, "S3 archive", False,
-     "valid lowercase S3 bucket name when set", ("prod", "production-like")),
-    ("KIWOOM_AWS_REGION", "string", "no", None, "future AWS session", False,
-     "lowercase AWS region form when set", ("staging", "prod", "production-like")),
-    ("KIWOOM_FAST_INTERVAL_SECONDS", "positive float", "no", "10", "TradingEngine", False,
-     "> 0 and <= slow interval"),
-    ("KIWOOM_SLOW_INTERVAL_SECONDS", "positive float", "no", "60", "TradingEngine", False,
-     "> 0 and >= fast interval"),
-    ("KIWOOM_MAX_WORKERS", "positive integer", "no", "8", "TradingEngine", False, "> 0"),
-    ("KIWOOM_MARKET_PROXY_CODE", "six-digit string", "no", "069500", "MarketAnalyzer", False,
-     "exactly six digits"),
-    ("KIWOOM_MAX_STOCKS", "positive integer", "no", "50", "StockManager", False, "> 0"),
-    ("KIWOOM_ETF_KEYWORDS", "comma-separated strings", "no", "empty list", "StockManager", False,
-     "trimmed unique non-empty values"),
-    ("KIWOOM_DEBUG_MODE", "strict boolean", "no", "false", "TradingStrategy", False,
-     "exactly true or false"),
-    ("KIWOOM_DAY_TRADE_EXIT_TIME", "HH:MM", "no", "15:30", "TradingStrategy", False,
-     "valid 24-hour HH:MM"),
-    ("KIWOOM_ENTRY_DEADLINE", "HH:MM", "no", "15:00", "TradingStrategy", False,
-     "valid HH:MM earlier than exit time"),
-    ("KIWOOM_CUMULATIVE_TRADE_RETURN_SCORE_FLOOR", "float percentage points", "no", "-5",
-     "TradingStrategy", False, "finite and <= 0"),
-    ("KIWOOM_TOTAL_LOSS_LIMIT", "deprecated float percentage points", "no", None,
-     "settings migration only", False,
-     "deprecated input; must equal the canonical score floor when both are set"),
-    ("KIWOOM_TARGET_STOP_UNIT_VERSION", "enum", "atomic group", TARGET_STOP_UNIT_VERSION,
-     "TradingStrategy", False, "exactly percentage-points-v1; all three target/stop settings together"),
-    ("KIWOOM_TARGET_PROFIT_PERCENTAGE_POINTS", "positive float percentage points", "atomic group", "3.0",
-     "TradingStrategy", False, "finite and > 0; all three target/stop settings together"),
-    ("KIWOOM_STOP_LOSS_PERCENTAGE_POINTS", "positive float percentage points", "atomic group", "3.0",
-     "TradingStrategy", False, "finite and > 0; all three target/stop settings together"),
-)
-SETTING_SPECS: Tuple[SettingSpec, ...] = tuple(_spec(*row) for row in _SETTING_SPEC_ROWS)
-
-SETTING_SPEC_BY_NAME: Mapping[str, SettingSpec] = MappingProxyType(
-    {item.name: item for item in SETTING_SPECS}
-)
 _CANONICAL_SYSTEM_COMPATIBILITY_KEYS: Tuple[str, ...] = (
     "process_name",
     "app_env",
@@ -210,24 +122,6 @@ _CANONICAL_STRATEGY_KEYS: Tuple[str, ...] = (
     "stop_loss_percentage_points",
     "regimes",
 )
-
-
-@dataclass(frozen=True)
-class SettingsIssue:
-    name: str
-    rule: str
-
-
-class SettingsValidationError(ValueError):
-    """Aggregate validation error that never includes submitted values."""
-
-    def __init__(self, issues: Sequence[SettingsIssue]):
-        self.issues = tuple(issues)
-        lines = ["Invalid application settings (%d issue(s)):" % len(self.issues)]
-        lines.extend("- %s: %s" % (issue.name, issue.rule) for issue in self.issues)
-        lines.append("Resolve the listed variables using %s." % CONFIGURATION_HELP)
-        super().__init__("\n".join(lines))
-
 
 @dataclass(frozen=True)
 class RuntimeSettings:
@@ -341,6 +235,31 @@ class DatabaseSettings:
 
 
 @dataclass(frozen=True)
+class SwingCandidateSettings:
+    """Explicitly disabled-by-default isolated swing candidate boundary."""
+
+    enabled: bool
+    database_path: Path
+    portfolio_id: str
+    strategy_semantics_version: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("swing candidate enabled must be boolean")
+        if not isinstance(self.database_path, Path) or not self.database_path.name:
+            raise ValueError("swing candidate database path must identify a file")
+        if not isinstance(self.portfolio_id, str) or not self.portfolio_id.strip():
+            raise ValueError("swing candidate portfolio identity is required")
+        if (
+            not isinstance(self.strategy_semantics_version, str)
+            or not self.strategy_semantics_version.strip()
+        ):
+            raise ValueError("swing candidate strategy semantics version is required")
+        if self.enabled and not self.database_path.is_absolute():
+            raise ValueError("enabled swing candidate database path must be absolute")
+
+
+@dataclass(frozen=True)
 class SettingsDiagnostics:
     sources: Mapping[str, str]
     warnings: Tuple[str, ...]
@@ -404,6 +323,7 @@ class Settings:
     notification: NotificationSettings
     storage: StorageSettings
     database: DatabaseSettings
+    swing_candidate: SwingCandidateSettings
     diagnostics: SettingsDiagnostics
     _legacy: LegacyMappings = field(repr=False)
 
@@ -414,6 +334,11 @@ class Settings:
         )
         if issue is not None:
             raise SettingsValidationError((issue,))
+        if self.swing_candidate.enabled and self.swing_candidate.database_path == self.database.path:
+            raise SettingsValidationError((SettingsIssue(
+                "KIWOOM_SWING_CANDIDATE_DB_PATH",
+                "must be isolated from KIWOOM_DB_PATH",
+            ),))
 
     @classmethod
     def from_mapping(
@@ -489,6 +414,32 @@ class Settings:
             issues.append(environment_issue)
         output_dir = _path("KIWOOM_OUTPUT_DIR", get("KIWOOM_OUTPUT_DIR", str(default_output_dir)), issues, False)
         database_path = _path("KIWOOM_DB_PATH", get("KIWOOM_DB_PATH", "trades.db"), issues, True)
+        swing_enabled = _strict_bool(
+            get("KIWOOM_SWING_CANDIDATE_ENABLED", "false"),
+            issues,
+            name="KIWOOM_SWING_CANDIDATE_ENABLED",
+        )
+        swing_database_path = _path(
+            "KIWOOM_SWING_CANDIDATE_DB_PATH",
+            get("KIWOOM_SWING_CANDIDATE_DB_PATH", "./runtime/swing-candidate.sqlite3"),
+            issues,
+            True,
+        )
+        swing_portfolio_id = _required_text(
+            "KIWOOM_SWING_CANDIDATE_PORTFOLIO_ID",
+            get("KIWOOM_SWING_CANDIDATE_PORTFOLIO_ID", "swing-paper-v1"),
+            issues,
+        )
+        swing_semantics_version = _required_text(
+            "KIWOOM_SWING_STRATEGY_SEMANTICS_VERSION",
+            get("KIWOOM_SWING_STRATEGY_SEMANTICS_VERSION", "swing-v1"),
+            issues,
+        )
+        if swing_enabled and swing_database_path is not None and not swing_database_path.is_absolute():
+            issues.append(SettingsIssue(
+                "KIWOOM_SWING_CANDIDATE_DB_PATH",
+                "must be absolute when KIWOOM_SWING_CANDIDATE_ENABLED=true",
+            ))
 
         webhook_url = _url("KIWOOM_SLACK_WEBHOOK_URL", get("KIWOOM_SLACK_WEBHOOK_URL", None), issues, False)
         slack_token = _optional_text("KIWOOM_SLACK_BOT_TOKEN", get("KIWOOM_SLACK_BOT_TOKEN", None), issues)
@@ -544,6 +495,9 @@ class Settings:
             or app_env is None
             or output_dir is None
             or database_path is None
+            or swing_database_path is None
+            or swing_portfolio_id is None
+            or swing_semantics_version is None
             or fast is None
             or slow is None
             or workers is None
@@ -571,6 +525,12 @@ class Settings:
             NotificationSettings(webhook_url, slack_token, slack_channel, gemini_key),
             StorageSettings(output_dir, bucket, aws_region),
             DatabaseSettings(database_path),
+            SwingCandidateSettings(
+                swing_enabled,
+                swing_database_path,
+                swing_portfolio_id,
+                swing_semantics_version,
+            ),
             SettingsDiagnostics(MappingProxyType(dict(sources)), tuple(warnings)),
             legacy_data,
         )
@@ -686,7 +646,7 @@ def load_settings_from_environment(
 ) -> Settings:
     """Read non-secret process settings and return frozen settings."""
 
-    snapshot = dict(os.environ)
+    snapshot = EnvironmentSnapshot.capture(os.environ).values
     source_issues: List[SettingsIssue] = []
     source = _environment_source(source_issues)
     canonical = {
@@ -719,159 +679,21 @@ def load_settings_from_environment(
     return result
 
 
-def _legacy_package_root(package_name: str) -> Any:
-    try:
-        return resources.files(package_name)
-    except ModuleNotFoundError:
-        return None
-    except TypeError as exc:
-        raise SettingsValidationError(
-            (SettingsIssue("LEGACY_CONFIG_PACKAGE", "must be an importable resource package"),)
-        ) from exc
-
-
-def _read_legacy_resource(resource: Any, issues: List[SettingsIssue]) -> Optional[Mapping[str, Any]]:
-    try:
-        parsed = json.loads(resource.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        issues.append(SettingsIssue("LEGACY.%s" % resource.name, "must contain a readable JSON object"))
-        return None
-    if not isinstance(parsed, Mapping):
-        issues.append(SettingsIssue("LEGACY.%s" % resource.name, "must contain a JSON object"))
-        return None
-    return parsed
-
-
 def load_legacy_json_mappings(package_name: str = "config") -> LegacyMappings:
     """Explicitly load the three supported legacy JSON resources after startup guards."""
 
-    package_root = _legacy_package_root(package_name)
-    if package_root is None:
-        return LegacyMappings()
-    file_targets = {
-        "config.json": "config",
-        "strategy_config.json": "strategy_config",
-        "scoring_config.json": "scoring_config",
-    }
-    loaded: Dict[str, Mapping[str, Any]] = {}
-    notices: List[str] = []
-    issues: List[SettingsIssue] = []
-    for resource in sorted(package_root.iterdir(), key=lambda item: item.name):
-        if not resource.name.endswith(".json"):
-            continue
-        target = file_targets.get(resource.name)
-        if target is None:
-            notices.append(
-                "Unknown legacy JSON resource %s was ignored; migrate or remove it." % resource.name
-            )
-            continue
-        parsed = _read_legacy_resource(resource, issues)
-        if parsed is not None:
-            loaded[target] = parsed
-    if issues:
-        raise SettingsValidationError(issues)
+    documents = load_legacy_documents(package_name)
     return LegacyMappings.from_mappings(
-        loaded.get("config"),
-        loaded.get("strategy_config"),
-        loaded.get("scoring_config"),
-        notices,
+        documents.config,
+        documents.strategy_config,
+        documents.scoring_config,
+        documents.notices,
     )
 
 
-_LEGACY_CANDIDATES: Mapping[str, Tuple[Tuple[str, Tuple[str, ...]], ...]] = MappingProxyType(
-    {
-        "KIWOOM_PROCESS_NAME": (("CONFIG", ("process_name",)), ("STRATEGY_CONFIG", ("process_name",))),
-        "KIWOOM_APP_ENV": (("CONFIG", ("app_env",)), ("STRATEGY_CONFIG", ("app_env",))),
-        "KIWOOM_SLACK_WEBHOOK_URL": (("CONFIG", ("webhook_url",)),),
-        "KIWOOM_SLACK_BOT_TOKEN": (("CONFIG", ("slack_token",)),),
-        "KIWOOM_SLACK_CHANNEL_ID": (("CONFIG", ("slack_channel",)),),
-        "KIWOOM_GEMINI_API_KEY": (("CONFIG", ("gemini_api_key",)),),
-        "KIWOOM_S3_BUCKET_NAME": (("CONFIG", ("aws_s3_bucket_name",)),),
-        "KIWOOM_AWS_REGION": (("CONFIG", ("aws_region",)),),
-        "KIWOOM_FAST_INTERVAL_SECONDS": (("CONFIG", ("fast_interval",)),),
-        "KIWOOM_SLOW_INTERVAL_SECONDS": (("CONFIG", ("slow_interval",)),),
-        "KIWOOM_MAX_WORKERS": (("CONFIG", ("max_workers",)),),
-        "KIWOOM_MARKET_PROXY_CODE": (("CONFIG", ("market", "proxy_code")),),
-        "KIWOOM_MAX_STOCKS": (("CONFIG", ("filters", "max_stocks")),),
-        "KIWOOM_ETF_KEYWORDS": (("CONFIG", ("filters", "etf_keywords")),),
-        "KIWOOM_DEBUG_MODE": (("CONFIG", ("strategy", "debug_mode")), ("STRATEGY_CONFIG", ("strategy", "debug_mode"))),
-        "KIWOOM_DAY_TRADE_EXIT_TIME": (
-            ("CONFIG", ("strategy", "day_trade_exit_time")),
-            ("STRATEGY_CONFIG", ("strategy", "day_trade_exit_time")),
-        ),
-        "KIWOOM_ENTRY_DEADLINE": (
-            ("CONFIG", ("strategy", "entry_deadline")),
-            ("STRATEGY_CONFIG", ("strategy", "entry_deadline")),
-        ),
-        "KIWOOM_TOTAL_LOSS_LIMIT": (
-            ("CONFIG", ("strategy", "total_loss_limit")),
-            ("STRATEGY_CONFIG", ("strategy", "total_loss_limit")),
-        ),
-    }
-)
-
-
-class _Resolver:
-    def __init__(
-        self,
-        canonical: Mapping[str, str],
-        legacy: LegacyMappings,
-        issues: List[SettingsIssue],
-        warnings: List[str],
-        sources: Dict[str, str],
-        source_name: str,
-    ):
-        self.canonical = canonical
-        self.legacy = legacy
-        self.issues = issues
-        self.warnings = warnings
-        self.sources = sources
-        self.source_name = source_name
-
-    def get(self, name: str, default: Any = _MISSING) -> Any:
-        hits = self._legacy_hits(name)
-        if name in self.canonical:
-            if hits:
-                self.warnings.append(
-                    "%s overrides deprecated legacy source(s): %s."
-                    % (name, ", ".join(label for label, _ in hits))
-                )
-            self.sources[name] = self.source_name
-            return self.canonical[name]
-        if hits:
-            if not _all_equal([value for _, value in hits]):
-                self.issues.append(
-                    SettingsIssue(name, "conflicting legacy values exist; set the canonical variable")
-                )
-            elif len(hits) > 1:
-                self.warnings.append(
-                    "%s is duplicated across legacy sources: %s."
-                    % (name, ", ".join(label for label, _ in hits))
-                )
-            self.warnings.append(
-                "%s uses deprecated legacy source %s; migrate to the canonical variable."
-                % (name, hits[0][0])
-            )
-            self.sources[name] = hits[0][0]
-            return hits[0][1]
-        if default is not _MISSING:
-            self.sources[name] = "default"
-            return default
-        self.sources[name] = "missing"
-        return _MISSING
-
-    def _legacy_hits(self, name: str) -> List[Tuple[str, Any]]:
-        result: List[Tuple[str, Any]] = []
-        for source_name, path in _LEGACY_CANDIDATES.get(name, ()):
-            source = self.legacy.config if source_name == "CONFIG" else self.legacy.strategy_config
-            value = _lookup(source, path)
-            if value is not _MISSING:
-                result.append(("%s.%s" % (source_name, ".".join(path)), value))
-        return result
-
-
 def _required_text(name: str, value: Any, issues: List[SettingsIssue]) -> Optional[str]:
-    if value is _MISSING or not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip():
+
         issues.append(SettingsIssue(name, "is required and must be a non-empty string"))
         return None
     return value.strip()
@@ -1070,12 +892,17 @@ def _string_list(value: Any, issues: List[SettingsIssue]) -> Tuple[str, ...]:
     return normalized
 
 
-def _strict_bool(value: Any, issues: List[SettingsIssue]) -> bool:
+def _strict_bool(
+    value: Any,
+    issues: List[SettingsIssue],
+    *,
+    name: str = "KIWOOM_DEBUG_MODE",
+) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str) and value.strip().lower() in ("true", "false"):
         return value.strip().lower() == "true"
-    issues.append(SettingsIssue("KIWOOM_DEBUG_MODE", "must be exactly true or false"))
+    issues.append(SettingsIssue(name, "must be exactly true or false"))
     return False
 
 
@@ -1455,28 +1282,6 @@ def _unknown_legacy_warnings(legacy: LegacyMappings) -> List[str]:
                     % (key, key)
                 )
     return result
-
-
-def _lookup(mapping: Mapping[str, Any], path: Tuple[str, ...]) -> Any:
-    current: Any = mapping
-    for part in path:
-        if not isinstance(current, Mapping) or part not in current:
-            return _MISSING
-        current = current[part]
-    return current
-
-
-def _all_equal(values: Sequence[Any]) -> bool:
-    if not values:
-        return True
-    first = values[0]
-    for value in values[1:]:
-        try:
-            if not bool(value == first):
-                return False
-        except Exception:
-            return False
-    return True
 
 
 def _minutes(value: str) -> int:

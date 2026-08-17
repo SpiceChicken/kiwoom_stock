@@ -302,10 +302,17 @@ def test_ci_quality_job_uses_supported_python_matrix_and_pip_cache():
     setup_steps = [step for step in steps if step.get("uses") == SETUP_PYTHON_ACTION]
     assert len(setup_steps) == 1
     assert setup_steps[0]["with"]["cache"] == "pip"
-    assert setup_steps[0]["with"]["cache-dependency-path"] == "pyproject.toml"
+    assert setup_steps[0]["with"]["cache-dependency-path"] == (
+        "pyproject.toml\n"
+        "requirements/locks/dev-py${{ matrix.python-version }}.txt\n"
+    )
 
     run_blocks = "\n".join(step.get("run", "") for step in steps)
-    assert 'python -m pip install -e ".[dev]"' in run_blocks
+    assert "python -m pip install --require-hashes" in run_blocks
+    assert (
+        "python -m pip install --no-deps --no-build-isolation -e ."
+        in run_blocks
+    )
     assert "python -m mypy src/kiwoom_stock" in run_blocks
     assert (
         "python -m mypy src/kiwoom_stock "
@@ -358,7 +365,10 @@ def test_ci_package_job_builds_and_smokes_installed_wheel():
     run_blocks = "\n".join(step.get("run", "") for step in steps)
     assert "python -m build" in run_blocks
     assert "python -m venv .wheel-smoke" in run_blocks
-    assert ".wheel-smoke/bin/python -m pip install dist/*.whl" in run_blocks
+    assert (
+        ".wheel-smoke/bin/python -m pip install --no-deps dist/*.whl"
+        in run_blocks
+    )
     assert '"${wheel_smoke_python}" -m kiwoom_stock --check-config' in run_blocks
     assert "grep -q KIWOOM_PROCESS_NAME /tmp/check-config.err" in run_blocks
     assert 'cd "${RUNNER_TEMP}"' in run_blocks

@@ -219,6 +219,32 @@ def test_success_message_uses_only_accepted_summary(tmp_path):
     assert "live-trading=disabled" in message
 
 
+def test_shadow_status_messages_are_exact_control_plane_goldens():
+    assert notification._success_message(
+        _success(),
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    ) == (
+        "[KIWOOM SHADOW] CONTINUOUS PASS | activation=slack-status-test | "
+        "source=aaaaaaaaaaaa | cycles=1 | "
+        "account/order/revoke=disabled | live-trading=disabled"
+    )
+    assert notification._failure_message(
+        _diagnostic(),
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    ) == (
+        "[KIWOOM SHADOW] ACTION FAILED | action=continuous | "
+        "category=terminal_evidence_missing | activation=slack-status-test | "
+        "source=aaaaaaaaaaaa | account/order/revoke=disabled | "
+        "live-trading=disabled"
+    )
+
+
 def test_rejected_runtime_uses_only_allowlisted_diagnostic_category(tmp_path):
     evidence = tmp_path / "missing-evidence.json"
     diagnostic = tmp_path / "diagnostic.json"
