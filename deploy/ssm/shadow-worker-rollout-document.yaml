@@ -246,8 +246,36 @@ mainSteps:
             fi
             trap 'rc=$?; trap - ERR; rollback_set >/dev/null 2>&1 || true; exit "$rc"' ERR
             downloaded="$(mktemp "$state/.worker-download.XXXXXX")"; validator_downloaded="$(mktemp "$state/.validator-download.XXXXXX")"; marker="$(mktemp "$state/.binding-stage.XXXXXX")"; trap 'rm -f "$downloaded" "$validator_downloaded" "$marker"' EXIT
-            timeout 45 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "https://raw.githubusercontent.com/SpiceChicken/kiwoom_stock/${source_sha}/deploy/ec2/shadow_worker_control.sh" -o "$downloaded"
-            timeout 45 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "https://raw.githubusercontent.com/SpiceChicken/kiwoom_stock/${source_sha}/deploy/ec2/shadow_runtime_evidence.py" -o "$validator_downloaded"
+            download_github_file() {
+              local path="$1"; local destination="$2"; local response
+              case "$path" in
+                deploy/ec2/shadow_worker_control.sh|deploy/ec2/shadow_runtime_evidence.py) ;;
+                *) printf 'unsupported GitHub path: %s\n' "$path" >&2; return 64 ;;
+              esac
+              response="$(mktemp "$state/.github-api-response.XXXXXX")"
+              trap 'rm -f "$response"' RETURN
+              timeout 45 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/SpiceChicken/kiwoom_stock/contents/${path}?ref=${source_sha}" \
+                -o "$response"
+              python3 - "$response" "$destination" "$path" <<'PY'
+          import base64,json,os,sys
+          response,destination,path=sys.argv[1:]
+          with open(response,encoding="utf-8") as stream: value=json.load(stream)
+          if value.get("type")!="file" or value.get("path")!=path or value.get("encoding")!="base64" or not isinstance(value.get("content"),str): raise SystemExit("GitHub Contents response shape invalid")
+          encoded="".join(value["content"].split())
+          try: decoded=base64.b64decode(encoded,validate=True)
+          except (ValueError,base64.binascii.Error) as error: raise SystemExit("GitHub Contents base64 invalid") from error
+          if not decoded: raise SystemExit("GitHub Contents file empty")
+          descriptor=os.open(destination,os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+          with os.fdopen(descriptor,"wb") as stream: stream.write(decoded)
+          PY
+              rm -f "$response"
+              trap - RETURN
+            }
+            download_github_file deploy/ec2/shadow_worker_control.sh "$downloaded"
+            download_github_file deploy/ec2/shadow_runtime_evidence.py "$validator_downloaded"
             [[ "$(sha256sum "$downloaded" | cut -d' ' -f1)" == "$worker_sha" ]]; bash -n "$downloaded"
             [[ "$(sha256sum "$validator_downloaded" | cut -d' ' -f1)" == "$validator_sha" ]]; python3 -c 'import sys; compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")' "$validator_downloaded"
             python3 - "$source_sha" "$worker_sha" "$validator_sha" "$document_sha" "$attempt" >"$marker" <<'PY'

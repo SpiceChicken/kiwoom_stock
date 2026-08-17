@@ -72,7 +72,7 @@ FIXED_CONTAINER_RECOVERY_ENVELOPE_SHA256 = (
     "13c311fc8d45049d11886f6dc228f002a934172bdc119d3534440f746b72a869"
 )
 ROLLOUT_COMMAND_SOURCE_SHA256 = (
-    "e80216f350c6493627236821d22f66c55a73dc268b3b740175422eab7b74b5da"
+    "4049fe1186876368067913301213863acf40cc05ce01a6adebe541f378f6072f"
 )
 
 ACTIVATION_INPUT_ENV = {
@@ -1783,14 +1783,26 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
         "worker_target=/usr/local/sbin/kiwoom-shadow-worker",
         "validator_target=/usr/local/libexec/kiwoom-shadow-runtime-evidence.py",
         "binding=/var/lib/kiwoom-stock/shadow-rollout-current.json",
-        "shadow_worker_control.sh\" -o \"$downloaded\"",
-        "shadow_runtime_evidence.py\" -o \"$validator_downloaded\"",
+        "download_github_file deploy/ec2/shadow_worker_control.sh \"$downloaded\"",
+        "download_github_file deploy/ec2/shadow_runtime_evidence.py \"$validator_downloaded\"",
         "publish \"$validator_downloaded\" \"$validator_target\" 750 \"$validator_sha\" python",
         "publish \"$downloaded\" \"$worker_target\" 750 \"$worker_sha\" shell",
         "publish \"$marker\" \"$binding\" 600 \"$marker_sha\" no",
     }
     if any(command.count(fragment) != 1 for fragment in required_fragments):
         raise ContractMismatch("rollout.document.artifact_wiring")
+    download_contract = {
+        "download_github_file() {",
+        '"https://api.github.com/repos/SpiceChicken/kiwoom_stock/contents/${path}?ref=${source_sha}"',
+        "-H 'Accept: application/vnd.github+json'",
+        "-H 'X-GitHub-Api-Version: 2022-11-28'",
+        "base64.b64decode(encoded,validate=True)",
+        "os.O_NOFOLLOW",
+        "download_github_file deploy/ec2/shadow_worker_control.sh \"$downloaded\"",
+        "download_github_file deploy/ec2/shadow_runtime_evidence.py \"$validator_downloaded\"",
+    }
+    if any(command.count(fragment) != 1 for fragment in download_contract):
+        raise ContractMismatch("rollout.document.download_contract")
     recovery_fragments = [
         "prepare_fixed_container_for_install() {",
         "docker container inspect \"$fixed_container\" >\"$snapshot\"",
@@ -1908,8 +1920,8 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
     ):
         raise ContractMismatch("rollout.document.fixed_container_recovery")
     ordered_pipeline = [
-        'shadow_worker_control.sh" -o "$downloaded"',
-        'shadow_runtime_evidence.py" -o "$validator_downloaded"',
+        'download_github_file deploy/ec2/shadow_worker_control.sh "$downloaded"',
+        'download_github_file deploy/ec2/shadow_runtime_evidence.py "$validator_downloaded"',
         '[[ "$(sha256sum "$downloaded" | cut -d\' \' -f1)" == "$worker_sha" ]]',
         'bash -n "$downloaded"',
         '[[ "$(sha256sum "$validator_downloaded" | cut -d\' \' -f1)" == '
@@ -1920,7 +1932,7 @@ def _verify_rollout_document(document: Mapping[str, Any]) -> None:
         'publish "$downloaded" "$worker_target" 750 "$worker_sha" shell',
         'publish "$marker" "$binding" 600 "$marker_sha" no',
     ]
-    pipeline_start = command.find("timeout 45 curl")
+    pipeline_start = command.find("download_github_file() {")
     pipeline = command[pipeline_start:] if pipeline_start >= 0 else ""
     pipeline_positions = [pipeline.find(fragment) for fragment in ordered_pipeline]
     if any(position < 0 for position in pipeline_positions) or (
