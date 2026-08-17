@@ -150,8 +150,9 @@ def test_rollout_document_has_only_anchored_tuple_and_fixed_actions():
             assert parameter["allowedPattern"].endswith("$")
     text = ROLLOUT_DOCUMENT.read_text(encoding="utf-8")
     assert "AWS-RunShellScript" not in text
-    assert "raw.githubusercontent.com/SpiceChicken/kiwoom_stock/${source_sha}/deploy/ec2/shadow_worker_control.sh" in text
-    assert "raw.githubusercontent.com/SpiceChicken/kiwoom_stock/${source_sha}/deploy/ec2/shadow_runtime_evidence.py" in text
+    assert "api.github.com/repos/SpiceChicken/kiwoom_stock/contents/${path}?ref=${source_sha}" in text
+    assert "download_github_file deploy/ec2/shadow_worker_control.sh \"$downloaded\"" in text
+    assert "download_github_file deploy/ec2/shadow_runtime_evidence.py \"$validator_downloaded\"" in text
     for forbidden in ("\n  Command:", "\n  Url:", "\n  TargetPath:", "\n  DocumentName:"):
         assert forbidden not in text
     assert "exec /bin/bash -s -- \\\n" in text
@@ -494,10 +495,13 @@ def test_atomic_binding_publish_failure_restores_exact_prior_artifact_set(tmp_pa
     fake_curl = tools / "curl"
     fake_curl.write_text(
         "#!/usr/bin/env python3\n"
-        "import os, shutil, sys\n"
+        "import base64, json, os, sys\n"
         "destination=sys.argv[sys.argv.index('-o')+1]\n"
-        "source=os.environ['FAKE_VALIDATOR'] if 'shadow_runtime_evidence.py' in ' '.join(sys.argv) else os.environ['FAKE_WORKER']\n"
-        "shutil.copyfile(source,destination)\n",
+        "is_validator='shadow_runtime_evidence.py' in ' '.join(sys.argv)\n"
+        "source=os.environ['FAKE_VALIDATOR'] if is_validator else os.environ['FAKE_WORKER']\n"
+        "path='deploy/ec2/shadow_runtime_evidence.py' if is_validator else 'deploy/ec2/shadow_worker_control.sh'\n"
+        "with open(source, 'rb') as stream: content=base64.b64encode(stream.read()).decode()\n"
+        "with open(destination, 'w', encoding='utf-8') as stream: json.dump({'type':'file','path':path,'encoding':'base64','content':content}, stream)\n",
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
