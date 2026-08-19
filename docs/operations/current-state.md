@@ -122,25 +122,26 @@ AWS read-back은 새 target과 문서 기본 버전을 확인했다. 위의 초�
 
 ## 현재 immutable release tuple
 
+실행 시점의 source/image/build tuple은 아래 repository-level Actions variable의
+값이 SSOT다. 문서에 release SHA를 고정하지 않아 문서 commit 자체가 다음
+schedule release를 stale하게 만들지 않도록 한다. 세 값은 rollout 성공 후
+함께 read-back한다.
+
 | 항목 | 값 |
 |---|---|
-| Source SHA | `c1a7e2735a985ae661366623e9760eb904897c7e` |
-| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:96379a88c2861b15a924ef70829b1dbeb1ad289da2893401dec334f6595f7d52` |
-| Build run | `32217767456` |
-| Compose SHA | `dfdaa7fb1f3df62c9baaf348f774544beff519c63d4588411b5068bf3bfb0164` |
-| Production Compose SHA | `d5695a07a0c9f5f1ee5a8ed079b704a76bad3f6a576139b397341989c54b0c34` |
-| Worker SHA | `beae99b83ede9ad757c77b03f932d7770943fda7ac2fb119631fa91b1f12852d` |
-| Validator SHA | `fe65bb6f5738ba1e1c909569832bd3a1f1e20fed9de3a2823b7d87ffae666fbe` |
-| Shadow document SHA | `0304beaa41b705ec808f09fcade2055d300c6a82a8d4cd2ef9a04abaa082d559` |
-| Current production container check | `32217767456` (success) |
-| Shadow rollout attempt | `32218527450` (install/read-back success) |
-| First bounded activation | `32218616390` workflow_dispatch (76 cycles / terminal DEADLINE / side effects false / Slack DELIVERED) |
-| Stale holiday schedule run | `31980723090` (cancelled while awaiting protected review) |
+| Source SHA | `KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA` |
+| Image | `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST` |
+| Build run | `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID` |
+| Compose / production Compose SHA | latest release manifest for that tuple |
+| Worker / validator / shadow document SHA | latest exact shadow rollout evidence |
+| Production check / rollout / activation | latest successful evidence artifacts |
 
 이 tuple은 현재 `main` source와 동일 revision image의 production-check 및 shadow
-artifact rollout/read-back 통과 tuple이다. repository schedule variables에도
-동일한 source/image/build 값이 등록되어 있다. `production-shadow`는 main branch
-policy와 exact validation을 유지하며, schedule은 human reviewer 없이 수행된다.
+artifact rollout/read-back 통과 tuple이어야 한다. workflow preflight가 불일치를
+자동 거부한다. `production-shadow`는 main branch policy와 exact validation을
+유지하며, schedule은 human reviewer 없이 수행된다.
+휴장일에는 continuous worker가 zero-cycle `CLOSED/calendar-closed` terminal과
+정상 cleanup evidence를 남기며, 실제 주문·계좌·외부 부수효과는 계속 비활성이다.
 
 ## 다음 실제 장 운영 창
 
@@ -153,8 +154,8 @@ preflight가 자동으로 fail-closed 경계를 담당한다.
 - 15:30 KST: worker 자체 deadline
 - 15:35 KST: automatic `stop`, exact container 제거 및 terminal evidence
 
-이전 stale tuple을 사용하던 schedule run `32227537176`은 자동 수행 전에 취소했고,
-현재 schedule variables를 `c1a7e273...` release로 갱신했다. 다음 평일 schedule은
+이전 stale tuple을 사용하던 schedule run은 자동 수행 전에 취소했고,
+현재 schedule variables는 마지막 exact rollout 성공 tuple로 갱신되어 있다. 다음 평일 schedule은
 별도 human approval 없이 exact tuple preflight 후 실행된다.
 
 과거 protected-review 대기 run들은 historical evidence로만 보존하며, 현재

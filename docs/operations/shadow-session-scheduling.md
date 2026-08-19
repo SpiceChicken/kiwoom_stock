@@ -91,13 +91,18 @@ Do not copy a historical tuple from the production-check guide.
 
 | 항목 | 값 |
 |---|---|
-| Source SHA | `c1a7e2735a985ae661366623e9760eb904897c7e` |
-| Image digest | `ghcr.io/spicechicken/kiwoom_stock@sha256:96379a88c2861b15a924ef70829b1dbeb1ad289da2893401dec334f6595f7d52` |
-| Build run | `32217767456` |
+| Source SHA | repository variable `KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA` |
+| Image digest | repository variable `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST` |
+| Build run | repository variable `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID` |
 
-이 tuple은 현재 `main`과 EC2 rollout binding 및 activation image와 동일하다.
-새 release를 운영 대상으로 전환할 때는 production check와 exact rollout이
-성공한 뒤 세 schedule 변수를 함께 갱신한다.
+위 세 값과 EC2 rollout binding 및 activation image가 동일한지 workflow가
+매번 exact 검증한다. 새 release를 운영 대상으로 전환할 때는 production check와
+exact rollout이 성공한 뒤 세 schedule 변수를 함께 갱신한다.
+
+휴장일 admission은 continuous worker가 `CLOSED/calendar-closed` zero-cycle
+terminal을 남기고 종료하며, 호스트 제어 스크립트는 해당 컨테이너를 제거한 뒤
+성공적인 fail-closed evidence를 반환한다. 따라서 휴장일에 매매를 시도하지 않고
+예약 workflow도 불필요한 runtime failure로 분류하지 않는다.
 
 ## Acceptance evidence
 
