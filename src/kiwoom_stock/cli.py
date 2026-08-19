@@ -23,14 +23,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     shadow_once = subparsers.add_parser(
         "shadow-once",
-        help="run one fixed-target, market-only shadow calculation cycle",
+        help=(
+            "run one fixed-target market-to-isolated-paper-ledger E2E cycle "
+            "with broker orders disabled"
+        ),
     )
     shadow_once.add_argument("--source-sha", required=True)
     shadow_once.add_argument("--image-digest", required=True)
     shadow_once.add_argument("--activation-id", required=True)
     shadow_worker = subparsers.add_parser(
         "shadow-worker",
-        help="run the bounded fixed-target continuous shadow worker",
+        help=(
+            "run the bounded fixed-target continuous paper-ledger E2E worker "
+            "with broker orders disabled"
+        ),
     )
     shadow_worker.add_argument("--source-sha", required=True)
     shadow_worker.add_argument("--image-digest", required=True)
