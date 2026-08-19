@@ -763,7 +763,9 @@ def _document_step(document: Mapping[str, Any], category: str) -> tuple[Mapping[
     return inputs, commands[0]
 
 
-def _worker_usage_contract(worker: str) -> tuple[list[str], list[str], set[str]]:
+def _worker_usage_contract(
+    worker: str,
+) -> tuple[list[str], list[str], list[str], set[str]]:
     main = re.search(r"(?ms)^main\(\) \{(?P<body>.*?)^\}", worker)
     if main is None:
         raise ContractMismatch("activation.worker.main")
@@ -822,7 +824,7 @@ def _worker_usage_contract(worker: str) -> tuple[list[str], list[str], set[str]]
     return active, stop, telemetry_page, set(parser_mapping)
 
 
-def _branch_argv(command: str) -> tuple[list[str], list[str]]:
+def _branch_argv(command: str) -> tuple[list[str], list[str], list[str]]:
     match = re.fullmatch(
         r'\s*exec\s+9>/run/lock/kiwoom-stock-shadow\.lock;\s*'
         r'flock\s+-x\s+-w\s+240\s+9\s+\|\|\s+exit\s+75;\s*'
