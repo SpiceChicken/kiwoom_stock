@@ -14,6 +14,7 @@ import requests
 from kiwoom_stock.api.auth import Authenticator, Sleeper, UtcClock, _utc_now
 from kiwoom_stock.api.base import BaseClient, is_valid_bearer_authorization
 from kiwoom_stock.api.exceptions import KiwoomAPIError
+from kiwoom_stock.api.http_headers import configure_session
 from kiwoom_stock.api.services.market import MarketService
 from kiwoom_stock.application.credentials import KiwoomClientCredentials
 from kiwoom_stock.application.ports import (
@@ -84,9 +85,7 @@ class AllowlistedReadOnlySession(requests.Session):
             or not 1 <= max_attempts <= MAX_HTTP_ATTEMPTS
         ):
             raise ValueError("max_attempts must be an integer from 1 to 23")
-        self._transport = requests.Session()
-        self._transport.trust_env = False
-        self._transport.proxies = {}
+        self._transport = configure_session(requests.Session())
         self._stock_code = stock_code
         self._proxy_code = proxy_code
         self._max_attempts = max_attempts

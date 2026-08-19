@@ -10,6 +10,7 @@ import requests
 
 from kiwoom_stock.api.auth import AuthorizationSnapshot
 from kiwoom_stock.api.exceptions import KiwoomAPIError, KiwoomAPIResponseError
+from kiwoom_stock.api.http_headers import configure_session
 from kiwoom_stock.settings import KiwoomEndpoint
 
 
@@ -61,9 +62,9 @@ class BaseClient:
         self._auth = authenticator
         self._endpoint = endpoint
         self._owns_session = session is None
-        self._session = session if session is not None else requests.Session()
-        self._session.trust_env = False
-        self._session.proxies = {}
+        self._session = configure_session(
+            session if session is not None else requests.Session()
+        )
         self._sleeper = sleeper
         self._closed = False
 
