@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-17 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-08-19 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다.
 
@@ -58,12 +58,13 @@ rollout/read-back을 완료했으며, shadow worker와 실제 credential은 시�
 | Root volume | `vol-046bee674877fd983`, 8 GiB gp3, encrypted |
 | Key pair | `kiwoom-ec2-ssh-20260815` |
 | State file | `/home/pc/kiwoom-rebuild-state-20260815-run1.txt`, mode `0600` |
-| Host validation | cloud-init complete, `sshd -t` valid, Docker active, snap `amazon-ssm-agent` active, containers 0; shadow artifact read-back success |
+| Host validation | cloud-init complete, `sshd -t` valid, Docker active, snap `amazon-ssm-agent` active; bounded shadow session completed with terminal evidence |
 | Kiwoom REST API allowlist | `54.116.97.199` 등록 완료 (사용자 확인) |
 
-2026-08-17 KST 직접 SSH read-back 결과는 다음과 같다. Docker에는 실행 중인
-컨테이너가 없고, `kiwoom-stock-shadow_kiwoom-shadow-data` named volume은
-존재하지만 `_data`에는 0-byte `shadow-worker.lock`만 있으며 shadow DB는 없다.
+2026-08-19 KST 첫 bounded shadow session 후 직접 SSH read-back 결과는 다음과 같다.
+컨테이너는 worker deadline에 exit code 0으로 종료되었고,
+`kiwoom-stock-shadow_kiwoom-shadow-data` named volume과 shadow DB는 보존되었다.
+첫 세션 paper ledger의 거래 레코드는 0건이었다.
 호스트의 `/`는 6.8 GiB 중 1.6 GiB 여유(77% 사용), inode 사용률은 21%였다.
 Docker inventory는 이미지 4개·활성 컨테이너 0개·볼륨 1개·build cache 0개이며,
 Docker root 사용량은 2.228 GB였다. SSM은
@@ -89,14 +90,11 @@ password/kbd-interactive/root login을 막고 public-key login만 허용한다. 
 | Shadow rollout document | `KiwoomStock-ShadowWorkerRollout`, default/latest `6` |
 | GitHub OIDC target policies | production-check, shadow-activation, shadow-rollout 3건을 후보 ARN으로 갱신 |
 | Candidate config check | attempt `31891989562`, `Configuration OK`, `production check passed` |
-| Shadow activation | 미수행; 컨테이너 0개, 실제 키움 credential 미사용 |
+| Shadow activation | bounded activation 정상 deadline 종료 확인; 실제 키움 credential로 broker 주문 없음 |
 
-AWS read-back은 새 target과 문서 기본 버전을 확인했다. 로컬 workflow·검증 코드의
-새 ID 전환은 GitHub `main`의 `a5af080`에 merge됐고, 최신 release tuple은
-production-check run `31891989562`에서 설정 전용 검증을 통과했다. shadow rollout
-run `31892087046`은 현재 호스트에 worker/validator와 binding을 설치하고
-read-back했으며, 고정 shadow container는 `absent`로 확인됐다. 현재 상태에서
-shadow activation을 수동으로 우회 실행하지 않는다.
+AWS read-back은 새 target과 문서 기본 버전을 확인했다. 위의 초기 host
+전환·설정 검증 run은 historical evidence로 보존하며, 현재 운영 release와
+첫 자동 session evidence는 아래 immutable release tuple에 기록한다.
 
 ## 완료된 호스트 작업
 
@@ -117,57 +115,51 @@ shadow activation을 수동으로 우회 실행하지 않는다.
   `31870050000`을 추가 검증했다. 새 target의 고정 ID·리전·compose/image/source
   hash가 일치했고, 종료 후 컨테이너가 남지 않았다.
 - 종료된 기존 호스트에서 수행했던 shadow worker/validator/rollout artifact
-  read-back 기록은 historical evidence로만 보존한다. 현재 단일 운영 호스트에서는
-  shadow worker를 시작하지 않았고 컨테이너는 0개다.
-- 현재 단일 운영 호스트에 최신 tuple의 shadow worker/validator와 canonical
-  activation-document binding을 설치했다. worker SHA, validator SHA, document SHA,
-  source SHA, 소유자/권한, binding metadata를 read-back했고 rollout evidence의
-  `fixed_container_recovery`는 `absent`였다.
+  read-back 기록은 historical evidence로만 보존한다.
+- 현재 단일 운영 호스트에는 최신 tuple의 shadow worker/validator와 canonical
+  activation-document binding이 설치되어 있다. 첫 자동 session 뒤 worker는
+  `run-deadline`/exit code 0으로 종료했고 paper ledger는 보존되었다.
 
 ## 현재 immutable release tuple
 
 | 항목 | 값 |
 |---|---|
-| Source SHA | `4304accd625619330095c7e447d7351ae84c805c` |
-| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:ba058c2dbaf2e54f74c9eedd9b373783feab0a9c25b202146c8ad8dddef4355c` |
-| Build run | `31922770311` |
+| Source SHA | `c1a7e2735a985ae661366623e9760eb904897c7e` |
+| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:96379a88c2861b15a924ef70829b1dbeb1ad289da2893401dec334f6595f7d52` |
+| Build run | `32217767456` |
 | Compose SHA | `dfdaa7fb1f3df62c9baaf348f774544beff519c63d4588411b5068bf3bfb0164` |
 | Production Compose SHA | `d5695a07a0c9f5f1ee5a8ed079b704a76bad3f6a576139b397341989c54b0c34` |
 | Worker SHA | `beae99b83ede9ad757c77b03f932d7770943fda7ac2fb119631fa91b1f12852d` |
-| Validator SHA | `dbdd2bc0caa428abdda8d2e1d261afc452e32a497166d9493f8692c4370f09e4` |
+| Validator SHA | `fe65bb6f5738ba1e1c909569832bd3a1f1e20fed9de3a2823b7d87ffae666fbe` |
 | Shadow document SHA | `0304beaa41b705ec808f09fcade2055d300c6a82a8d4cd2ef9a04abaa082d559` |
-| Current production container check | `31922770311` (success) |
-| Shadow rollout attempt | `31928769799` (install/read-back success) |
-| Closed-calendar activation check | `31928847451` (CLOSED / side effects false / Slack DELIVERED) |
+| Current production container check | `32217767456` (success) |
+| Shadow rollout attempt | `32218527450` (install/read-back success) |
+| First bounded activation | `32218616390` workflow_dispatch (76 cycles / terminal DEADLINE / side effects false / Slack DELIVERED) |
 | Stale holiday schedule run | `31980723090` (cancelled while awaiting protected review) |
 
 이 tuple은 현재 `main` source와 동일 revision image의 production-check 및 shadow
-artifact rollout/read-back 통과 tuple이다. 호스트에는 worker/validator/document
-binding이 설치되어 있고 고정 container는 없다. shadow activation은 여전히
-`production-shadow` 보호 리뷰 뒤에만 수행된다.
+artifact rollout/read-back 통과 tuple이다. repository schedule variables에도
+동일한 source/image/build 값이 등록되어 있다. `production-shadow`는 main branch
+policy와 exact validation을 유지하며, schedule은 human reviewer 없이 수행된다.
 
 ## 다음 실제 장 운영 창
 
-2026-08-17 (월)은 광복절 대체공휴일이며, 다음 KRX 실제 개장일은
-2026-08-18 (화)다. 현재 workflow cron은 평일 시각을 예약하지만 거래소 휴장일
-자체를 스케줄 레이어에서 제거하지 않으므로, activation 전 holiday/calendar
-guard와 exact tuple preflight를 먼저 확인한다.
+현재 workflow cron은 평일 시각을 예약하지만 거래소 휴장일 자체를 스케줄
+레이어에서 제거하지 않으므로, runtime holiday/calendar guard와 exact tuple
+preflight가 자동으로 fail-closed 경계를 담당한다.
 
-- 08:50 KST: protected `continuous` activation admission
+- 08:50 KST: automatic `continuous` activation admission
 - 09:00 KST 이후: 첫 safe tick 허용
 - 15:30 KST: worker 자체 deadline
-- 15:35 KST: protected `stop`, exact container 제거 및 terminal evidence
+- 15:35 KST: automatic `stop`, exact container 제거 및 terminal evidence
 
-8/17 start schedule run `31980723090`은 보호 리뷰 대기 상태에서 휴장일 실행을
-피하기 위해 취소했다. 따라서 내일 start run이 concurrency group에 막히지 않는다.
-`production-shadow` 환경의 보호 reviewer는 유지되므로 내일 08:50 schedule run은
-tuple과 개장일을 확인한 뒤 GitHub Actions에서 1회 승인해야 한다.
+이전 stale tuple을 사용하던 schedule run `32227537176`은 자동 수행 전에 취소했고,
+현재 schedule variables를 `c1a7e273...` release로 갱신했다. 다음 평일 schedule은
+별도 human approval 없이 exact tuple preflight 후 실행된다.
 
-2026-08-17 KST read-only 확인 시 scheduled activation run
-`32006523039`가 `waiting` 상태였고, job은 `protected bounded shadow action`이었다.
-이 run의 `headSha`는 기존 `4304accd625619330095c7e447d7351ae84c805c`로 현재
-dirty 리팩토링 WIP가 아니다. 따라서 이 run은 승인·실행·취소하지 않았으며,
-현재 후보의 검증 증거로 사용하지 않는다.
+과거 protected-review 대기 run들은 historical evidence로만 보존하며, 현재
+schedule은 required reviewer 없이 main branch policy와 exact tuple 검증을
+통과한 뒤 실행된다.
 
 호스트에 별도의 중복 timer를 만들지 않는다. 스케줄 SSOT는
 `.github/workflows/cd-shadow-worker-activation.yml`이며, 호스트 SSH는
@@ -175,10 +167,9 @@ preflight·복구·read-back에만 사용한다.
 
 ## 현재 남은 차단 항목
 
-- 새 tuple의 protected bounded activation admission 및 실제 장중 session evidence가
-  아직 없음;
-- 실제 장중 장시간 shadow run의 cycle/DB reopen/정상 stop evidence 미확보;
-- 실제 Slack `DELIVERED` evidence와 기존 운영 Slack 채널의 end-to-end 확인;
+- 다음 개장일 schedule에서 자동 start/stop이 다시 수행되는지 확인할 운영 모니터링;
+- 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
+  확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
   cloud-init hardening과 SG read-back을 요구하는 재생성 계약으로 갱신됐다.
   `kiwoom-ec2-ssh-20260815` key pair와 현재 preflight 관리 IP
