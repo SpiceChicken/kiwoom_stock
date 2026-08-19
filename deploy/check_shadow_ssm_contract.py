@@ -105,7 +105,19 @@ ROLLOUT_PARAMETER_NAMES = {
 HASH_PATTERN = "^[0-9a-f]{64}$"
 ACTIVATION_PARAMETER_SCHEMA = {
     "DesiredState": {
-        "type": "String", "allowedValues": ["oneshot", "continuous", "stop"],
+        "type": "String", "allowedValues": ["oneshot", "continuous", "stop", "telemetry-export-page"],
+        "interpolationType": "ENV_VAR",
+    },
+    "TelemetrySessionDateKst": {
+        "type": "String", "default": "", "allowedPattern": "^[0-9]{0,4}(-[0-9]{2}(-[0-9]{2})?)?$",
+        "interpolationType": "ENV_VAR",
+    },
+    "TelemetryOffset": {
+        "type": "String", "default": "0", "allowedPattern": "^[0-9]{1,8}$",
+        "interpolationType": "ENV_VAR",
+    },
+    "TelemetryLength": {
+        "type": "String", "default": "12288", "allowedPattern": "^[0-9]{1,5}$",
         "interpolationType": "ENV_VAR",
     },
     "ImageDigest": {
@@ -332,7 +344,10 @@ def _aws_cli_units(
             prefix = script[line_start:match.start()].strip()
             if prefix.startswith("#"):
                 continue
-            if prefix not in {"", 'command_id="$(', 'status="$('}:
+            if prefix not in {"", 'command_id="$(', 'status="$('} and not (
+                prefix.startswith('page_command_id="$(')
+                or prefix.startswith('for _ in $(seq 1 102); do status="$(')
+            ):
                 raise ContractMismatch(f"{category}.launcher")
             result.append(_shell_unit(script, match.start(), category))
     return result
@@ -617,10 +632,10 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
         raise ContractMismatch("activation.workflow.notification_secret_scope")
     aws_units = _aws_cli_units(steps, "activation.workflow.aws_command")
     _verify_activation_launcher_surface(steps)
-    if len(aws_units) != 3:
+    if len(aws_units) not in (3, 6):
         raise ContractMismatch("activation.workflow.aws_command_allowlist")
     candidates = _run_steps_with(steps, "aws ssm send-command")
-    if len(candidates) != 1:
+    if len(candidates) not in (1, 2):
         raise ContractMismatch("activation.workflow.execute_unit")
     step = candidates[0]
     step_env = _mapping(step.get("env"), "activation.workflow.execute_env")
@@ -704,7 +719,10 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
     if script.find("document_version=") >= send_position:
         raise ContractMismatch("activation.workflow.document_attestation")
     terminal_matches = re.findall(r"Success\|Failed\|Cancelled\|TimedOut(?:\|Cancelling)?", script)
-    if terminal_matches != ["Success|Failed|Cancelled|TimedOut"]:
+    if terminal_matches not in (
+        ["Success|Failed|Cancelled|TimedOut"],
+        ["Success|Failed|Cancelled|TimedOut"] * 2,
+    ):
         raise ContractMismatch("activation.workflow.terminal_statuses")
     validator_tokens = _shell_command(
         script, "python3 deploy/ec2/shadow_runtime_evidence.py",
@@ -745,7 +763,9 @@ def _document_step(document: Mapping[str, Any], category: str) -> tuple[Mapping[
     return inputs, commands[0]
 
 
-def _worker_usage_contract(worker: str) -> tuple[list[str], list[str], set[str]]:
+def _worker_usage_contract(
+    worker: str,
+) -> tuple[list[str], list[str], list[str], set[str]]:
     main = re.search(r"(?ms)^main\(\) \{(?P<body>.*?)^\}", worker)
     if main is None:
         raise ContractMismatch("activation.worker.main")
@@ -765,6 +785,9 @@ def _worker_usage_contract(worker: str) -> tuple[list[str], list[str], set[str]]
         "--inherited-lock-fd": "inherited_lock_fd",
         "--expected-instance-id": "expected_instance", "--region": "region",
         "--desired-state": "desired_state",
+        "--telemetry-session-date-kst": "telemetry_session",
+        "--telemetry-offset": "telemetry_offset",
+        "--telemetry-length": "telemetry_length",
     }
     if len(parser_matches) != len(parser_mapping) or (
         parser_mapping != expected_parser_mapping
@@ -792,29 +815,31 @@ def _worker_usage_contract(worker: str) -> tuple[list[str], list[str], set[str]]
         raise ContractMismatch("activation.worker.usage")
     flattened = re.sub(r"\\\n\s*", " ", usage.group("body"))
     commands = re.findall(r"(?m)^\s*kiwoom-shadow-worker\s+.*$", flattened)
-    if len(commands) != 2:
+    if len(commands) != 3:
         raise ContractMismatch("activation.worker.usage")
     try:
-        active, stop = (shlex.split(command.strip()) for command in commands)
+        active, stop, telemetry_page = (shlex.split(command.strip()) for command in commands)
     except ValueError:
         raise ContractMismatch("activation.worker.usage") from None
-    return active, stop, set(parser_mapping)
+    return active, stop, telemetry_page, set(parser_mapping)
 
 
-def _branch_argv(command: str) -> tuple[list[str], list[str]]:
+def _branch_argv(command: str) -> tuple[list[str], list[str], list[str]]:
     match = re.fullmatch(
         r'\s*exec\s+9>/run/lock/kiwoom-stock-shadow\.lock;\s*'
         r'flock\s+-x\s+-w\s+240\s+9\s+\|\|\s+exit\s+75;\s*'
         r'if\s+\[\s+"\$SSM_DesiredState"\s+=\s+oneshot\s+\]\s+\|\|\s+'
         r'\[\s+"\$SSM_DesiredState"\s+=\s+continuous\s+\];\s*'
         r'then\s+exec\s+(?P<active>.*?);\s*elif\s+\[\s+"\$SSM_DesiredState"\s+=\s+stop\s+\];\s*'
-        r'then\s+exec\s+(?P<stop>.*?);\s*else\s+exit\s+64;\s*fi\s*',
+        r'then\s+exec\s+(?P<stop>.*?);\s*elif\s+\[\s+"\$SSM_DesiredState"\s+=\s+telemetry-export-page\s+\];\s*'
+        r'then\s+exec\s+(?P<telemetry>.*?);\s*else\s+exit\s+64;\s*fi\s*',
         command,
     )
     if match is None:
         raise ContractMismatch("activation.document.worker_branches")
     try:
-        return shlex.split(match.group("active")), shlex.split(match.group("stop"))
+        return (shlex.split(match.group("active")), shlex.split(match.group("stop")),
+                shlex.split(match.group("telemetry")))
     except ValueError:
         raise ContractMismatch("activation.document.worker_argv") from None
 
@@ -834,17 +859,19 @@ def _verify_activation_document(document: Mapping[str, Any], worker: str) -> Non
     references = set(re.findall(r"\$SSM_([A-Za-z][A-Za-z0-9]*)\b", command))
     if references != set(ACTIVATION_PARAMETER_SCHEMA):
         raise ContractMismatch("activation.document.ssm_reference_set")
-    active, stop = _branch_argv(command)
-    usage_active, usage_stop, parser_flags = _worker_usage_contract(worker)
-    document_flags = set(_flag_names(active)) | set(_flag_names(stop))
+    active, stop, telemetry_page = _branch_argv(command)
+    usage_active, usage_stop, usage_page, parser_flags = _worker_usage_contract(worker)
+    document_flags = set(_flag_names(active)) | set(_flag_names(stop)) | set(_flag_names(telemetry_page))
     if document_flags != parser_flags:
         raise ContractMismatch("activation.worker.parser_linkage")
     if _flag_names(active) != ["--inherited-lock-fd", *_flag_names(usage_active)] or (
         _flag_names(stop) != ["--inherited-lock-fd", *_flag_names(usage_stop)]
+        or _flag_names(telemetry_page) != ["--inherited-lock-fd", *_flag_names(usage_page)]
     ):
         raise ContractMismatch("activation.document.worker_argv")
     active_mapping = _flags(active, ["/usr/local/sbin/kiwoom-shadow-worker"], "activation.document.worker_argv")
     stop_mapping = _flags(stop, ["/usr/local/sbin/kiwoom-shadow-worker"], "activation.document.worker_argv")
+    telemetry_mapping = _flags(telemetry_page, ["/usr/local/sbin/kiwoom-shadow-worker"], "activation.document.worker_argv")
     expected_common = {
         "--inherited-lock-fd": "9", "--image": "$SSM_ImageDigest",
         "--source-sha": "$SSM_SourceSha", "--activation-id": "$SSM_ActivationId",
@@ -859,7 +886,16 @@ def _verify_activation_document(document: Mapping[str, Any], worker: str) -> Non
         "--activation-id": "$SSM_ActivationId",
         "--compose-shadow-sha256": "$SSM_ComposeShadowSha256",
         **{key: value for key, value in expected_common.items() if key != "--inherited-lock-fd"},
-    } or stop_mapping != {"--desired-state": "stop", **expected_common}:
+    } or stop_mapping != {"--desired-state": "stop", **expected_common} or telemetry_mapping != {
+        "--inherited-lock-fd": "9", "--desired-state": "telemetry-export-page",
+        "--image": "$SSM_ImageDigest", "--source-sha": "$SSM_SourceSha",
+        "--activation-id": "$SSM_ActivationId",
+        "--compose-shadow-sha256": "$SSM_ComposeShadowSha256",
+        "--telemetry-session-date-kst": "$SSM_TelemetrySessionDateKst",
+        "--telemetry-offset": "$SSM_TelemetryOffset",
+        "--telemetry-length": "$SSM_TelemetryLength",
+        **{key: value for key, value in expected_common.items() if key != "--inherited-lock-fd"},
+    }:
         raise ContractMismatch("activation.document.worker_argv")
 
 

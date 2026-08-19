@@ -340,6 +340,39 @@ def test_continuous_fails_closed_when_the_database_identity_changes(tmp_path):
     assert result.db_reopens == 0
 
 
+def test_continuous_does_not_commit_sidecar_row_before_cross_cycle_validation(
+    tmp_path,
+):
+    now = [0.0]
+    event = AdvancingStopEvent(now, stop_after_waits=2)
+    commits = []
+    runtimes = []
+
+    def factory(*_args):
+        runtime = FakeRuntime()
+        if runtimes:
+            runtime.db_path = Path("/isolated/shadow/other-trades.db")
+        runtimes.append(runtime)
+        return runtime
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: None,
+        telemetry_commit=lambda *_args: commits.append("committed") or "a" * 64,
+        lock_path=(tmp_path / "telemetry-order.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.error_type == "ShadowDatabaseIdentityMismatch"
+    assert commits == ["committed"]
+
+
 def test_continuous_signal_cleanup_failure_is_failed_nonzero(tmp_path):
     now = [0.0]
     event = AdvancingStopEvent(now)

@@ -1,7 +1,9 @@
 """No-side-effect package command entry points."""
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Optional, Sequence
@@ -46,6 +48,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="read-only check that no OVERNIGHT rows block a binary downgrade",
     )
     downgrade_preflight.add_argument("--database-path", required=True)
+    telemetry_export = subparsers.add_parser(
+        "shadow-telemetry-export", help="read-only bounded shadow telemetry export"
+    )
+    telemetry_export.add_argument("--database-path", required=True)
+    telemetry_export.add_argument("--activation-id", required=True)
+    telemetry_export.add_argument("--session-date-kst", required=True)
+    telemetry_export.add_argument("--offset", type=int, default=0)
+    telemetry_export.add_argument("--length", type=int, default=12288)
+    telemetry_export.add_argument("--manifest-only", action="store_true")
+    telemetry_export.add_argument("--row-hashes-only", action="store_true")
     return parser
 
 
@@ -110,6 +122,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             flush=True,
         )
         return evidence.exit_code
+    if args.command == "shadow-telemetry-export":
+        from base64 import b64encode
+        from kiwoom_stock.infrastructure.shadow_telemetry import (
+            MAX_PAGE_BYTES, ShadowTelemetryReader,
+        )
+        try:
+            if args.offset < 0 or args.length < 1 or args.length > MAX_PAGE_BYTES:
+                raise ValueError("telemetry page bounds are invalid")
+            store = ShadowTelemetryReader(args.database_path)
+            artifact, manifest = store.export(args.activation_id, args.session_date_kst)
+            rows = store.rows(args.activation_id, args.session_date_kst)
+            if args.row_hashes_only:
+                payload = {"activation_id": args.activation_id, "session_date_kst": args.session_date_kst, "row_hashes": [row["row_sha256"] for row in rows]}
+            elif args.manifest_only:
+                payload = manifest
+            else:
+                if args.offset >= len(artifact) or args.offset + args.length > len(artifact):
+                    raise ValueError("telemetry page is outside the exported artifact")
+                page = artifact[args.offset : args.offset + args.length]
+                payload = {
+                    **manifest,
+                    "offset": args.offset,
+                    "length": len(page),
+                    "page_sha256": hashlib.sha256(page).hexdigest(),
+                    "page_base64": b64encode(page).decode("ascii"),
+                }
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+            store.close()
+            return 0
+        except Exception as exc:
+            print(json.dumps({"status": "FAILED", "error_type": type(exc).__name__}, separators=(",", ":")))
+            return 1
     if args.command in ("shadow-once", "shadow-worker"):
         from kiwoom_stock.application.execution import (
             ActivationTuple,
@@ -125,6 +169,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         from kiwoom_stock.core import config
         from kiwoom_stock.infrastructure.shadow_process_lock import ShadowProcessLock
+        from kiwoom_stock.infrastructure.shadow_telemetry import (
+            ShadowTelemetryStore,
+            shadow_config_sha256,
+        )
         from kiwoom_stock.settings import SettingsValidationError
 
         try:
@@ -162,12 +210,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 settings=settings,
                 admission=admission,
             )
+            telemetry_path = os.environ.get("KIWOOM_SHADOW_TELEMETRY_PATH")
+            if os.environ.get("KIWOOM_REQUIRE_SHADOW_TELEMETRY") == "1" and not telemetry_path:
+                raise RuntimeError("shadow telemetry sidecar path is required")
+            telemetry_store = (
+                ShadowTelemetryStore(telemetry_path)
+                if telemetry_path
+                else None
+            )
+            config_sha256 = shadow_config_sha256(settings) if telemetry_store is not None else None
+            telemetry_commit = (
+                (lambda admitted, session_date, receipt: telemetry_store.commit_receipt(
+                    admitted, session_date, receipt, config_sha256=config_sha256
+                ))
+                if telemetry_store is not None else None
+            )
             if requested_mode is ExecutionMode.SHADOW_ONCE:
                 once_result = run_shadow_once_managed(
                     policy,
                     lock_path=SHADOW_PROCESS_LOCK_PATH,
                     runtime_factory=runtime_factory,
                     lock_factory=ShadowProcessLock,
+                    telemetry_commit=telemetry_commit,
                 )
                 result_payload = once_result.to_safe_dict()
                 exit_code = 0
@@ -180,9 +244,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         json.dumps(evidence, sort_keys=True), flush=True
                     ),
                     lock_factory=ShadowProcessLock,
+                    telemetry_commit=telemetry_commit,
                 )
                 result_payload = continuous_result.to_safe_dict()
                 exit_code = continuous_result.exit_code
+            if telemetry_store is not None and exit_code == 0:
+                from datetime import datetime, timezone
+                from zoneinfo import ZoneInfo
+                telemetry_store.finalize_session(
+                    policy.activation.activation_id,
+                    datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Seoul")).date().isoformat(),
+                )
         except SettingsValidationError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -197,6 +269,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(failure, file=sys.stderr)
             print(failure, flush=True)
             return 1
+        if telemetry_store is not None:
+            telemetry_store.close()
         print(json.dumps(result_payload, sort_keys=True))
         return exit_code
     parser.print_help()

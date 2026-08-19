@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
@@ -128,6 +129,11 @@ class ShadowExecutionReceipt:
     continuity: PhysicalContinuityEvidence | None = None
     decision_telemetry: ShadowDecisionTelemetry | None = None
     swing_shadow_evidence: SwingShadowEvidence | None = None
+    telemetry_metrics: Mapping[str, Any] | None = None
+    position_after: str | None = None
+    observed_at: datetime | None = None
+    telemetry_row_sha256: str | None = None
+    cycle_index: int = 1
 
 
 class ShadowRuntimePort(Protocol):
@@ -210,6 +216,13 @@ class ShadowRunResult:
     continuity: PhysicalContinuityEvidence | None = None
     decision_telemetry: ShadowDecisionTelemetry | None = None
     swing_shadow_evidence: SwingShadowEvidence | None = None
+    telemetry_row_sha256: str | None = None
+    # Kept in-memory for the post-cycle commit adapter.  These fields are
+    # deliberately omitted from safe evidence; only the canonical row hash is
+    # emitted to the control plane.
+    telemetry_metrics: Mapping[str, Any] | None = None
+    position_after: str | None = None
+    observed_at: datetime | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         result = {
@@ -243,6 +256,8 @@ class ShadowRunResult:
         }
         if self.swing_shadow_evidence is not None:
             result["swing_shadow_evidence"] = self.swing_shadow_evidence.to_safe_dict()
+        if self.telemetry_row_sha256 is not None:
+            result["telemetry_row_sha256"] = self.telemetry_row_sha256
         return result
 
 
@@ -304,6 +319,7 @@ def run_shadow_once(
     calendar: Callable[[date], CalendarDecision] = strict_krx_calendar,
     stop_event: Event | None = None,
     deadline_remaining: Callable[[], float] | None = None,
+    cycle_index: int = 1,
 ) -> ShadowRunResult:
     """Admit by KST calendar, build once, calculate once, and close once."""
 
@@ -406,7 +422,9 @@ def run_shadow_once(
             ShadowTerminalReason.SHUTDOWN_DEADLINE,
             resources_closed=True,
         ) from None
-    receipt = runtime.execute_once()
+    receipt = dataclasses.replace(
+        runtime.execute_once(), cycle_index=cycle_index, observed_at=kst_now
+    )
     try:
         check_lifecycle(
             stop_event=stop_event,
@@ -453,7 +471,33 @@ def run_shadow_once(
         continuity=receipt.continuity,
         decision_telemetry=receipt.decision_telemetry,
         swing_shadow_evidence=receipt.swing_shadow_evidence,
+        telemetry_row_sha256=receipt.telemetry_row_sha256,
+        telemetry_metrics=receipt.telemetry_metrics,
+        position_after=receipt.position_after,
+        observed_at=receipt.observed_at,
         **common,
+    )
+
+
+def _receipt_from_run_result(
+    result: ShadowRunResult, *, cycle_index: int,
+) -> ShadowExecutionReceipt:
+    if result.db_identity is None:
+        raise ShadowWorkerError("shadow result omitted database identity")
+    return ShadowExecutionReceipt(
+        cycles=result.cycles,
+        http_attempts=result.http_attempts,
+        api_counts=result.api_counts,
+        db_identity=result.db_identity,
+        resources_closed=result.resources_closed,
+        local_counts=result.local_counts,
+        continuity=result.continuity,
+        decision_telemetry=result.decision_telemetry,
+        swing_shadow_evidence=result.swing_shadow_evidence,
+        telemetry_metrics=result.telemetry_metrics,
+        position_after=result.position_after,
+        observed_at=result.observed_at,
+        cycle_index=cycle_index,
     )
 
 
@@ -467,6 +511,7 @@ def run_shadow_once_managed(
     stop_event: Event | None = None,
     monotonic: Callable[[], float] | None = None,
     lock_factory: Callable[[str | Path], Any] | None = None,
+    telemetry_commit: Callable[[ExecutionPolicy, date, ShadowExecutionReceipt], str] | None = None,
 ) -> ShadowRunResult:
     """Run the one-shot worker under the process lock and signal adapter.
 
@@ -505,6 +550,14 @@ def run_shadow_once_managed(
                     "shadow lifecycle budget terminated one-shot execution"
                 ) from error
             deadline.remaining(monotonic=monotonic_clock)
+            if telemetry_commit is not None and result.cycles == 1:
+                receipt = _receipt_from_run_result(result, cycle_index=1)
+                result = dataclasses.replace(
+                    result,
+                    telemetry_row_sha256=telemetry_commit(
+                        policy, date.fromisoformat(result.kst_date), receipt
+                    ),
+                )
             return result
 
 
@@ -519,6 +572,7 @@ def run_shadow_continuous(
     stop_event: StopEventPort | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     lock_factory: Callable[[str | Path], Any] | None = None,
+    telemetry_commit: Callable[[ExecutionPolicy, date, ShadowExecutionReceipt], str] | None = None,
 ) -> ShadowContinuousResult:
     """Repeat the verified one-shot primitive under one bounded process owner."""
 
@@ -634,6 +688,7 @@ def run_shadow_continuous(
                             calendar=calendar,
                             stop_event=runtime_stop_event,  # type: ignore[arg-type]
                             deadline_remaining=bounded_remaining,
+                            cycle_index=cycles + 1,
                         )
                     except ShadowCycleTerminated as error:
                         last_closed = error.resources_closed
@@ -693,6 +748,18 @@ def run_shadow_continuous(
                         )
                     if db_reopened:
                         db_reopens += 1
+                    if telemetry_commit is not None:
+                        receipt_for_telemetry = _receipt_from_run_result(
+                            result, cycle_index=cycles + 1
+                        )
+                        row_hash = telemetry_commit(
+                            policy,
+                            date.fromisoformat(result.kst_date),
+                            receipt_for_telemetry,
+                        )
+                        result = dataclasses.replace(
+                            result, telemetry_row_sha256=row_hash
+                        )
                     cycles += 1
                     previous_cycle_started = cycle_started
                     previous_db_identity = result.db_identity
