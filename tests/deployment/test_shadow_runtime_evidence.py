@@ -314,6 +314,34 @@ def test_closed_one_shot_and_single_cycle_terminal_remain_exactly_supported():
     ).returncode == 0
 
 
+def test_calendar_closed_continuous_terminal_is_operationally_accepted():
+    closed = _terminal()
+    closed.update({
+        "status": "CLOSED",
+        "reason": "calendar-closed",
+        "cycles": 0,
+        "db_reopens": 0,
+        "elapsed_seconds": 1.0,
+        "first_cycle_start_elapsed_seconds": None,
+        "second_cycle_start_elapsed_seconds": None,
+        "second_cycle_interval_seconds": None,
+        "minimum_cycle_interval_seconds": None,
+    })
+    direct = _run(
+        closed, mode="shadow-continuous", event="terminal"
+    )
+    invocation = _run(
+        closed,
+        mode="shadow-continuous",
+        event="terminal",
+        input_format="ssm-invocation",
+        output="activation-summary",
+    )
+    assert direct.returncode == 0, direct.stderr
+    assert invocation.returncode == 0, invocation.stderr
+    assert json.loads(invocation.stdout)["runtime_status"] == "CLOSED"
+
+
 def test_failed_terminal_is_diagnostic_only_and_never_activation_success():
     failed = _terminal()
     failed.update({

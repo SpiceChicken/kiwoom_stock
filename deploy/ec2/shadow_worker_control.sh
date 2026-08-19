@@ -446,6 +446,40 @@ confirm_continuous_tick() {
     printf '%s\n' "${evidence}"
 }
 
+confirm_continuous_calendar_closed() {
+    local logs="$1"
+    local source_sha="$2"
+    local image="$3"
+    local activation_id="$4"
+    local evidence exit_code
+    if ! evidence="$(validate_safe_evidence shadow-continuous terminal \
+        "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")"; then
+        printf 'continuous calendar-closed terminal is invalid\n' >&2
+        return 1
+    fi
+    if ! python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)
+raise SystemExit(
+    0
+    if item.get("status") == "CLOSED"
+    and item.get("reason") == "calendar-closed"
+    and item.get("cycles") == 0
+    else 1
+)
+' <<<"${evidence}"
+    then
+        printf 'continuous terminal is not calendar-closed\n' >&2
+        return 1
+    fi
+    exit_code="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.ExitCode}}')" \
+        || return 1
+    [[ "${exit_code}" == 0 ]] || return 1
+    printf '%s\n' "${evidence}"
+}
+
 cleanup_work_dir() {
     if [[ -n "${WORK_DIR}" ]]; then
         rm -f -- "${PULL_LOG}" 2>/dev/null || true
@@ -563,7 +597,20 @@ run_shadow_continuous() {
         fi
         now="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.Running}}' 2>/dev/null || true)"
         if [[ "${now}" != true ]]; then
-            emit_runtime_failure_sentinel "$(docker logs "${CONTAINER_NAME}" 2>&1 || true)" || true
+            logs="$(docker logs "${CONTAINER_NAME}" 2>&1 || true)"
+            if closed="$(confirm_continuous_calendar_closed \
+                "${logs}" "${source_sha}" "${image}" "${activation_id}" \
+                2>/dev/null)"; then
+                printf '%s\n' "${closed}"
+                cleanup || fail "shadow calendar-closed cleanup failed"
+                WORK_DIR=""
+                ACTIVE_CONTAINER_NAME=""
+                trap - EXIT TERM
+                printf 'shadow continuous closed: source_sha=%s image=%s activation_id=%s side_effects=none\n' \
+                    "${source_sha}" "${image}" "${activation_id}"
+                return 0
+            fi
+            emit_runtime_failure_sentinel "${logs}" || true
             fail "continuous shadow exited before its first safe tick"
         fi
         sleep 2

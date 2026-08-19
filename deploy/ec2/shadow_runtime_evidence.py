@@ -541,12 +541,15 @@ def _validate_terminal_timing(
 
 def _validate_terminal(item: dict[str, object]) -> None:
     _validate_terminal_shape(item)
-    if (
-        item.get("schema_version") != 4
-        or (item.get("status"), item.get("reason")) not in {
-            ("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline"),
-        }
-    ):
+    if item.get("schema_version") != 4:
+        raise EvidenceError("terminal_contract_invalid")
+    outcome = (item.get("status"), item.get("reason"))
+    if outcome == ("CLOSED", "calendar-closed"):
+        _validate_terminal_timing(item, allow_zero_cycles=True)
+        return
+    if outcome not in {
+        ("STOPPED", "stop-requested"), ("DEADLINE", "run-deadline"),
+    }:
         raise EvidenceError("terminal_contract_invalid")
     _validate_terminal_timing(item)
 
