@@ -920,6 +920,33 @@ def test_host_and_workflow_validate_continuous_terminal_reopen_evidence(tmp_path
         assert failed_workflow.returncode != 0
 
 
+def test_host_accepts_calendar_closed_continuous_terminal(tmp_path):
+    closed = _terminal_evidence(
+        status="CLOSED",
+        reason="calendar-closed",
+        cycles=0,
+        elapsed_seconds=1.0,
+        first_cycle_start_elapsed_seconds=None,
+        second_cycle_start_elapsed_seconds=None,
+        second_cycle_interval_seconds=None,
+        minimum_cycle_interval_seconds=None,
+        db_reopens=0,
+    )
+    payload = tmp_path / "closed-terminal.json"
+    payload.write_text(json.dumps(closed), encoding="utf-8")
+    completed = _run_sourced(
+        '''
+        docker() {
+            [[ "$*" == *".State.ExitCode"* ]] && echo 0 || return 1
+        }
+        confirm_continuous_calendar_closed "$(cat "$2")" "$3" "$4" "$5"
+        ''',
+        str(payload), SOURCE_SHA, IMAGE, ACTIVATION_ID,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == closed
+
+
 def test_actual_continuous_emitter_cycle_and_terminal_round_trip_consumers(
     tmp_path,
 ):
