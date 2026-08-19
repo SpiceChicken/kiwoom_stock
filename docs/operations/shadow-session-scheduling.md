@@ -6,7 +6,7 @@ Slack notifications.
 
 ## Schedule
 
-The protected activation workflow has two weekday schedules:
+The activation workflow has two weekday schedules:
 
 - `50 23 * * 0-4` UTC = 08:50 KST on the following day: start
   `shadow-continuous` Monday-Friday KST.
@@ -18,36 +18,37 @@ close independently of the scheduler. The 15:35 stop removes the exited
 container and validates terminal evidence.
 
 The implementation is in
-`.github/workflows/cd-shadow-worker-activation.yml`. Manual
-`workflow_dispatch` remains available for controlled recovery.
+`.github/workflows/cd-shadow-worker-activation.yml`. The scheduled job runs
+from `main` without a human environment-review gate; the repository branch
+policy, immutable tuple validation, OIDC role, exact SSM document, and broker
+order deny boundary remain in force. Manual `workflow_dispatch` remains
+available for controlled recovery.
 
 ## 현재 개장일과 사전 점검
 
-현재 기준일은 2026-08-17 (월)이며 오늘은 광복절 대체공휴일이다. 다음 실제 KRX
-개장일은 2026-08-18 (화)다. cron은 평일 calendar time을
-예약할 뿐 한국 거래소 휴장일을 자동으로 제거하지 않으므로, start workflow가
-실행되더라도 calendar guard가 `CLOSED/calendar-closed`로 fail-closed 하는지
-먼저 확인한다. 휴장일을 우회해 수동 `continuous`를 시작하지 않는다.
+cron은 평일 calendar time을 예약할 뿐 한국 거래소 휴장일을 자동으로 제거하지
+않는다. 따라서 start workflow가 실행되더라도 runtime calendar guard가
+`CLOSED/calendar-closed`로 fail-closed 한다. 휴장일을 우회해 수동
+`continuous`를 시작하지 않는다.
 
-개장 전 순서는 다음과 같다.
+개장 전 자동 수행 경계는 다음과 같다.
 
-1. [`current-state.md`](current-state.md)의 source/image/build tuple과 GitHub
-   protected variables를 byte-for-byte 대조한다.
-2. 직접 SSH로 host disk, Docker image/container inventory, worker/validator/
-   binding hash와 SSM Agent health를 read-back한다. 사람용 shell에는
+1. schedule은 repository-level `KIWOOM_SHADOW_SCHEDULE_*` tuple을 사용해
+   승인 없이 exact source/image/build를 검증한다.
+2. 직접 SSH는 사후 read-back과 복구에만 사용한다. 사람용 shell에는
    `aws ssm start-session`을 사용하지 않는다.
-3. 08:50 KST admission 후 첫 safe tick이 09:00 KST 이전에 실행되지 않는지
-   확인한다.
+3. 08:50 KST admission 후 worker가 첫 safe tick을 09:00 KST 이후에만
+   실행한다.
 4. 15:30 KST worker deadline과 15:35 KST stop/evidence 경로를 유지한다.
 
 호스트에 별도 systemd/cron timer를 추가하지 않는다. 현재 SSH는 preflight·복구
-transport이고, protected GitHub workflow가 schedule과 SSM automation의 SSOT다.
+transport이고, GitHub Actions schedule과 SSM automation이 SSOT다.
 
-8/17 schedule run `31980723090`은 `production-shadow` 보호 리뷰 대기 중이었고,
-휴장일 실행과 내일 concurrency 충돌을 막기 위해 취소했다. 내일 08:50 KST
-schedule은 현재 등록된 source/image/build tuple로 생성되며, 보호 reviewer가
-tuple과 개장일을 확인한 뒤 승인해야 SSM bounded activation이 진행된다. 보호
-review를 제거하거나 EC2에서 직접 continuous worker를 시작하지 않는다.
+schedule delivery가 지연되더라도 worker가 장 시작 전 safe tick을 막고,
+15:30 KST deadline을 자체 적용한다. schedule은 평일 시각을 예약할 뿐
+한국거래소 휴장일을 cron에서 제거하지 않으므로, runtime calendar guard가
+`CLOSED/calendar-closed`로 fail-closed 한다. 휴장일을 우회해 수동
+`continuous`를 시작하지 않는다.
 
 ## Bounded execution contract
 
@@ -85,6 +86,18 @@ execution.
 
 The current registered tuple is recorded in [`current-state.md`](current-state.md).
 Do not copy a historical tuple from the production-check guide.
+
+현재 자동 schedule tuple:
+
+| 항목 | 값 |
+|---|---|
+| Source SHA | `c1a7e2735a985ae661366623e9760eb904897c7e` |
+| Image digest | `ghcr.io/spicechicken/kiwoom_stock@sha256:96379a88c2861b15a924ef70829b1dbeb1ad289da2893401dec334f6595f7d52` |
+| Build run | `32217767456` |
+
+이 tuple은 현재 `main`과 EC2 rollout binding 및 activation image와 동일하다.
+새 release를 운영 대상으로 전환할 때는 production check와 exact rollout이
+성공한 뒤 세 schedule 변수를 함께 갱신한다.
 
 ## Acceptance evidence
 
