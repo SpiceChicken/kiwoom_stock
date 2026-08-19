@@ -17,6 +17,7 @@ from kiwoom_stock.application.credentials import (
     BearerToken,
     KiwoomClientCredentials,
 )
+from kiwoom_stock.api.http_headers import configure_session
 from kiwoom_stock.settings import KiwoomEndpoint
 from kiwoom_stock.utils import (
     register_sensitive_values,
@@ -105,9 +106,7 @@ def _utc_now() -> datetime:
 
 def _hardened_session(session: Optional[requests.Session]) -> requests.Session:
     result = session if session is not None else requests.Session()
-    result.trust_env = False
-    result.proxies = {}
-    return result
+    return configure_session(result)
 
 
 class Authenticator:
