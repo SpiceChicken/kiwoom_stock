@@ -92,7 +92,7 @@ must remain DISARMED.
 
 ## Bounded shadow-once compose
 
-`compose.shadow.yaml` is a separate, restart-disabled contract for the fixed one-cycle shadow worker. It uses the
+`compose.shadow.yaml` is a separate, restart-disabled contract for the fixed one-cycle paper-ledger E2E shadow worker. It uses the
 `kiwoom-shadow-data` named volume, `/var/lib/kiwoom/shadow-trades.db`, a read-only root filesystem, 30-second stop
 grace, and external secret files. Compose starts the image as root only for `runtime_entrypoint.py` to copy the two
 file secrets into `/run/kiwoom-secrets` and drop to runtime UID/GID `10001:10001`; the application itself is never

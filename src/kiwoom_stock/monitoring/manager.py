@@ -44,6 +44,21 @@ def _validated_atr(value: object, name: str) -> float:
         )
     return float(value)
 
+
+def _validated_tick_price(value: object) -> float:
+    """Return the positive current-tick price used for every paper fill."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise PaperTradePersistenceError(
+            "paper fill requires a positive finite current-tick price"
+        )
+    return float(value)
+
 class StockManager:
     """
     [Helper] 종목 및 인벤토리 관리자: 감시 종목 및 보유 종목 상태 관리
@@ -295,6 +310,7 @@ class StockManager:
         forces = verdict.get('forces', {})
 
         try:
+            tick_price = _validated_tick_price(verdict.get('price'))
             now = context.now if context is not None else self._now()
             owning_session_date = (
                 context.xkrx_session_date
@@ -309,7 +325,7 @@ class StockManager:
             buy_data = {
                 "stock_code": stock_code,
                 "stock_name": self.stock_names[stock_code],
-                "buy_price": verdict.get('price'),
+                "buy_price": tick_price,
 
                 # 개별 물리적 힘 매핑 (없을 경우 0.0)
                 "thrust": forces.get('thrust', 0.0),
@@ -350,8 +366,9 @@ class StockManager:
         [Manager] 브로커 주문 없이 paper 매도 상태만 기록합니다.
         """
         stock_code = verdict['stock_code']
-        
+
         try:
+            tick_price = _validated_tick_price(verdict.get('price'))
             pos = self.active_positions[stock_code]
             if pos.status is not PositionStatus.OPEN:
                 raise PaperTradePersistenceError(
@@ -359,7 +376,7 @@ class StockManager:
                 )
             candidate = replace(
                 pos,
-                sell_price=verdict['price'],
+                sell_price=tick_price,
                 sell_reason=reason,
             )
             if pos.owning_session_date is None:

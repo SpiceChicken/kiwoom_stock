@@ -1211,9 +1211,9 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
     assert buy_receipt.decision_telemetry.thrust_band == "FROM_1_0_TO_1_5"
     with sqlite3.connect(db_path) as connection:
         buy_row = connection.execute(
-            "SELECT status, buy_time FROM trades WHERE stock_code = '005930'"
+            "SELECT status, buy_time, buy_price FROM trades WHERE stock_code = '005930'"
         ).fetchone()
-    assert buy_row == ("OPEN", "2026-08-03 10:05:00")
+    assert buy_row == ("OPEN", "2026-08-03 10:05:00", 71000.0)
 
     sell_now = datetime(2026, 8, 3, 15, 28, tzinfo=ZoneInfo("Asia/Seoul"))
 
@@ -1248,9 +1248,9 @@ def test_shadow_policy_runtime_engine_persists_kst_paper_buy_and_sell(tmp_path):
     assert sell_receipt.decision_telemetry.thrust_band == "FROM_1_0_TO_1_5"
     with sqlite3.connect(db_path) as connection:
         sell_row = connection.execute(
-            "SELECT status, sell_time, sell_reason FROM trades WHERE stock_code = '005930'"
+            "SELECT status, sell_time, sell_price, sell_reason FROM trades WHERE stock_code = '005930'"
         ).fetchone()
-    assert sell_row == ("CLOSED", "2026-08-03 15:28:00", "Day Trade Close")
+    assert sell_row == ("CLOSED", "2026-08-03 15:28:00", 72000.0, "Day Trade Close")
 
 
 def test_shadow_policy_runtime_blocks_entry_after_monitoring_window(tmp_path):

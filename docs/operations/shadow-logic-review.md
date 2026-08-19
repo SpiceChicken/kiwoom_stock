@@ -1,8 +1,10 @@
 # Shadow business-logic review
 
-This runbook reviews market interpretation and paper decisions without granting
-account, order, cancel, revoke, report, archive, or application notification
-capabilities.
+This runbook reviews the complete market-read -> strategy -> isolated paper
+ledger decision path without granting account, broker-order, cancel, revoke,
+report, archive, or application-notification capabilities. A BUY or SELL is a
+local paper transition only. Its fill price is the current market tick used by
+the verdict; no broker fill is requested.
 
 ## Evidence boundary
 
