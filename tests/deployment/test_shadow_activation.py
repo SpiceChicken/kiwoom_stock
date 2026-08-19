@@ -398,7 +398,9 @@ def test_shadow_host_executor_keeps_unvalidated_docker_progress_off_ssm_stdout()
 def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters():
     document = yaml.safe_load(DOCUMENT.read_text(encoding="utf-8"))
     parameters = document["parameters"]
-    assert parameters["DesiredState"]["allowedValues"] == ["oneshot", "continuous", "stop"]
+    assert parameters["DesiredState"]["allowedValues"] == [
+        "oneshot", "continuous", "stop", "telemetry-export-page",
+    ]
     assert set(parameters) == {
         "DesiredState",
         "ImageDigest",
@@ -410,6 +412,9 @@ def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters(
         "ExpectedShadowDocumentSha256",
         "ExpectedInstanceId",
         "Region",
+        "TelemetrySessionDateKst",
+        "TelemetryOffset",
+        "TelemetryLength",
     }
     text = DOCUMENT.read_text(encoding="utf-8")
     assert "/usr/local/sbin/kiwoom-shadow-worker" in text
@@ -421,7 +426,7 @@ def test_shadow_ssm_document_has_exact_bounded_actions_and_no_secret_parameters(
     assert command.index("exec 9>/run/lock/kiwoom-stock-shadow.lock") < command.index(
         "flock -x -w 240 9"
     ) < command.index("exec /usr/local/sbin/kiwoom-shadow-worker")
-    assert command.count("--inherited-lock-fd 9") == 2
+    assert command.count("--inherited-lock-fd 9") == 3
 
 
 def test_activation_prelock_prevents_old_inode_execution(tmp_path):
@@ -1174,7 +1179,7 @@ def test_host_running_stop_requires_exact_clean_terminal_and_zero_exit(tmp_path)
     assert _run_running_stop(tmp_path, mismatch, 0).returncode != 0
 
 
-def test_host_failed_terminal_is_safely_emitted_and_container_is_removed(tmp_path):
+def test_host_failed_terminal_is_safely_emitted_and_container_is_preserved(tmp_path):
     failed = _terminal_evidence(
         status="FAILED",
         reason="failure",
@@ -1188,7 +1193,7 @@ def test_host_failed_terminal_is_safely_emitted_and_container_is_removed(tmp_pat
         if line.startswith("{")
     ]
     assert emitted == [failed]
-    assert "non-operational" in completed.stderr
+    assert "container and logs preserved" in completed.stderr
 
 
 def test_shadow_iam_policy_is_document_and_instance_scoped():

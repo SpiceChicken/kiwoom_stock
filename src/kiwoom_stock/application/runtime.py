@@ -444,6 +444,16 @@ class ShadowRuntime:
             continuity=continuity,
             decision_telemetry=decision_telemetry,
             swing_shadow_evidence=shadow_evidence,
+            telemetry_metrics=(
+                cycle.get("telemetry_metrics")
+                if isinstance(cycle.get("telemetry_metrics"), Mapping)
+                else None
+            ),
+            position_after=(
+                cycle.get("position_after")
+                if isinstance(cycle.get("position_after"), str)
+                else None
+            ),
         )
 
     def _checkpoint_lifecycle(self) -> None:

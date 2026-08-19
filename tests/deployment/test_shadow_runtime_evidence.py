@@ -145,6 +145,16 @@ def test_swing_strategy_decision_evidence_is_validated_and_round_tripped():
     assert _run(malformed).returncode != 0
 
 
+def test_one_shot_telemetry_hash_is_additive_and_strictly_validated():
+    value = {**_oneshot(), "telemetry_row_sha256": "4" * 64}
+    result = _run(value)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == value
+
+    malformed = {**value, "telemetry_row_sha256": "not-a-hash"}
+    assert _run(malformed).returncode != 0
+
+
 def _cycle():
     value = _oneshot()
     value.update({
@@ -238,6 +248,37 @@ def test_all_evidence_shapes_and_activation_summary_have_exact_keysets():
         "second_cycle_interval_seconds", "minimum_cycle_interval_seconds",
         "db_reopens", "database", "decision_telemetry", "side_effects",
     }
+
+
+def test_full_continuous_cycle_sequence_validates_every_cycle_and_hash():
+    first = {**_cycle(), "telemetry_row_sha256": "4" * 64}
+    second = {
+        **first,
+        "cycle_index": 2,
+        "cycle_start_elapsed_seconds": 60.0,
+        "observed_interval_seconds": 60.0,
+        "db_reopened": True,
+        "db_reopens": 1,
+        "telemetry_row_sha256": "5" * 64,
+    }
+    content = json.dumps(first) + "\n" + json.dumps(second)
+    result = _run(
+        content, mode="shadow-continuous", event="cycle-sequence",
+    )
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["cycles"] == 2
+    assert summary["hashes"] == ["4" * 64, "5" * 64]
+
+    tampered = {
+        **second,
+        "side_effects": {**second["side_effects"], "s3": True},
+    }
+    result = _run(
+        json.dumps(first) + "\n" + json.dumps(tampered),
+        mode="shadow-continuous", event="cycle-sequence",
+    )
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize(

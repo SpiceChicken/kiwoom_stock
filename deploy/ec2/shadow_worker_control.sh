@@ -23,6 +23,7 @@ readonly KILL_AFTER_SECONDS="${KIWOOM_SHADOW_KILL_AFTER_SECONDS:-15}"
 readonly DOWNLOAD_TIMEOUT_SECONDS="${KIWOOM_SHADOW_DOWNLOAD_TIMEOUT_SECONDS:-45}"
 readonly FIRST_TICK_TIMEOUT_SECONDS="${KIWOOM_SHADOW_FIRST_TICK_TIMEOUT_SECONDS:-240}"
 readonly CONTAINER_NAME="kiwoom-shadow-once"
+readonly TELEMETRY_VOLUME_NAME="${KIWOOM_SHADOW_TELEMETRY_VOLUME:-kiwoom-stock-shadow_kiwoom-shadow-data}"
 # Evidence schema authority is the fixed standalone validator artifact.
 readonly ROLLOUT_BINDING_FILE="${KIWOOM_SHADOW_BINDING_FILE:-/var/lib/kiwoom-stock/shadow-rollout-current.json}"
 readonly VALIDATOR_PATH="/usr/local/libexec/kiwoom-shadow-runtime-evidence.py"
@@ -364,6 +365,20 @@ validate_safe_evidence() {
         --output accepted-record
 }
 
+validate_safe_cycle_sequence() {
+    local expected_source_sha="$1"
+    local expected_image="$2"
+    local expected_activation_id="$3"
+    python3 "${VALIDATOR_PATH}" \
+        --mode shadow-continuous \
+        --event cycle-sequence \
+        --source-sha "${expected_source_sha}" \
+        --image-digest "${expected_image}" \
+        --activation-id "${expected_activation_id}" \
+        --input-format json-lines \
+        --output accepted-record
+}
+
 validate_safe_terminal_diagnostic() {
     local expected_source_sha="$1"
     local expected_image="$2"
@@ -422,6 +437,82 @@ validate_container_identity_safe() {
     expected_command="[\"python\",\"-m\",\"kiwoom_stock\",\"shadow-worker\",\"--source-sha\",\"${expected_source_sha}\",\"--image-digest\",\"${expected_image}\",\"--activation-id\",\"${expected_activation_id}\"]"
     actual="$(docker inspect "${CONTAINER_NAME}" --format '{{json .Config.Cmd}}')" || return 1
     [[ "${actual}" == "${expected_command}" ]]
+}
+
+verify_shadow_telemetry() {
+    local image="$1" source_sha="$2" activation_id="$3" logs="$4" terminal="$5"
+    local volume session manifest hashes expected
+    if ! grep -q '"event": *"cycle"' <<<"$logs"; then
+        volume="$(docker inspect "${CONTAINER_NAME}" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/kiwoom"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)"
+        if [[ -n "${volume}" ]]; then
+            docker run --rm --network none --read-only -v "${volume}:/var/lib/kiwoom:ro" "${image}" \
+                python -c 'import sqlite3, pathlib, sys; p=pathlib.Path("/var/lib/kiwoom/shadow-telemetry.db"); sys.exit(0) if not p.exists() else None; c=sqlite3.connect("file:"+str(p)+"?mode=ro", uri=True); n=c.execute("select count(*) from shadow_cycle_telemetry_v1").fetchone()[0]; c.close(); raise SystemExit("orphan telemetry rows") if n else None' \
+                || fail "shadow telemetry has rows without cycle evidence"
+        fi
+        printf '{"event":"telemetry_manifest","source_sha":"%s","activation_id":"%s","row_count":0,"legacy_terminal_only":true}\n' \
+            "$source_sha" "$activation_id"
+        return 0
+    fi
+    volume="$(docker inspect "${CONTAINER_NAME}" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/kiwoom"}}{{.Name}}{{end}}{{end}}')"
+    [[ -n "${volume}" && "${volume}" != *$'\n'* ]] || fail "shadow telemetry named volume is missing"
+    session="$(python3 -c '
+import json,sys
+for raw in sys.stdin:
+    try: item=json.loads(raw.split("|",1)[-1].strip())
+    except json.JSONDecodeError: continue
+    if item.get("event") == "cycle" and isinstance(item.get("kst_date"),str):
+        print(item["kst_date"]); break
+' <<<"${logs}")"
+    [[ "${session}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "shadow telemetry session identity is missing"
+    expected="$(validate_safe_cycle_sequence "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
+        || fail "shadow log telemetry evidence is incomplete"
+    manifest="$(docker run --rm --network none --read-only \
+        -v "${volume}:/var/lib/kiwoom:ro" "${image}" \
+        python -m kiwoom_stock shadow-telemetry-export \
+        --database-path /var/lib/kiwoom/shadow-telemetry.db \
+        --activation-id "${activation_id}" --session-date-kst "${session}" --manifest-only)" \
+        || fail "shadow telemetry manifest export failed"
+    hashes="$(docker run --rm --network none --read-only \
+        -v "${volume}:/var/lib/kiwoom:ro" "${image}" \
+        python -m kiwoom_stock shadow-telemetry-export \
+        --database-path /var/lib/kiwoom/shadow-telemetry.db \
+        --activation-id "${activation_id}" --session-date-kst "${session}" --row-hashes-only)" \
+        || fail "shadow telemetry hash export failed"
+    python3 - "${source_sha}" "${image}" "${activation_id}" "${session}" "${terminal}" "${expected}" "${manifest}" "${hashes}" <<'PY'
+import json,sys
+source,image,activation,session,terminal,expected,manifest,hashes=sys.argv[1:]
+term=json.loads(terminal); logged=json.loads(expected); exported=json.loads(manifest); db=json.loads(hashes)
+if term.get("cycles") != logged.get("cycles"):
+    raise SystemExit(1)
+if exported.get("activation_id") != activation or exported.get("session_date_kst") != session:
+    raise SystemExit(1)
+if logged["cycles"] != exported.get("row_count") or logged["hashes"] != db.get("row_hashes"):
+    raise SystemExit(1)
+if exported.get("first_cycle") != (1 if logged["cycles"] else None) or exported.get("last_cycle") != logged["cycles"]:
+    raise SystemExit(1)
+if exported.get("source_sha") != source or exported.get("image_digest") != image:
+    raise SystemExit(1)
+if not isinstance(exported.get("config_sha256"), str) or len(exported["config_sha256"]) != 64:
+    raise SystemExit(1)
+if exported.get("database_bytes", 0) > 32 * 1024 * 1024 or exported.get("finalized_session_count", 0) > 20:
+    raise SystemExit(1)
+print(json.dumps({"event":"telemetry_manifest","source_sha":source,**exported},
+                 sort_keys=True,separators=(",",":")))
+PY
+}
+
+export_shadow_telemetry_page() {
+    local image="$1" activation_id="$2" session="$3" offset="$4" length="$5"
+    local volume
+    [[ "${offset}" =~ ^[0-9]+$ && "${length}" =~ ^[0-9]+$ ]] || fail "telemetry page bounds are invalid"
+    (( length > 0 && length <= 12288 )) || fail "telemetry page length exceeds bound"
+    volume="$(docker volume inspect "${TELEMETRY_VOLUME_NAME}" --format '{{.Name}}')" || fail "shadow telemetry named volume is absent"
+    docker run --rm --network none --read-only \
+        -v "${volume}:/var/lib/kiwoom:ro" "${image}" \
+        python -m kiwoom_stock shadow-telemetry-export \
+        --database-path /var/lib/kiwoom/shadow-telemetry.db \
+        --activation-id "${activation_id}" --session-date-kst "${session}" \
+        --offset "${offset}" --length "${length}"
 }
 
 confirm_continuous_tick() {
@@ -645,11 +736,7 @@ stop_shadow() {
             "${source_sha}" "${image}" "${activation_id}" <<<"${logs}")" \
             || fail "continuous terminal safe evidence is missing"
         printf '%s\n' "${diagnostic}"
-        docker rm "${CONTAINER_NAME}" >/dev/null \
-            || fail "failed shadow container removal failed"
-        docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1 \
-            && fail "failed shadow container remains after stop"
-        fail "shadow runtime terminal state is non-operational"
+        fail "shadow runtime terminal state is non-operational; container and logs preserved"
     fi
     exit_code="$(docker inspect "${CONTAINER_NAME}" --format '{{.State.ExitCode}}')"
     [[ "${exit_code}" == 0 ]] \
@@ -657,7 +744,10 @@ stop_shadow() {
     python3 -c 'import json,sys; item=json.loads(sys.argv[1]); raise SystemExit(0 if (item.get("status"), item.get("reason")) == (sys.argv[2], sys.argv[3]) else 1)' \
         "${terminal}" "${expected_status}" "${expected_reason}" \
         || fail "shadow terminal state does not match container transition"
+    manifest="$(verify_shadow_telemetry "${image}" "${source_sha}" "${activation_id}" "${logs}" "${terminal}")"
+    [[ -n "${manifest}" ]] || fail "shadow telemetry manifest is empty"
     printf '%s\n' "${terminal}"
+    printf '%s\n' "${manifest}"
     docker rm "${CONTAINER_NAME}" >/dev/null || fail "shadow container removal failed"
     docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1 \
         && fail "shadow container remains after stop"
@@ -676,6 +766,10 @@ usage:
     --activation-id ID --expected-worker-sha256 HASH --expected-validator-sha256 HASH \
     --expected-shadow-document-sha256 HASH \
     --expected-instance-id INSTANCE --region REGION
+  kiwoom-shadow-worker --desired-state telemetry-export-page --image DIGEST --source-sha SHA \
+    --activation-id ID --compose-shadow-sha256 HASH --telemetry-session-date-kst YYYY-MM-DD --telemetry-offset N --telemetry-length N \
+    --expected-worker-sha256 HASH --expected-validator-sha256 HASH \
+    --expected-shadow-document-sha256 HASH --expected-instance-id INSTANCE --region REGION
   The fixed SSM wrapper additionally passes --inherited-lock-fd 9.
 EOF
 }
@@ -684,7 +778,7 @@ main() {
     local image="" source_sha="" activation_id="" compose_hash=""
     local expected_instance="" region="" desired_state=""
     local expected_worker_hash="" expected_validator_hash="" expected_document_hash=""
-    local inherited_lock_fd=""
+    local inherited_lock_fd="" telemetry_session="" telemetry_offset="" telemetry_length=""
     while (( $# )); do
         case "$1" in
             --image) image="${2:-}"; shift 2 ;;
@@ -698,6 +792,9 @@ main() {
             --expected-instance-id) expected_instance="${2:-}"; shift 2 ;;
             --region) region="${2:-}"; shift 2 ;;
             --desired-state) desired_state="${2:-}"; shift 2 ;;
+            --telemetry-session-date-kst) telemetry_session="${2:-}"; shift 2 ;;
+            --telemetry-offset) telemetry_offset="${2:-}"; shift 2 ;;
+            --telemetry-length) telemetry_length="${2:-}"; shift 2 ;;
             *) usage; fail "unsupported argument" ;;
         esac
     done
@@ -712,9 +809,18 @@ main() {
     validate_rollout_binding "${source_sha}" "${expected_worker_hash}" \
         "${expected_validator_hash}" "${expected_document_hash}"
     case "${desired_state}" in
-      oneshot|continuous|stop) ;;
-      *) fail "desired state must be exactly oneshot, continuous, or stop" ;;
+      oneshot|continuous|stop|telemetry-export-page) ;;
+      *) fail "desired state must be exactly oneshot, continuous, stop, or telemetry-export-page" ;;
     esac
+    if [[ "${desired_state}" == telemetry-export-page ]]; then
+        validate_image "${image}"
+        validate_source_sha "${source_sha}"
+        validate_activation_id "${activation_id}"
+        [[ "${compose_hash}" == "$(printf '0%.0s' {1..64})" ]] || fail "telemetry page requires the zero Compose hash sentinel"
+        [[ "${telemetry_session}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "telemetry session date is invalid"
+        export_shadow_telemetry_page "${image}" "${activation_id}" "${telemetry_session}" "${telemetry_offset:-0}" "${telemetry_length:-12288}"
+        return 0
+    fi
     if [[ "${desired_state}" == stop ]]; then
         [[ -z "${compose_hash}" ]] || fail "stop does not accept a Compose hash"
         validate_image "${image}"

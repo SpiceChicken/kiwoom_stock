@@ -337,6 +337,62 @@ jobs:
           invocation_file="${RUNNER_TEMP}/shadow-invocation.json"
           aws ssm get-command-invocation --command-id "${command_id}" \
             --instance-id "${EC2_INSTANCE_ID}" --output json >"${invocation_file}"
+          if [[ "${DESIRED_STATE}" == stop ]]; then
+            python3 - "${invocation_file}" shadow-telemetry.manifest.json <<'PY'
+          import json, sys
+          from pathlib import Path
+          invocation=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          records=[]
+          for raw in invocation.get("StandardOutputContent", "").splitlines():
+              try: value=json.loads(raw.split("|",1)[-1].strip())
+              except json.JSONDecodeError: continue
+              if value.get("event") == "telemetry_manifest": records.append(value)
+          if len(records) > 1: raise SystemExit("duplicate telemetry manifest")
+          if records: Path(sys.argv[2]).write_text(json.dumps(records[0],sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+          PY
+            if [[ -s shadow-telemetry.manifest.json ]] && ! python3 -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1])).get("legacy_terminal_only") else 1)' shadow-telemetry.manifest.json; then
+              : >shadow-telemetry.jsonl.gz
+              telemetry_session_date="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_date_kst"])' shadow-telemetry.manifest.json)"
+              [[ "${telemetry_session_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+              [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["activation_id"])' shadow-telemetry.manifest.json)" == "${ACTIVATION_ID}" ]]
+              telemetry_size="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compressed_bytes"])' shadow-telemetry.manifest.json)"
+              (( telemetry_size >= 0 && telemetry_size <= 4 * 1024 * 1024 ))
+              for ((telemetry_offset=0; telemetry_offset<telemetry_size; telemetry_offset+=12288)); do
+                page_length=$(( telemetry_size - telemetry_offset )); (( page_length > 12288 )) && page_length=12288
+                page_command_id="$(aws ssm send-command --document-name "$SHADOW_DOCUMENT_NAME" --document-version "${document_version}" --instance-ids "$EC2_INSTANCE_ID" --parameters "DesiredState=telemetry-export-page,ImageDigest=${IMAGE_DIGEST},SourceSha=${SOURCE_SHA},ActivationId=${ACTIVATION_ID},ComposeShadowSha256=$(printf '0%.0s' {1..64}),TelemetrySessionDateKst=${telemetry_session_date},TelemetryOffset=${telemetry_offset},TelemetryLength=${page_length},ExpectedWorkerSha256=${WORKER_SHA256},ExpectedValidatorSha256=${VALIDATOR_SHA256},ExpectedShadowDocumentSha256=${SHADOW_DOCUMENT_SHA256},ExpectedInstanceId=${EC2_INSTANCE_ID},Region=${AWS_REGION}" --comment "kiwoom shadow telemetry page ${ACTIVATION_ID}:${telemetry_offset}" --timeout-seconds 1020 --max-concurrency 1 --max-errors 0 --query 'Command.CommandId' --output text)"
+                page_invocation="${RUNNER_TEMP}/shadow-telemetry-page-${telemetry_offset}.json"
+                for _ in $(seq 1 102); do
+                  status="$(aws ssm get-command-invocation --command-id "${page_command_id}" --instance-id "${EC2_INSTANCE_ID}" --query Status --output text 2>/dev/null || true)"
+                  if [ "${status}" = Success ] || [ "${status}" = Failed ] || [ "${status}" = Cancelled ] || [ "${status}" = TimedOut ]; then break; fi
+                  sleep 10
+                done
+                aws ssm get-command-invocation --command-id "${page_command_id}" --instance-id "${EC2_INSTANCE_ID}" --output json >"${page_invocation}"
+                python3 - "${page_invocation}" shadow-telemetry.jsonl.gz "${telemetry_offset}" "${page_length}" "${ACTIVATION_ID}" "${telemetry_session_date}" "${SOURCE_SHA}" "${IMAGE_DIGEST}" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compressed_sha256"])' shadow-telemetry.manifest.json)" "${telemetry_size}" <<'PY'
+          import base64,json,sys
+          from pathlib import Path
+          value=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if value.get("Status") != "Success" or value.get("ResponseCode") != 0: raise SystemExit("telemetry page invocation failed")
+          rows=[json.loads(raw) for raw in value.get("StandardOutputContent","").splitlines() if raw.strip()]
+          if len(rows)!=1: raise SystemExit("invalid telemetry page response")
+          page=rows[0]; expected_offset=int(sys.argv[3]); expected_length=int(sys.argv[4]); expected_size=int(sys.argv[10])
+          if (page.get("activation_id"), page.get("session_date_kst"), page.get("source_sha"), page.get("image_digest"), page.get("offset"), page.get("length"), page.get("compressed_bytes")) != (sys.argv[5],sys.argv[6],sys.argv[7],sys.argv[8],expected_offset,expected_length,expected_size): raise SystemExit("telemetry page identity mismatch")
+          if page.get("compressed_sha256") != sys.argv[9]: raise SystemExit("telemetry page manifest mismatch")
+          decoded=base64.b64decode(page.get("page_base64",""),validate=True)
+          if len(decoded) != expected_length: raise SystemExit("telemetry page length mismatch")
+          import hashlib
+          if page.get("page_sha256") != hashlib.sha256(decoded).hexdigest(): raise SystemExit("telemetry page hash mismatch")
+          with open(sys.argv[2],"ab") as stream: stream.write(decoded)
+          PY
+              done
+              python3 - shadow-telemetry.jsonl.gz shadow-telemetry.manifest.json <<'PY'
+          import gzip,hashlib,json,sys
+          from pathlib import Path
+          artifact=Path(sys.argv[1]).read_bytes(); manifest=json.loads(Path(sys.argv[2]).read_text())
+          if len(artifact)>4*1024*1024 or hashlib.sha256(artifact).hexdigest()!=manifest["compressed_sha256"]: raise SystemExit("telemetry artifact hash mismatch")
+          if hashlib.sha256(gzip.decompress(artifact)).hexdigest()!=manifest["session_sha256"]: raise SystemExit("telemetry session hash mismatch")
+          PY
+            fi
+          fi
           if [[ "${DESIRED_STATE}" == continuous ]] && python3 - "${invocation_file}" <<'PY'
           import json
           from pathlib import Path
@@ -446,5 +502,7 @@ jobs:
             ${{ env.EVIDENCE_FILENAME }}
             ${{ env.DIAGNOSTIC_FILENAME }}
             ${{ env.NOTIFICATION_RECEIPT_FILENAME }}
+            shadow-telemetry.jsonl.gz
+            shadow-telemetry.manifest.json
           if-no-files-found: ignore
           retention-days: 14

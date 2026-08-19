@@ -197,6 +197,7 @@ class TradingEngine:
             )
             self.notifier.flush_status(self.analyzer.market_regime.value)
             self._checkpoint_shadow_lifecycle()
+            position_after = self.stock_mgr.active_positions.get(stock_code)
             return {
                 "cycles": 1,
                 "target_count": 1,
@@ -204,6 +205,22 @@ class TradingEngine:
                 "market_regime": self.analyzer.market_regime.value,
                 "continuity": metrics.continuity,
                 "decision_telemetry": telemetry,
+                # Keep normalized numeric inputs at the point where they are
+                # validated and before the engine is closed by the runtime.
+                "telemetry_metrics": {
+                    "current_price": metrics.cur_prc,
+                    "vwap": metrics.vwap,
+                    "strength": metrics.strength,
+                    "trend_rsi": metrics.trend_rsi,
+                    "atr_percent": metrics.atr_percent,
+                    "down_atr_percent": metrics.down_atr_percent,
+                    "volume_ratio": metrics.vol_ratio,
+                    "forces": dict(metrics.forces),
+                },
+                "position_after": (
+                    getattr(position_after, "status", position_after)
+                    if position_after is not None else position_before
+                ),
             }
         finally:
             with self._shadow_cycle_lock:

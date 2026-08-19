@@ -91,7 +91,7 @@ def test_clean_contract_has_stable_two_unit_summary(contract_root: Path):
 
     assert result.returncode == 0
     assert result.stdout == (
-        "PASS units=2 activation_parameters=10 rollout_parameters=8\n"
+        "PASS units=2 activation_parameters=13 rollout_parameters=8\n"
     )
     assert result.stderr == ""
 

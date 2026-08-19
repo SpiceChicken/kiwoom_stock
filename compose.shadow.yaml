@@ -37,6 +37,8 @@ services:
       KIWOOM_IMAGE_DIGEST: ${KIWOOM_IMAGE_DIGEST:?set the exact image digest}
       KIWOOM_CREDENTIALS_DIR: /run/secrets
       KIWOOM_DB_PATH: /var/lib/kiwoom/shadow-trades.db
+      KIWOOM_SHADOW_TELEMETRY_PATH: /var/lib/kiwoom/shadow-telemetry.db
+      KIWOOM_REQUIRE_SHADOW_TELEMETRY: "1"
       KIWOOM_REQUIRE_SHADOW_VOLUME: "1"
     secrets:
       - source: kiwoom_shadow_app_key

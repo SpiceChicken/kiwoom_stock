@@ -44,13 +44,18 @@ ONESHOT_KEYS = {
 }
 SWING_SHADOW_KEY = "swing_shadow_evidence"
 CANDIDATE_DECISION_KEY = "candidate_decision"
-ONESHOT_OPTIONAL_KEYS = {SWING_SHADOW_KEY}
+# Telemetry is additive to the legacy one-shot evidence contract.  The field
+# is emitted only when the sidecar is enabled; older one-shot runs remain
+# valid without it.
+ONESHOT_OPTIONAL_KEYS = {SWING_SHADOW_KEY, "telemetry_row_sha256"}
 CYCLE_KEYS = ONESHOT_KEYS | {
     "event", "cycle_index", "elapsed_seconds", "interval_seconds",
     "cycle_start_elapsed_seconds", "observed_interval_seconds", "db_reopened",
     "db_reopens",
 }
 CYCLE_OPTIONAL_KEYS = {SWING_SHADOW_KEY}
+# Additive P0 integrity field.  Older one-shot evidence remains unchanged.
+CYCLE_OPTIONAL_KEYS = CYCLE_OPTIONAL_KEYS | {"telemetry_row_sha256"}
 TERMINAL_KEYS = {
     "schema_version", "event", "status", "mode", "source_sha", "image_digest",
     "activation_id", "cycles", "elapsed_seconds",
@@ -408,10 +413,17 @@ def _exact_keys(item: dict[str, object], expected: set[str], category: str) -> N
 
 
 def _validate_oneshot(item: dict[str, object]) -> None:
-    if set(item) not in (ONESHOT_KEYS, ONESHOT_KEYS | ONESHOT_OPTIONAL_KEYS):
+    keys = set(item)
+    if not ONESHOT_KEYS.issubset(keys) or not keys.issubset(
+        ONESHOT_KEYS | ONESHOT_OPTIONAL_KEYS
+    ):
         raise EvidenceError("oneshot_keys_invalid")
     if SWING_SHADOW_KEY in item and not _valid_swing_shadow_evidence(item[SWING_SHADOW_KEY]):
         raise EvidenceError("swing_shadow_evidence_invalid")
+    if "telemetry_row_sha256" in item and not _valid_hash(
+        item["telemetry_row_sha256"]
+    ):
+        raise EvidenceError("telemetry_row_hash_invalid")
     attempts = item.get("http_attempts")
     counts = item.get("api_counts")
     local_counts = item.get("local_counts")
@@ -452,11 +464,22 @@ def _validate_oneshot(item: dict[str, object]) -> None:
         raise EvidenceError("oneshot_contract_invalid")
 
 
-def _validate_cycle(item: dict[str, object]) -> None:
-    if set(item) not in (CYCLE_KEYS, CYCLE_KEYS | CYCLE_OPTIONAL_KEYS):
+def _validate_cycle(
+    item: dict[str, object], *, expected_index: int = 1,
+    previous_start: float | None = None,
+) -> None:
+    keys = set(item)
+    if not CYCLE_KEYS.issubset(keys) or not keys.issubset(
+        CYCLE_KEYS | CYCLE_OPTIONAL_KEYS
+    ):
         raise EvidenceError("cycle_keys_invalid")
     if SWING_SHADOW_KEY in item and not _valid_swing_shadow_evidence(item[SWING_SHADOW_KEY]):
         raise EvidenceError("swing_shadow_evidence_invalid")
+    if "telemetry_row_sha256" in item and (
+        not isinstance(item["telemetry_row_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", item["telemetry_row_sha256"]) is None
+    ):
+        raise EvidenceError("telemetry_row_hash_invalid")
     integer_fields = (
         item.get("schema_version"), item.get("cycle_index"), item.get("cycles"),
         item.get("http_attempts"), item.get("db_reopens"),
@@ -466,7 +489,7 @@ def _validate_cycle(item: dict[str, object]) -> None:
         or item.get("schema_version") != 4
         or item.get("event") != "cycle"
         or item.get("status") != "PASS"
-        or item.get("cycle_index") != 1
+        or item.get("cycle_index") != expected_index
         or item.get("cycles") != 1
         or item.get("http_attempts") != 6
         or item.get("db_identity") != "/var/lib/kiwoom/shadow-trades.db"
@@ -476,13 +499,84 @@ def _validate_cycle(item: dict[str, object]) -> None:
         or item.get("interval_seconds") != 60.0
         or not _finite_float(item.get("elapsed_seconds"))
         or not _finite_float(item.get("cycle_start_elapsed_seconds"))
-        or item.get("observed_interval_seconds") is not None
-        or item.get("db_reopened") is not False
-        or item.get("db_reopens") != 0
         or not _valid_continuity(item.get("continuity"))
         or not _valid_decision_telemetry(item.get("decision_telemetry"))
     ):
         raise EvidenceError("cycle_contract_invalid")
+    observed_interval = item.get("observed_interval_seconds")
+    cycle_start = item.get("cycle_start_elapsed_seconds")
+    if expected_index == 1:
+        if observed_interval is not None or item.get("db_reopened") is not False or item.get("db_reopens") != 0:
+            raise EvidenceError("cycle_sequence_invalid")
+    else:
+        if (
+            not _finite_float(observed_interval, minimum=60.0)
+            or item.get("db_reopened") is not True
+            or item.get("db_reopens") != expected_index - 1
+            or not _finite_float(cycle_start, minimum=0.0)
+            or previous_start is None
+            or cycle_start - previous_start < 60.0
+            or abs((cycle_start - previous_start) - observed_interval) > 0.000001
+        ):
+            raise EvidenceError("cycle_sequence_invalid")
+
+
+def validate_cycle_sequence(
+    records: Iterable[object], *, source_sha: str, image_digest: str,
+    activation_id: str,
+) -> dict[str, object]:
+    """Strictly validate every continuous cycle in a full container log."""
+    matches: list[dict[str, object]] = []
+    for value in records:
+        if not isinstance(value, dict):
+            raise EvidenceError("record_not_object")
+        if value.get("mode") != "shadow-continuous":
+            continue
+        event = value.get("event")
+        if event == "cycle":
+            matches.append(value)
+        elif event not in {"terminal"}:
+            raise EvidenceError("cycle_sequence_unexpected_record")
+    if not matches:
+        raise EvidenceError("cycle_sequence_not_found")
+    session_date: str | None = None
+    previous_start: float | None = None
+    hashes: list[str] = []
+    for expected_index, item in enumerate(matches, start=1):
+        if (
+            item.get("source_sha") != source_sha
+            or item.get("image_digest") != image_digest
+            or item.get("activation_id") != activation_id
+        ):
+            raise EvidenceError("activation_tuple_mismatch")
+        if session_date is None:
+            session_date = item.get("kst_date") if isinstance(item.get("kst_date"), str) else None
+        if item.get("kst_date") != session_date:
+            raise EvidenceError("cycle_session_mismatch")
+        side_effects = item.get("side_effects")
+        if (
+            not isinstance(side_effects, dict)
+            or set(side_effects) != set(SIDE_EFFECT_KEYS)
+            or any(value is not False for value in side_effects.values())
+            or item.get("resources_closed") is not True
+        ):
+            raise EvidenceError("side_effects_unsafe")
+        _validate_cycle(item, expected_index=expected_index, previous_start=previous_start)
+        row_hash = item.get("telemetry_row_sha256")
+        if not isinstance(row_hash, str) or re.fullmatch(r"[0-9a-f]{64}", row_hash) is None:
+            raise EvidenceError("telemetry_row_hash_required")
+        hashes.append(row_hash)
+        start = item.get("cycle_start_elapsed_seconds")
+        previous_start = float(start) if isinstance(start, (int, float)) else None
+    return {
+        "event": "cycle_sequence",
+        "source_sha": source_sha,
+        "image_digest": image_digest,
+        "activation_id": activation_id,
+        "session_date_kst": session_date,
+        "cycles": len(matches),
+        "hashes": hashes,
+    }
 
 
 def _validate_terminal_shape(item: dict[str, object]) -> None:
@@ -570,6 +664,11 @@ def validate(
     records: Iterable[object], *, mode: str, event: str, source_sha: str,
     image_digest: str, activation_id: str,
 ) -> dict[str, object]:
+    if event == "cycle-sequence":
+        return validate_cycle_sequence(
+            records, source_sha=source_sha, image_digest=image_digest,
+            activation_id=activation_id,
+        )
     matches: list[dict[str, object]] = []
     for value in records:
         if not isinstance(value, dict):
@@ -690,7 +789,10 @@ def activation_summary(item: dict[str, object]) -> dict[str, object]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True, choices=("shadow-once", "shadow-continuous"))
-    parser.add_argument("--event", required=True, choices=("oneshot", "cycle", "terminal"))
+    parser.add_argument(
+        "--event", required=True,
+        choices=("oneshot", "cycle", "cycle-sequence", "terminal"),
+    )
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--activation-id", required=True)
@@ -715,6 +817,7 @@ def main(argv: list[str] | None = None) -> int:
         or IMAGE_RE.fullmatch(args.image_digest) is None
         or ACTIVATION_RE.fullmatch(args.activation_id) is None
         or (args.event == "oneshot") != (args.mode == "shadow-once")
+        or (args.event == "cycle-sequence" and args.mode != "shadow-continuous")
     ):
         print("shadow evidence setup failed", file=sys.stderr)
         return 2
