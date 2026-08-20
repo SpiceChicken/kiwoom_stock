@@ -146,6 +146,8 @@ def test_setting_specs_have_an_independent_full_metadata_snapshot():
         ("KIWOOM_IMAGE_REF", "OCI image digest", "shadow execution", None, "shadow activation attestation", False, ("prod", "production-like")),
         ("KIWOOM_IMAGE_DIGEST", "OCI image digest", "shadow execution", None, "shadow activation attestation", False, ("prod", "production-like")),
         ("KIWOOM_REQUIRE_SHADOW_VOLUME", "strict boolean", "shadow execution", None, "shadow volume attestation", False, ("prod", "production-like")),
+        ("KIWOOM_REQUIRE_SHADOW_TELEMETRY", "strict boolean", "shadow execution", None, "shadow telemetry attestation", False, ("prod", "production-like")),
+        ("KIWOOM_SHADOW_TELEMETRY_PATH", "file path", "shadow execution", None, "shadow telemetry sidecar", False, ("prod", "production-like")),
         ("KIWOOM_API_MODE", "enum", "no", "disabled", "runtime composition", False, ("local", "dev", "test", "staging", "prod", "production-like")),
         ("KIWOOM_PROCESS_NAME", "string", "yes", None, "runtime lifecycle", False, ("local", "dev", "test", "staging", "prod", "production-like")),
         ("KIWOOM_APP_ENV", "enum", "no", "local", "retention policy", False, ("local", "dev", "test", "staging", "prod", "production-like")),
