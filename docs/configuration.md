@@ -52,6 +52,8 @@ The following table is checked against the machine-readable `SETTING_SPECS` regi
 | `KIWOOM_IMAGE_REF` | OCI image digest | shadow execution | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
 | `KIWOOM_IMAGE_DIGEST` | OCI image digest | shadow execution | none | shadow activation attestation | no | prod/prod-like | exact GHCR image digest |
 | `KIWOOM_REQUIRE_SHADOW_VOLUME` | strict boolean | shadow execution | none | shadow volume attestation | no | prod/prod-like | exactly `1` when required |
+| `KIWOOM_REQUIRE_SHADOW_TELEMETRY` | strict boolean | shadow execution | none | shadow telemetry attestation | no | prod/prod-like | exactly `1` when required |
+| `KIWOOM_SHADOW_TELEMETRY_PATH` | file path | shadow execution | none | shadow telemetry sidecar | no | prod/prod-like | absolute path inside the admitted shadow volume |
 | `KIWOOM_API_MODE` | enum | no | `disabled` | runtime composition | no | all | `disabled`, `mock`, or `prod` |
 | `KIWOOM_PROCESS_NAME` | string | yes | none | runtime lifecycle | no | all | non-empty |
 | `KIWOOM_APP_ENV` | enum | no | `local` | retention policy | no | all | allowed environment |
