@@ -24,6 +24,7 @@ from kiwoom_stock.domain.state import (
     calculate_reference_mass,
     calculate_volume_interval,
     calculate_volume_window,
+    is_new_volume_session,
     validate_decay_constant,
 )
 
@@ -255,17 +256,22 @@ class PhysicalStateTracker:
         ):
             raise PhysicalStateValidationError("physical observation timestamp did not advance")
 
+        volume_session_reset = is_new_volume_session(
+            prior.last_observed_at,
+            observation.observed_at,
+        )
         last_volume = (
-            prior.last_cumulative_volume
-            if prior.last_cumulative_volume is not None
-            else -1.0
+            -1.0
+            if volume_session_reset or prior.last_cumulative_volume is None
+            else prior.last_cumulative_volume
         )
         volume_interval = calculate_volume_interval(
             last_volume,
             observation.cumulative_volume,
         )
+        volume_history = () if volume_session_reset else prior.interval_volume_history
         volume_window = calculate_volume_window(
-            prior.interval_volume_history,
+            volume_history,
             volume_interval.interval_volume,
             volume_interval.is_frozen,
         )

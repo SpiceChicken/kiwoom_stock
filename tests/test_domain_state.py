@@ -15,6 +15,7 @@ from kiwoom_stock.domain.state import (
     calculate_volume_interval,
     calculate_volume_window,
     decay_velocity,
+    is_new_volume_session,
     PhysicalStateHydrationSource,
     PhysicalStateLoadResult,
 )
@@ -80,6 +81,16 @@ def test_volume_interval_window_and_impulse_match_legacy_rules():
     )
     assert cutoff_impulse.interval_amount_krw == 10_000_000.0
     assert cutoff_impulse.interval_impulse == 1.0
+
+
+def test_volume_session_boundary_requires_regular_open_transition():
+    pre_open = datetime(2026, 8, 21, 0, 44, tzinfo=ZoneInfo("Asia/Seoul"))
+    same_session = datetime(2026, 8, 21, 10, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    next_session = datetime(2026, 8, 24, 10, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    assert is_new_volume_session(pre_open, same_session) is True
+    assert is_new_volume_session(same_session, same_session) is False
+    assert is_new_volume_session(same_session, next_session) is True
 
 
 def test_volume_window_preserves_120_tick_limit_and_drop_ratio():
