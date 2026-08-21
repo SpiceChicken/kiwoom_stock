@@ -222,6 +222,36 @@ def test_real_analyzer_tracker_sqlite_row_zero_row_four_end_to_end(tmp_path):
     db.close()
 
 
+def test_new_regular_session_resets_daily_volume_without_accepting_intraday_regression(
+    tmp_path,
+):
+    previous_at = datetime(2026, 8, 21, 0, 44, tzinfo=KST)
+    now = datetime(2026, 8, 21, 9, 26, tzinfo=KST)
+    clock = MutableClock(now)
+    db = TradeLogger(tmp_path / "session-reset.db", clock=clock)
+    repository = AsyncPhysicalStateRepository(db)
+    repository.persist_physical_state(
+        persisted_state(
+            previous_at,
+            volume=26_095_919.0,
+            price=271_000.0,
+        ),
+        forces(1.0),
+    )
+    tracker = PhysicalStateTracker(repository, clock=clock)
+
+    result = tracker.process_observation(
+        observation(now, volume=0.0, price=270_000.0)
+    )
+
+    state = tracker.current_state("005930")
+    assert state is not None
+    assert state.last_cumulative_volume == 0.0
+    assert state.interval_volume_history == ()
+    assert result["continuity"].previous_observed_at == previous_at
+    db.close()
+
+
 def test_worker_failure_keeps_memory_and_database_prior_and_poisons_later_submits(tmp_path):
     now = datetime(2026, 8, 8, 10, 0, tzinfo=KST)
     clock = MutableClock(now)

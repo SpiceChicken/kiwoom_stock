@@ -650,6 +650,27 @@ def test_open_calendar_runs_exactly_one_cycle_closes_and_returns_redacted_eviden
     assert "raw_response" not in rendered
 
 
+@pytest.mark.parametrize(
+    "now",
+    (
+        datetime(2026, 8, 21, 0, 44, tzinfo=ZoneInfo("Asia/Seoul")),
+        datetime(2026, 8, 21, 15, 30, tzinfo=ZoneInfo("Asia/Seoul")),
+    ),
+)
+def test_open_calendar_outside_regular_hours_does_not_construct_runtime(now):
+    result = run_shadow_once(
+        _policy(),
+        clock=lambda: now,
+        calendar=lambda _target: CalendarDecision.OPEN,
+        runtime_factory=lambda *_args: pytest.fail("runtime constructed"),
+    )
+
+    assert result.status == "CLOSED"
+    assert result.calendar == "CLOSED"
+    assert result.cycles == 0
+    assert result.http_attempts == 0
+
+
 def test_worker_converts_utc_boundary_to_one_aware_kst_admission():
     captured = []
 

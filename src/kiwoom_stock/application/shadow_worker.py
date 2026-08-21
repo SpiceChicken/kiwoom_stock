@@ -369,18 +369,27 @@ def run_shadow_once(
         raise ShadowWorkerError("shadow lifecycle budget rejected admission") from error
     if not isinstance(decision, CalendarDecision):
         raise CalendarUnavailableError("KRX calendar returned an invalid decision")
+    session_open = (
+        decision is CalendarDecision.OPEN
+        and shadow_session_wait_until_open(kst_now) is None
+        and shadow_session_remaining(kst_now) > 0.0
+    )
     activation = policy.activation
     common: _ShadowCommon = {
         "mode": policy.mode.value,
         "kst_date": kst_date.isoformat(),
-        "calendar": decision.value,
+        "calendar": (
+            CalendarDecision.OPEN.value
+            if session_open
+            else CalendarDecision.CLOSED.value
+        ),
         "source_sha": activation.source_sha,
         "image_digest": activation.image_digest,
         "activation_id": activation.activation_id,
         "stock_code": policy.stock_code,
         "proxy_code": policy.proxy_code,
     }
-    if decision is CalendarDecision.CLOSED:
+    if not session_open:
         return ShadowRunResult(
             status="CLOSED",
             cycles=0,

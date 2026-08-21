@@ -1,11 +1,12 @@
 """Pure state-transition calculations for physical stock monitoring."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as wall_time
 import math
 from enum import Enum
 from numbers import Real
 from typing import Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 
 MIN_REFERENCE_MASS = 10_000_000.0
@@ -15,6 +16,8 @@ MARKET_CAP_SCALE_BASE = 3.5
 VOLUME_HISTORY_LIMIT = 120
 VOLUME_WINDOW_SIZE = 60
 PHYSICAL_TRACKER_SCHEMA_VERSION = 1
+_KST = ZoneInfo("Asia/Seoul")
+_KRX_SESSION_OPEN = wall_time(9, 0)
 _PERSISTED_FORCE_KEYS = frozenset(
     {
         "current_velocity",
@@ -299,6 +302,29 @@ def calculate_volume_interval(last_volume: float, total_volume: float) -> Volume
         return VolumeInterval(interval_volume=total_volume - last_volume, is_frozen=False)
 
     return VolumeInterval(interval_volume=0.0, is_frozen=False)
+
+
+def is_new_volume_session(
+    previous_observed_at: Optional[datetime],
+    observed_at: datetime,
+) -> bool:
+    """Identify the KRX regular-session boundary for daily volume resets.
+
+    Kiwoom's ``trde_qty`` is a session cumulative volume.  A pre-open
+    observation can still expose the previous session's total, so comparing
+    calendar dates alone is insufficient.  A decrease is therefore expected
+    only when the current observation is at/after the KRX open and the prior
+    observation was before that same day's open.
+    """
+
+    if previous_observed_at is None:
+        return False
+    current = observed_at.astimezone(_KST)
+    previous = previous_observed_at.astimezone(_KST)
+    current_open = datetime.combine(
+        current.date(), _KRX_SESSION_OPEN, tzinfo=_KST
+    )
+    return current >= current_open and previous < current_open
 
 
 def calculate_reference_mass(market_cap: float) -> float:
