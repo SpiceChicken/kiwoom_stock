@@ -27,6 +27,7 @@ from kiwoom_stock.application.execution import (
 from kiwoom_stock.domain.models import PhysicalContinuityEvidence
 from kiwoom_stock.domain.models import ShadowDecisionTelemetry
 from kiwoom_stock.application.swing_shadow import SwingShadowEvidence
+from deploy.shadow_schedule_observation import CRON_CONTRACT
 
 
 SCRIPT = Path("deploy/ec2/shadow_worker_control.sh")
@@ -616,6 +617,99 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert 'TimedOut|Cancelling) break' not in text
     assert '--query ResponseCode --output text' not in text
     assert '[[ "${status}" == Success' not in text
+
+    schedule_steps = [
+        step for step in job["steps"]
+        if step.get("name") == "Observe scheduled shadow run start"
+    ]
+    assert len(schedule_steps) == 1
+    schedule_step = schedule_steps[0]
+    assert schedule_step["if"] == "github.event_name == 'schedule'"
+    assert schedule_step["continue-on-error"] is True
+    assert schedule_step["timeout-minutes"] == 1
+    assert schedule_step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "EVENT_SCHEDULE": "${{ github.event.schedule }}",
+        "DESIRED_STATE": "${{ steps.resolve.outputs.desired_state }}",
+    }
+    schedule_run = schedule_step["run"]
+    assert (
+        '"/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"'
+        in schedule_run
+    )
+    assert schedule_run.count("gh api --method GET") == 1
+    assert "actor" not in schedule_run
+    assert "html_url" not in schedule_run
+    assert "head_commit" not in schedule_run
+    assert "head_branch: .head_branch" in schedule_run
+    assert (
+        ".shadow-control-plane/deploy/shadow_schedule_observation.py"
+        in schedule_run
+    )
+    current_run_path = (
+        'current_run_file="${RUNNER_TEMP}/'
+        'shadow-current-run-${GITHUB_RUN_ID}.json"'
+    )
+    observation_path = (
+        'observation_file="${RUNNER_TEMP}/'
+        'shadow-schedule-observation-${GITHUB_RUN_ID}.json"'
+    )
+    remove_stale = 'rm -f -- "${current_run_file}" "${observation_file}"'
+    assert current_run_path in schedule_run
+    assert observation_path in schedule_run
+    assert remove_stale in schedule_run
+    assert schedule_run.index(remove_stale) < schedule_run.index(
+        "gh api --method GET"
+    )
+    assert '--output "${observation_file}"' in schedule_run
+    assert '--summary "${GITHUB_STEP_SUMMARY}"' in schedule_run
+    assert "- observation: `invalid`" in schedule_run
+
+    notify = next(
+        step for step in job["steps"]
+        if step.get("name") == "Notify protected shadow status"
+    )
+    assert notify["env"]["EVENT_SCHEDULE"] == "${{ github.event.schedule }}"
+    assert '[[ "${GITHUB_EVENT_NAME}" == schedule ]]' in notify["run"]
+    assert (
+        '--schedule-observation "${RUNNER_TEMP}/'
+        'shadow-schedule-observation-${GITHUB_RUN_ID}.json"'
+        in notify["run"]
+    )
+    assert '--expected-run-id "${GITHUB_RUN_ID}"' in notify["run"]
+    assert '--expected-cron "${EVENT_SCHEDULE}"' in notify["run"]
+    upload = next(
+        step for step in job["steps"]
+        if step.get("name") == "Upload bounded shadow evidence"
+    )
+    assert (
+        "${{ runner.temp }}/shadow-schedule-observation-"
+        "${{ github.run_id }}.json"
+    ) in upload["with"]["path"]
+    assert upload["with"]["retention-days"] == 14
+
+
+def test_schedule_cron_action_contract_is_in_exact_parity():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    triggers = workflow.get("on", workflow.get(True))
+    workflow_crons = {item["cron"] for item in triggers["schedule"]}
+    resolve = next(
+        step for step in workflow["jobs"]["activate"]["steps"]
+        if step.get("name") == "Resolve effective shadow activation tuple"
+    )
+    resolve_pairs = re.findall(
+        r"'([^']+)'\) desired_state=(oneshot|continuous|stop) ;;",
+        resolve["run"],
+    )
+    resolve_contract = dict(resolve_pairs)
+    helper_contract = {
+        cron: str(contract["desired_state"])
+        for cron, contract in CRON_CONTRACT.items()
+    }
+
+    assert len(resolve_pairs) == len(resolve_contract)
+    assert workflow_crons == set(resolve_contract) == set(helper_contract)
+    assert resolve_contract == helper_contract
 
 
 def test_activation_poll_treats_cancelling_as_nonterminal_until_success(tmp_path):

@@ -65,10 +65,42 @@ explicit statement that account/order/revoke/live trading are disabled. Raw
 market data, arbitrary errors, SSM stderr, credentials, raw `CONFIG_JSON`, and
 webhook material cannot enter the message.
 
+`PhysicalStateValidationError` is reported only when the bounded invocation
+diagnostic accepts the exact allowlisted sentinel or the same error type in a
+validated terminal for the immutable activation tuple. Its exception body is
+never copied; the safe category is `physical_state_validation_error`. In the
+diagnostic terminal summary, only the exact allowlisted
+`PhysicalStateValidationError` value is preserved. Every other validated
+terminal `error_type` is reduced to `null` rather than copied into the durable
+artifact.
+
+Only the worker's exact complete line
+`shadow worker failed: shadow container is absent; stop identity cannot be proven`
+is action-specific. For `stop`, it is emitted as `stop_target_absent` and the
+fixed Slack prefix is
+`STOP TARGET ABSENT`. This means only that there was no target whose identity
+could be proven for cleanup. It does not claim that start failed, cleanup had
+already completed, or the tuple drifted. The bare phrase and prefixed/suffixed
+near matches are rejected. The sender temporarily accepts legacy
+`container_absent` diagnostics for stop with the same cause-neutral wording.
+
+For a scheduled run, a valid strict `shadow-schedule-observation.json` adds only
+`schedule_delay=<seconds>s` to the end of the fixed message. The notifier
+revalidates the artifact against the current expected GitHub run ID and event
+cron; either mismatch is `invalid`. Manual dispatch does not add a schedule
+suffix. A missing or invalid scheduled observation does not invent `0s` or
+expose the API response; it leaves the message unchanged and records
+`schedule_observation=invalid` in the notification receipt. Manual receipts
+record `schedule_observation=n-a`.
+
 Every attempted delivery writes `shadow-status-notification.json` with
-`DELIVERED` or `FAILED` and a safe category. Requested Slack delivery failure
-fails the workflow, but it runs only after AWS credentials have been cleared and
-does not prevent the host-side runtime cleanup path from executing.
+`DELIVERED` or `FAILED`, a safe category, and the bounded schedule-observation
+state. This eight-key receipt is exact schema version 2. Schema version 1 is the
+legacy seven-key shape without `schedule_observation`; producers do not add the
+new key while claiming v1, and strict consumers must select the key set by
+`schema_version`. Requested Slack delivery failure fails the workflow, but it
+runs only after AWS credentials have been cleared and does not prevent the
+host-side runtime cleanup path from executing.
 
 Once `KIWOOM_SHADOW_SLACK_WEBHOOK_URL` is provisioned and verified, remove the
 `CONFIG_JSON` fallback and its two-step wiring as the forward migration. To

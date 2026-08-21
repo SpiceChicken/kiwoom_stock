@@ -142,6 +142,40 @@ def test_renamed_legacy_notification_secret_fails_closed(
 
 
 @pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            "          EVENT_SCHEDULE: ${{ github.event.schedule }}\n",
+            "",
+        ),
+        (
+            "          EVENT_SCHEDULE: ${{ github.event.schedule }}\n",
+            "          EVENT_SCHEDULE: ${{ github.event.schedule }}\n"
+            "          UNEXPECTED_CRON_ENV: polluted\n",
+        ),
+        (
+            "          EVENT_SCHEDULE: ${{ github.event.schedule }}\n",
+            "          EVENT_SCHEDULE: ${{ github.event_name }}\n",
+        ),
+    ],
+)
+def test_notifier_cron_env_must_be_exact_and_fail_closed(
+    contract_root: Path, old: str, new: str,
+):
+    replace_in_step(
+        contract_root,
+        "Notify protected shadow status",
+        old,
+        new,
+    )
+
+    assert_failure(
+        run_checker(contract_root), 1,
+        "activation.workflow.notification_secret",
+    )
+
+
+@pytest.mark.parametrize(
     ("step_name", "old", "new"),
     [
         (

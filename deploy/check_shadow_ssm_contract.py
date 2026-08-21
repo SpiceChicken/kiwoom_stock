@@ -595,19 +595,6 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
         "${{ secrets.KIWOOM_SHADOW_SLACK_WEBHOOK_URL }}"
     )
     legacy_secret_reference = "${{ secrets.CONFIG_JSON }}"
-    for notification_name in (
-        "Preflight protected Slack status boundary",
-        "Notify protected shadow status",
-    ):
-        notification_step = next(
-            step for step in notification_steps
-            if step.get("name") == notification_name
-        )
-        if notification_step.get("env") != {
-            "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": dedicated_secret_reference,
-            "CONFIG_JSON": legacy_secret_reference,
-        }:
-            raise ContractMismatch("activation.workflow.notification_secret")
     preflight = next(
         step for step in notification_steps
         if step.get("name") == "Preflight protected Slack status boundary"
@@ -616,6 +603,15 @@ def _verify_activation_workflow(workflow: Mapping[str, Any]) -> None:
         step for step in notification_steps
         if step.get("name") == "Notify protected shadow status"
     )
+    if preflight.get("env") != {
+        "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": dedicated_secret_reference,
+        "CONFIG_JSON": legacy_secret_reference,
+    } or notify.get("env") != {
+        "KIWOOM_SHADOW_SLACK_WEBHOOK_URL": dedicated_secret_reference,
+        "CONFIG_JSON": legacy_secret_reference,
+        "EVENT_SCHEDULE": "${{ github.event.schedule }}",
+    }:
+        raise ContractMismatch("activation.workflow.notification_secret")
     if ".shadow-control-plane/deploy/notify_shadow_status.py" not in str(
         preflight.get("run", "")
     ) or ".shadow-control-plane/deploy/notify_shadow_status.py" not in str(

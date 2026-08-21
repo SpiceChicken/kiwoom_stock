@@ -21,6 +21,17 @@ from urllib.request import (
     build_opener,
 )
 
+try:
+    from .shadow_schedule_observation import (
+        ObservationError,
+        load_observation,
+    )
+except ImportError:
+    from shadow_schedule_observation import (  # type: ignore[no-redef]
+        ObservationError,
+        load_observation,
+    )
+
 
 SOURCE_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_RE = re.compile(
@@ -37,12 +48,18 @@ SLACK_PATH_RE = re.compile(
 MAX_ARTIFACT_BYTES = 65_536
 MAX_LEGACY_CONFIG_BYTES = 65_536
 MAX_RESPONSE_BYTES = 64
+PHYSICAL_STATE_CATEGORY = "physical_state_validation_error"
+STOP_TARGET_ABSENT_CATEGORY = "stop_target_absent"
 SAFE_FAILURE_CATEGORIES = {
     "image_pull_no_space",
     "image_pull_auth",
     "image_pull_not_found",
     "image_pull_network",
     "image_pull_failed",
+    PHYSICAL_STATE_CATEGORY,
+    STOP_TARGET_ABSENT_CATEGORY,
+    # One-release input compatibility for diagnostics produced before
+    # stop_target_absent became action-specific.
     "container_absent",
     "container_identity_mismatch",
     "graceful_stop_timeout",
@@ -256,6 +273,17 @@ def _failure_message(
     ):
         return None
     category = value["failure_category"]
+    if category == STOP_TARGET_ABSENT_CATEGORY and desired_state != "stop":
+        return None
+    if desired_state == "stop" and category in {
+        STOP_TARGET_ABSENT_CATEGORY, "container_absent",
+    }:
+        return (
+            "[KIWOOM SHADOW] STOP TARGET ABSENT | action=stop | "
+            f"category={category} | activation={activation_id} | "
+            f"source={source_sha[:12]} | "
+            "account/order/revoke=disabled | live-trading=disabled"
+        )
     return (
         "[KIWOOM SHADOW] ACTION FAILED | "
         f"action={desired_state} | category={category} | "
@@ -296,6 +324,30 @@ def build_message(
         if message is not None:
             return "runtime_rejected", message
     raise SlackStatusError("status_artifact_invalid")
+
+
+def _schedule_suffix(
+    path: Path | None,
+    *,
+    desired_state: str,
+    expected_run_id: str | None,
+    expected_cron: str | None,
+) -> tuple[str, str]:
+    if path is None:
+        return "", "n-a"
+    if expected_run_id is None or expected_cron is None:
+        return "", "invalid"
+    try:
+        observation = load_observation(
+            path,
+            desired_state=desired_state,
+            expected_run_id=expected_run_id,
+            expected_cron=expected_cron,
+        )
+    except ObservationError:
+        return "", "invalid"
+    delay = observation["total_start_delay_seconds"]
+    return f" | schedule_delay={delay}s", "accepted"
 
 
 def deliver(
@@ -343,16 +395,17 @@ def deliver(
 
 def _receipt(
     *, source_sha: str, activation_id: str, desired_state: str,
-    status: str, category: str,
+    status: str, category: str, schedule_observation: str,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "event": "shadow-status-notification",
         "source_sha": source_sha,
         "activation_id": activation_id,
         "desired_state": desired_state,
         "delivery_status": status,
         "category": category,
+        "schedule_observation": schedule_observation,
     }
 
 
@@ -361,6 +414,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-webhook", action="store_true")
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--diagnostic", type=Path)
+    parser.add_argument("--schedule-observation", type=Path)
+    parser.add_argument("--expected-run-id")
+    parser.add_argument("--expected-cron")
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--source-sha")
     parser.add_argument("--image-digest")
@@ -373,6 +429,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    desired_state_for_observation = (
+        args.desired_state if isinstance(args.desired_state, str) else ""
+    )
+    schedule_suffix, schedule_observation = _schedule_suffix(
+        args.schedule_observation,
+        desired_state=desired_state_for_observation,
+        expected_run_id=args.expected_run_id,
+        expected_cron=args.expected_cron,
+    )
     try:
         webhook = resolve_webhook()
         if args.check_webhook:
@@ -409,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"source={args.source_sha[:12]} | "
                 "account/order/revoke=disabled | live-trading=disabled"
             )
+        message += schedule_suffix
         deliver(webhook, message)
         receipt = _receipt(
             source_sha=args.source_sha,
@@ -416,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
             desired_state=args.desired_state,
             status="DELIVERED",
             category=category,
+            schedule_observation=schedule_observation,
         )
     except SlackStatusError as error:
         source_sha = args.source_sha if isinstance(args.source_sha, str) else ""
@@ -431,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
             desired_state=desired_state,
             status="FAILED",
             category=error.category,
+            schedule_observation=schedule_observation,
         )
         if args.receipt is not None:
             args.receipt.write_text(
