@@ -13,6 +13,8 @@ from shadow_runtime_evidence import (
     ACTIVATION_RE,
     IMAGE_RE,
     MAX_INPUT_BYTES,
+    MAX_LINE_BYTES,
+    MAX_LINES,
     SOURCE_RE,
     EvidenceError,
     _json_lines,
@@ -24,6 +26,16 @@ COMMAND_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 SSM_STATUSES = {"Success", "Failed", "Cancelled", "TimedOut"}
+PHYSICAL_STATE_SENTINEL = (
+    "shadow worker failed: error_type=PhysicalStateValidationError"
+)
+STOP_TARGET_ABSENT_SENTINEL = (
+    "shadow worker failed: shadow container is absent; "
+    "stop identity cannot be proven"
+)
+PHYSICAL_STATE_CATEGORY = "physical_state_validation_error"
+STOP_TARGET_ABSENT_CATEGORY = "stop_target_absent"
+SAFE_TERMINAL_ERROR_TYPES = {"PhysicalStateValidationError"}
 SAFE_FAILURE_MARKERS = (
     ("shadow worker failed: image_pull_category=image_pull_no_space",
      "image_pull_no_space"),
@@ -35,7 +47,6 @@ SAFE_FAILURE_MARKERS = (
      "image_pull_network"),
     ("shadow worker failed: image_pull_category=image_pull_failed",
      "image_pull_failed"),
-    ("shadow container is absent", "container_absent"),
     ("container image mismatch", "container_identity_mismatch"),
     ("container source SHA mismatch", "container_identity_mismatch"),
     ("container digest label mismatch", "container_identity_mismatch"),
@@ -63,16 +74,61 @@ def _bounded_text(value: object) -> str | None:
     return value
 
 
-def _classification(status: object, stderr: str | None) -> str:
-    if stderr is not None:
-        for marker, category in SAFE_FAILURE_MARKERS:
-            if marker in stderr:
-                return category
+def _bounded_lines(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    lines = value.splitlines()
+    if len(lines) > MAX_LINES or any(
+        len(line.encode("utf-8")) > MAX_LINE_BYTES for line in lines
+    ):
+        return None
+    return tuple(lines)
+
+
+def _fallback_classification(
+    status: object, terminal: Mapping[str, object] | None,
+) -> str:
+    if terminal is not None:
+        return "runtime_terminal_nonoperational"
     if status == "Success":
         return "success_without_accepted_runtime_evidence"
     if status in SSM_STATUSES:
         return f"ssm_{str(status).lower()}_unclassified"
     return "invocation_envelope_invalid"
+
+
+def _classification(
+    status: object,
+    stdout: str | None,
+    stderr: str | None,
+    terminal: Mapping[str, object] | None,
+    *,
+    desired_state: str,
+) -> str:
+    categories: set[str] = set()
+    stdout_lines = _bounded_lines(stdout)
+    stderr_lines = _bounded_lines(stderr)
+    for lines in (stdout_lines, stderr_lines):
+        if lines is None:
+            continue
+        if PHYSICAL_STATE_SENTINEL in lines:
+            categories.add(PHYSICAL_STATE_CATEGORY)
+        if (
+            desired_state == "stop"
+            and STOP_TARGET_ABSENT_SENTINEL in lines
+        ):
+            categories.add(STOP_TARGET_ABSENT_CATEGORY)
+    if terminal is not None and (
+        terminal.get("error_type") == "PhysicalStateValidationError"
+    ):
+        categories.add(PHYSICAL_STATE_CATEGORY)
+    if stderr is not None:
+        for marker, category in SAFE_FAILURE_MARKERS:
+            if marker in stderr:
+                categories.add(category)
+    if len(categories) == 1:
+        return categories.pop()
+    return _fallback_classification(status, terminal)
 
 
 def build_diagnostic(
@@ -116,33 +172,45 @@ def build_diagnostic(
             "stderr_bytes": (
                 len(stderr.encode("utf-8")) if stderr is not None else None
             ),
-            "failure_category": _classification(status, stderr),
         }
     )
-    if stdout is None:
-        return result
-    try:
-        terminal = validate_diagnostic_terminal(
-            _json_lines(stdout),
-            source_sha=source_sha,
-            image_digest=image_digest,
-            activation_id=activation_id,
+    terminal: Mapping[str, object] | None = None
+    if stdout is not None:
+        try:
+            terminal = validate_diagnostic_terminal(
+                _json_lines(stdout),
+                source_sha=source_sha,
+                image_digest=image_digest,
+                activation_id=activation_id,
+            )
+        except EvidenceError:
+            terminal = None
+    if terminal is not None:
+        terminal_summary = {
+            key: terminal.get(key)
+            for key in (
+                "status",
+                "reason",
+                "cycles",
+                "db_reopens",
+                "resources_closed",
+                "elapsed_seconds",
+            )
+        }
+        terminal_error_type = terminal.get("error_type")
+        terminal_summary["error_type"] = (
+            terminal_error_type
+            if terminal_error_type in SAFE_TERMINAL_ERROR_TYPES
+            else None
         )
-    except EvidenceError:
-        return result
-    result["terminal"] = {
-        key: terminal.get(key)
-        for key in (
-            "status",
-            "reason",
-            "error_type",
-            "cycles",
-            "db_reopens",
-            "resources_closed",
-            "elapsed_seconds",
-        )
-    }
-    result["failure_category"] = "runtime_terminal_nonoperational"
+        result["terminal"] = terminal_summary
+    result["failure_category"] = _classification(
+        status,
+        stdout,
+        stderr,
+        terminal,
+        desired_state=desired_state,
+    )
     return result
 
 

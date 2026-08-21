@@ -76,6 +76,21 @@ def _diagnostic():
     }
 
 
+def _observation():
+    return {
+        "schema_version": 1,
+        "run_id": "123",
+        "cron": "50 23 * * 0-4",
+        "desired_state": "continuous",
+        "expected_at_utc": "2026-08-20T23:50:00Z",
+        "created_at_utc": "2026-08-20T23:53:00Z",
+        "run_started_at_utc": "2026-08-20T23:54:00Z",
+        "delivery_delay_seconds": 180,
+        "queue_delay_seconds": 60,
+        "total_start_delay_seconds": 240,
+    }
+
+
 def _write(path: Path, value) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
@@ -245,6 +260,71 @@ def test_shadow_status_messages_are_exact_control_plane_goldens():
     )
 
 
+def test_stop_target_absent_message_is_cause_neutral_exact_golden():
+    diagnostic = {
+        **_diagnostic(),
+        "desired_state": "stop",
+        "failure_category": "stop_target_absent",
+    }
+    assert notification._failure_message(
+        diagnostic,
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="stop",
+    ) == (
+        "[KIWOOM SHADOW] STOP TARGET ABSENT | action=stop | "
+        "category=stop_target_absent | activation=slack-status-test | "
+        "source=aaaaaaaaaaaa | account/order/revoke=disabled | "
+        "live-trading=disabled"
+    )
+
+
+def test_legacy_container_absent_uses_same_cause_neutral_stop_wording():
+    diagnostic = {
+        **_diagnostic(),
+        "desired_state": "stop",
+        "failure_category": "container_absent",
+    }
+    message = notification._failure_message(
+        diagnostic,
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="stop",
+    )
+    assert message is not None
+    assert "STOP TARGET ABSENT" in message
+    assert "category=container_absent" in message
+    assert "already" not in message.lower()
+
+
+def test_stop_target_absent_is_rejected_for_non_stop_action():
+    assert notification._failure_message(
+        {**_diagnostic(), "failure_category": "stop_target_absent"},
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    ) is None
+
+
+def test_physical_state_category_is_allowlisted_without_error_reflection():
+    message = notification._failure_message(
+        {
+            **_diagnostic(),
+            "failure_category": "physical_state_validation_error",
+        },
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    )
+    assert message is not None
+    assert "category=physical_state_validation_error" in message
+    assert "error_type" not in message
+
+
 def test_rejected_runtime_uses_only_allowlisted_diagnostic_category(tmp_path):
     evidence = tmp_path / "missing-evidence.json"
     diagnostic = tmp_path / "diagnostic.json"
@@ -278,6 +358,142 @@ def test_wrong_tuple_or_unsafe_side_effect_artifact_fails_closed(tmp_path):
             activation_id=ACTIVATION_ID,
             desired_state="continuous",
         )
+
+
+def test_schedule_suffix_is_exact_and_invalid_observation_is_not_zero(tmp_path):
+    observation = tmp_path / "observation.json"
+    _write(observation, _observation())
+    assert notification._schedule_suffix(
+        observation,
+        desired_state="continuous",
+        expected_run_id="123",
+        expected_cron="50 23 * * 0-4",
+    ) == (" | schedule_delay=240s", "accepted")
+
+    _write(observation, {**_observation(), "unsafe": "secret-body"})
+    assert notification._schedule_suffix(
+        observation,
+        desired_state="continuous",
+        expected_run_id="123",
+        expected_cron="50 23 * * 0-4",
+    ) == ("", "invalid")
+    assert notification._schedule_suffix(
+        None,
+        desired_state="continuous",
+        expected_run_id=None,
+        expected_cron=None,
+    ) == ("", "n-a")
+
+
+@pytest.mark.parametrize(
+    ("expected_run_id", "expected_cron"),
+    [
+        (None, "50 23 * * 0-4"),
+        ("123", None),
+        ("124", "50 23 * * 0-4"),
+        ("123", "35 6 * * 1-5"),
+    ],
+)
+def test_schedule_suffix_requires_current_run_and_cron_binding(
+    tmp_path, expected_run_id, expected_cron,
+):
+    observation = tmp_path / "observation.json"
+    _write(observation, _observation())
+    assert notification._schedule_suffix(
+        observation,
+        desired_state="continuous",
+        expected_run_id=expected_run_id,
+        expected_cron=expected_cron,
+    ) == ("", "invalid")
+
+
+@pytest.mark.parametrize(
+    ("observation_value", "expected_status", "expected_suffix"),
+    [
+        (_observation(), "accepted", " | schedule_delay=240s"),
+        ({**_observation(), "total_start_delay_seconds": 0}, "invalid", ""),
+    ],
+)
+def test_main_records_schedule_observation_without_blocking_status_message(
+    monkeypatch, tmp_path, observation_value, expected_status, expected_suffix,
+):
+    evidence = tmp_path / "evidence.json"
+    diagnostic = tmp_path / "diagnostic.json"
+    observation = tmp_path / "observation.json"
+    receipt = tmp_path / "receipt.json"
+    _write(evidence, _success())
+    _write(diagnostic, _diagnostic())
+    _write(observation, observation_value)
+    delivered = []
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", WEBHOOK)
+    monkeypatch.setattr(
+        notification,
+        "deliver",
+        lambda webhook, message: delivered.append((webhook, message)),
+    )
+
+    result = main([
+        "--evidence", str(evidence),
+        "--diagnostic", str(diagnostic),
+        "--schedule-observation", str(observation),
+        "--expected-run-id", "123",
+        "--expected-cron", "50 23 * * 0-4",
+        "--receipt", str(receipt),
+        "--source-sha", SOURCE_SHA,
+        "--image-digest", IMAGE,
+        "--activation-id", ACTIVATION_ID,
+        "--desired-state", "continuous",
+    ])
+
+    assert result == 0
+    assert len(delivered) == 1
+    assert delivered[0][1].endswith(
+        expected_suffix or "live-trading=disabled"
+    )
+    receipt_value = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_value["schema_version"] == 2
+    assert set(receipt_value) == {
+        "schema_version",
+        "event",
+        "source_sha",
+        "activation_id",
+        "desired_state",
+        "delivery_status",
+        "category",
+        "schedule_observation",
+    }
+    assert receipt_value["schedule_observation"] == expected_status
+
+
+def test_manual_notification_receipt_marks_schedule_observation_not_applicable(
+    monkeypatch, tmp_path,
+):
+    evidence = tmp_path / "evidence.json"
+    diagnostic = tmp_path / "diagnostic.json"
+    receipt = tmp_path / "receipt.json"
+    _write(evidence, _success())
+    _write(diagnostic, _diagnostic())
+    delivered = []
+    monkeypatch.setenv("KIWOOM_SHADOW_SLACK_WEBHOOK_URL", WEBHOOK)
+    monkeypatch.setattr(
+        notification,
+        "deliver",
+        lambda webhook, message: delivered.append((webhook, message)),
+    )
+    result = main([
+        "--evidence", str(evidence),
+        "--diagnostic", str(diagnostic),
+        "--receipt", str(receipt),
+        "--source-sha", SOURCE_SHA,
+        "--image-digest", IMAGE,
+        "--activation-id", ACTIVATION_ID,
+        "--desired-state", "continuous",
+    ])
+    assert result == 0
+    assert "schedule_delay=" not in delivered[0][1]
+    receipt_value = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_value["schema_version"] == 2
+    assert receipt_value["schedule_observation"] == "n-a"
 
 
 class FakeResponse:
@@ -387,6 +603,7 @@ def test_main_failure_receipt_and_logs_never_reflect_webhook(
     )
     assert receipt_value["delivery_status"] == "FAILED"
     assert receipt_value["category"] == "slack_network_error"
+    assert receipt_value["schema_version"] == 2
     assert all(
         sentinel not in output
         for output in (captured.out, captured.err, receipt_text)
