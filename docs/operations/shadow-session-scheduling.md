@@ -322,5 +322,17 @@ operation.
 `deploy/aws/shadow-missing-run-detector.yaml.example` is an apply-later
 CloudFormation boundary. It defaults all four schedules to `DISABLED` and the
 Lambda to `metrics-only`; it is a template only, not an applied AWS resource.
-The ZIP, secret, alarm topic, and schedule enablement remain separate review
-inputs.
+The exact Lambda ZIP must be built with
+`deploy/build_shadow_missing_run_package.py`; manually selecting only the
+handler and classifier files is invalid because the Slack formatter imports
+the schedule-observation module even in metrics-only mode. For example:
+
+```bash
+python deploy/build_shadow_missing_run_package.py \
+  --output /tmp/shadow-missing-run-detector.zip
+```
+
+The command prints the ZIP SHA-256 and its base64 form. Use the base64 value
+as `LambdaCodeSha256` only after reviewing the printed member list and the
+source commit. The ZIP, secret, alarm topic, and schedule enablement remain
+separate review inputs.
