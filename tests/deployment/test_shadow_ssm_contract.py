@@ -305,9 +305,10 @@ def test_extra_activation_send_anywhere_in_workflow_fails_closed(
 ):
     replace_once(
         contract_root, ACTIVATION_WORKFLOW,
-        "          set -euo pipefail\n          [[ \"${GITHUB_REF}\" == refs/heads/main ]]",
-        "          set -euo pipefail\n          aws ssm send-command --document-name extra\n"
-        "          [[ \"${GITHUB_REF}\" == refs/heads/main ]]",
+        "          set -euo pipefail\n          validation_failed() {",
+        "          set -euo pipefail\n"
+        "          aws ssm send-command --document-name extra\n"
+        "          validation_failed() {",
     )
 
     assert_failure(
@@ -394,10 +395,9 @@ def test_activation_non_allowlisted_or_dynamic_aws_fails_closed(
 ):
     replace_once(
         contract_root, ACTIVATION_WORKFLOW,
-        "          set -euo pipefail\n"
-        "          [[ \"${GITHUB_REF}\" == refs/heads/main ]]",
+        "          set -euo pipefail\n          validation_failed() {",
         f"          set -euo pipefail\n          {command}\n"
-        "          [[ \"${GITHUB_REF}\" == refs/heads/main ]]",
+        "          validation_failed() {",
     )
 
     assert_failure(
