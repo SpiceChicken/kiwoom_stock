@@ -92,6 +92,8 @@ def test_iam_boundary_contains_no_ec2_ssm_or_broker_permissions():
     actions: set[str] = set()
     for policy in policies:
         for statement in policy["Statement"]:
+            if not isinstance(statement, dict):
+                continue
             raw_actions = statement["Action"]
             values = (
                 raw_actions
@@ -106,6 +108,28 @@ def test_iam_boundary_contains_no_ec2_ssm_or_broker_permissions():
     assert "lambda:InvokeFunction" in actions
     assert "dynamodb:PutItem" in actions
     assert "cloudwatch:PutMetricData" in actions
+
+
+def test_secret_access_is_conditional_on_slack_mode():
+    template = _template()
+    assert template["Conditions"]["SlackEnabled"] == [
+        "AlertMode", "slack",
+    ]
+    statements = template["Resources"]["DetectorRole"]["Properties"][
+        "Policies"
+    ][0]["PolicyDocument"]["Statement"]
+    conditional = [
+        statement for statement in statements if isinstance(statement, list)
+    ]
+    assert conditional == [[
+        "SlackEnabled",
+        {
+            "Effect": "Allow",
+            "Action": ["secretsmanager:GetSecretValue"],
+            "Resource": "AlertSecretArn",
+        },
+        "AWS::NoValue",
+    ]]
 
 
 def test_template_has_no_runtime_recovery_or_order_operation():
