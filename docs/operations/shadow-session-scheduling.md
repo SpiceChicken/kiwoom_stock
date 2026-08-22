@@ -106,12 +106,17 @@ rollout:
 - `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST`
 - `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID`
 
-The source SHA must be the current `main` commit, the image digest must carry
-the same source revision, and the build run ID must be the successful
+The source SHA must be an immutable released commit on `main` and an exact
+ancestor of the current control-plane `main` SHA. The image digest must carry
+that source revision, and the build run ID must be the successful
 `cd-production-check.yml` candidate run for that tuple. The worker, validator,
 SSM document, and `compose.shadow.yaml` hashes are calculated from that exact
 source by the workflow; the host rollout binding must already contain the same
-worker/document artifact set.
+worker/document artifact set. A runner-only control-plane change may advance
+`main` without replacing the runtime tuple only when the runtime image,
+Compose, worker, validator, and SSM document inputs are unchanged and the
+workflow ancestry check remains exact. Any runtime payload change requires a
+new production check, image digest, rollout, and tuple update.
 
 Keep the tuple unchanged from the 08:50 start through the 15:35 stop. Update it
 only after the previous session has been stopped and a new immutable rollout
@@ -147,8 +152,70 @@ For the next open session, accept the schedule only when:
 - cycle spacing is at least 60 seconds and `db_reopens = cycles - 1`;
 - 15:35 stop produces valid terminal cleanup evidence;
 - when status notification is enabled, activation Slack status is `DELIVERED`;
-- every runtime side-effect flag remains `false`.
+- broker order, account read, OAuth revoke, runtime notification, report, and
+  S3 side-effect flags remain `false`; the isolated paper database identity is
+  present.
 
 `DELIVERED` is workflow evidence, not an assumption that the old application
 Slack path or live trading has been restored. A missing or failed notification is
 a shadow acceptance failure and remains visible in the evidence.
+
+### Same-run artifact audit
+
+`deploy/audit_shadow_schedule_bundle.py` is the deterministic post-run gate.
+It accepts only a completed successful scheduled run and one non-expired
+artifact whose API digest, byte size, `workflow_run.id`, and
+`workflow_run.head_sha` all match. Inside that single ZIP it requires the
+run-ID-named schedule observation, notification receipt v2, accepted runtime
+evidence, and diagnostic. A successful `continuous` audit requires one safe
+cycle, six market-only HTTP attempts, a paper database identity, and no unsafe
+side effects. A successful `stop` audit additionally requires the exact
+`STOPPED` terminal plus the telemetry manifest and gzip export; every telemetry
+row, row hash, session hash, compressed hash, source/image identity, and cycle
+count is revalidated.
+
+Use a newly created private temporary directory and project the GitHub API
+responses to the exact schemas below. Fill the seven uppercase values from the
+run and the registered immutable tuple; do not copy values from an unrelated
+historical run.
+
+```bash
+audit_dir="$(mktemp -d /tmp/kiwoom-shadow-schedule-audit.XXXXXX)"
+chmod 700 "${audit_dir}"
+REPO=SpiceChicken/kiwoom_stock
+RUN_ID=123456789
+CONTROL_PLANE_SHA=0000000000000000000000000000000000000000
+SOURCE_SHA=0000000000000000000000000000000000000000
+IMAGE_DIGEST=ghcr.io/spicechicken/kiwoom_stock@sha256:0000000000000000000000000000000000000000000000000000000000000000
+ACTIVATION_ID=shadow-session-YYYYMMDD
+CRON='50 23 * * 0-4'
+DESIRED_STATE=continuous
+ARTIFACT_NAME="shadow-worker-${SOURCE_SHA}-${ACTIVATION_ID}"
+
+gh api "repos/${REPO}/actions/runs/${RUN_ID}" \
+  --jq '{id,event,status,conclusion,head_sha,head_branch,path,created_at,run_started_at}' \
+  >"${audit_dir}/run.json"
+ARTIFACT_ID="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+  --jq ".artifacts | map(select(.name == \"${ARTIFACT_NAME}\")) | if length == 1 then .[0].id else error(\"artifact not unique\") end")"
+gh api "repos/${REPO}/actions/artifacts/${ARTIFACT_ID}" \
+  --jq '{id,name,size_in_bytes,expired,digest,workflow_run:{id:.workflow_run.id,head_sha:.workflow_run.head_sha}}' \
+  >"${audit_dir}/artifact.json"
+gh api -H 'Accept: application/vnd.github+json' \
+  "repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+  >"${audit_dir}/artifact.zip"
+
+./.venv/bin/python deploy/audit_shadow_schedule_bundle.py \
+  --run-json "${audit_dir}/run.json" \
+  --artifact-json "${audit_dir}/artifact.json" \
+  --artifact-zip "${audit_dir}/artifact.zip" \
+  --run-id "${RUN_ID}" --cron "${CRON}" \
+  --desired-state "${DESIRED_STATE}" \
+  --control-plane-sha "${CONTROL_PLANE_SHA}" \
+  --source-sha "${SOURCE_SHA}" --image-digest "${IMAGE_DIGEST}" \
+  --activation-id "${ACTIVATION_ID}"
+```
+
+For stop, use cron `35 6 * * 1-5` and `DESIRED_STATE=stop`. Only the bounded
+PASS summary from this command closes the same-run artifact gate. The start and
+stop are still two different GitHub run IDs and must each pass independently
+with the same source/image/activation tuple.

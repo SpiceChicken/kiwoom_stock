@@ -334,6 +334,20 @@ def test_status_artifacts_reject_duplicate_keys_and_non_json_constants(
             desired_state="continuous",
         )
 
+    evidence.write_text(
+        success.replace('"http_attempts":6', '"http_attempts":1e999'),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackStatusError, match="status_artifact_invalid"):
+        build_message(
+            evidence_path=evidence,
+            diagnostic_path=diagnostic,
+            source_sha=SOURCE_SHA,
+            image_digest=IMAGE,
+            activation_id=ACTIVATION_ID,
+            desired_state="continuous",
+        )
+
     evidence.unlink()
     failure = json.dumps(_diagnostic(), separators=(",", ":"))
     diagnostic.write_text(
