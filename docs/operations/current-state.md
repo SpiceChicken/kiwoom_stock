@@ -79,6 +79,27 @@ password/kbd-interactive/root login을 막고 public-key login만 허용한다. 
 
 ## 자동화 target 전환 상태
 
+### C* 전환 구현 상태
+
+2026-08-22 KST 기준 C* 단일 SSOT 전환의 코드·계약 산출물은 repository에
+구현되어 있다. 순수 occurrence identity/session lease/state contract, root-owned
+durable host fence, 별도 C* activation/evidence SSM documents, submitter/observer
+adapter, deterministic Lambda ZIP builder, 그리고 disabled-by-default
+EventBridge/DynamoDB/S3/IAM/DLQ CloudFormation 예시가 포함된다.
+
+이 변경은 AWS에 적용되거나 스케줄을 활성화한 상태가 아니다. 현재 실제 owner는
+아래 표의 기존 GitHub Actions 경계이며, C* 적용 전까지 기존 activation document와
+workflow bytes는 보존한다. C*로 전환할 때는 C* ADR 문서의 break-before-make
+순서와 validator evidence를 별도로 통과해야 한다.
+
+| 항목 | 현재 상태 |
+|---|---|
+| C* stack / EventBridge schedules | 미적용, activation/observer/reconciliation 모두 disabled 설계 |
+| C* host fence | 코드·결정론 테스트 구현, EC2 설치/arm 미수행 |
+| C* SSM documents | 신규 파일·정적 checker 구현, AWS 등록 미수행 |
+| C* submitter/observer | 코드·mock/contract 검증 완료, AWS alias/실환경 미검증 |
+| 실제 schedule owner | 기존 GitHub Actions (cd-shadow-worker-activation.yml) |
+
 2026-08-15 KST에 GitHub production-check/shadow 자동화의 AWS target을 후보
 호스트로 전환했다. 기존 호스트는 종료했으며 새 운영 호스트만 유지한다.
 

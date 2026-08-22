@@ -1,14 +1,6 @@
 name: Shadow worker activation
 
 on:
-  schedule:
-    # KST 08:50 and 15:35 on weekdays. The worker itself enforces the
-    # absolute 15:30 KST session close; the latter job removes the stopped
-    # container and records terminal evidence.
-    # 23:50 UTC is 08:50 KST on the following calendar day; Sunday-Thursday
-    # UTC therefore maps to Monday-Friday KST.
-    - cron: "50 23 * * 0-4"
-    - cron: "35 6 * * 1-5"
   workflow_dispatch:
     inputs:
       desired_state:
@@ -72,7 +64,7 @@ env:
 jobs:
   activate:
     name: protected bounded shadow action
-    if: github.ref == 'refs/heads/main'
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 22
     environment: production-shadow
