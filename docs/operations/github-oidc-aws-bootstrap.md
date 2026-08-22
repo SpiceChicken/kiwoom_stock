@@ -32,10 +32,10 @@
   `AmazonSSMReadOnlyAccess`, `AmazonS3FullAccess`가 연결돼 있지 않다. 아래 전환
   절차는 broad policy가 남아 있는 다른 role 또는 재구축 시 적용하는 일반 절차다.
 
-현재 EC2 사람용 운영 접속은 SSH로 분리돼 있다. 대상은
-`i-0e42e09d6c087ba29`의 `ubuntu@54.116.97.199`이며, repository 밖 private key와
-관리 PC `/32` TCP 22 규칙을 사용한다. [`SSH 접근 가이드`](aws-local-access.md)를
-따른다. SSM Agent/SSM document는 GitHub production-check·shadow 자동화의
+현재 EC2 사람용 운영 접속은 SSH로 분리돼 있다. 대상은 서울 리전의 단일
+운영 EC2이며 exact instance ID·주소는 repository 밖 AWS/private operator
+inventory에서 확인한다. repository 밖 private key와 관리 PC `/32` TCP 22
+규칙을 사용한다. [`SSH 접근 가이드`](aws-local-access.md)를 따른다. SSM Agent/SSM document는 GitHub production-check·shadow 자동화의
 backend로 유지되므로, SSH 전환은 CI의 SSM 권한을 제거하거나 host SSM Agent를
 끄는 작업이 아니다.
 

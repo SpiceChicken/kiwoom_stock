@@ -2,8 +2,10 @@
 
 ## EC2 SSH recovery and disk-full handling
 
-The current host is `i-0e42e09d6c087ba29` at `54.116.97.199`. Human shell access
-uses the repository helper and the repository-external recovery key:
+The current host is the single EC2 target in `ap-northeast-2`. Its exact instance
+ID and address are intentionally omitted from this public repository; read them
+from AWS/private operator inventory. Human shell access uses the repository helper
+and the repository-external recovery key:
 
 ```bash
 ./tools/ssh-direct-shell.sh

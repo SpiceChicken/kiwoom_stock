@@ -1,8 +1,10 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-22 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-08-23 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
-호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다.
+호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다. 이 문서는 공개
+저장소에 있으므로 live host의 주소·네트워크·리소스 식별자는 기록하지 않는다.
+정확한 값은 AWS/private operator inventory에서 read-back한다.
 
 ## 운영 범위
 
@@ -14,52 +16,35 @@
 - GitHub Actions의 보호된 production-check, shadow rollout, shadow activation
   자동화는 기존 SSM Command document 경계를 유지한다. 이것은 사람의 SSH
   접속을 SSM으로 되돌린다는 뜻이 아니다.
-- Slack은 보호된 shadow 상태 알림 경로에만 사용한다. 실제 전송 성공은 각
-  workflow의 `DELIVERED` evidence가 있을 때만 인정하며, 애플리케이션의
-  runtime Slack 또는 live trading 복구를 의미하지 않는다.
+- Slack은 보호된 shadow 상태 알림의 선택적 경로로만 사용한다. 현재 C*는
+  `metrics-only`이며 webhook secret을 등록하지 않았다. 향후 활성화하더라도
+  실제 전송 성공은 redacted `DELIVERED` evidence가 있을 때만 인정하며,
+  애플리케이션 runtime Slack 또는 live trading 복구를 의미하지 않는다.
 
 ## 종료된 기존 live 호스트
 
-아래 호스트는 clean-rebuild 전의 기존 live 호스트다. 새 호스트 검증과 단일
-호스트 전환이 끝난 뒤 2026-08-15 KST에 종료했다. 인스턴스만 종료했으며 관련
-네트워크·EIP 리소스는 별도 철거 요청이 없어 보존한다.
-
-| 항목 | 현재 값/판정 |
-|---|---|
-| Instance | `i-02cb0a404794bd43a` (terminated) |
-| Region | `ap-northeast-2` (Seoul) |
-| Public address | `54.116.201.54` |
-| Private address | `10.77.0.155` |
-| Instance type | `t3.micro` |
-| Root disk | 8 GiB gp3, 크기 증설 없음 |
-| SSH user | `ubuntu` |
-| SSH key | repository 밖 `/home/pc/.ssh/kiwoom-recovery`, mode `0600` |
-| SSH helper | 새 단일 운영 호스트로 전환됨 |
-| Future clean-rebuild key pair | `kiwoom-ec2-ssh-20260815` (current recovery public key imported; existing RSA pair untouched) |
-| Human ingress | 현재 PC의 관리용 `/32`에 한정된 TCP 22; `0.0.0.0/0` 금지 |
-| SSM Agent | GitHub 자동화의 host control plane 때문에 active 유지; 사람용 shell 경로 아님 |
-| Current containers | 없음 |
+clean-rebuild 전의 기존 호스트는 2026-08-15 KST에 종료했고, 현재 운영 대상이
+아니다. 과거 인스턴스·주소·네트워크 리소스 식별자는 공개 기준 문서에서 제거했다.
+철거 여부와 보존 리소스는 AWS/private operator inventory에서만 확인한다.
 
 ## 현재 단일 운영 호스트
 
-기존 live host를 대체하기 위해 생성한 clean-rebuild 호스트다. 호스트 자체의
+기존 live host를 대체한 단일 clean-rebuild 호스트다. 호스트 자체의
 cloud-init/SSH/Docker/SSM 검증, 설정 전용 production-check와 shadow artifact
 rollout/read-back을 완료했으며, shadow worker와 실제 credential은 시작하거나
 사용하지 않았다.
 
 | 항목 | 현재 값/판정 |
 |---|---|
-| Instance | `i-0e42e09d6c087ba29` |
-| Public address | `54.116.97.199` |
-| Private address | `10.77.0.79` |
-| VPC / Subnet | `vpc-0221f0246f29fc706` / `subnet-06173179f6c944b97` |
-| ENI / EIP | `eni-0e3e69b6b32687de6` / `eipalloc-0a002267abc623132` |
-| Security group | `sg-0f095d96036658c7f` |
-| Root volume | `vol-046bee674877fd983`, 8 GiB gp3, encrypted |
-| Key pair | `kiwoom-ec2-ssh-20260815` |
-| State file | `/home/pc/kiwoom-rebuild-state-20260815-run1.txt`, mode `0600` |
+| Instance | 단일 EC2 운영 대상 (정확한 ID는 AWS/private inventory) |
+| Region | `ap-northeast-2` (Seoul) |
+| Public/private address | 공개 문서에 기록하지 않음; AWS read-back으로 확인 |
+| VPC / Subnet / ENI / EIP / Security group | 공개 문서에 기록하지 않음; exact network inventory로 확인 |
+| Root volume | 8 GiB gp3, encrypted; exact volume ID는 private inventory |
+| Key pair | repository 밖의 승인된 키; 이름과 경로는 공개 문서에 기록하지 않음 |
+| State file | repository 밖, mode `0600`; 경로는 공개 문서에 기록하지 않음 |
 | Host validation | cloud-init complete, `sshd -t` valid, Docker active, snap `amazon-ssm-agent` active; bounded shadow session completed with terminal evidence |
-| Kiwoom REST API allowlist | `54.116.97.199` 등록 완료 (사용자 확인) |
+| Kiwoom REST API allowlist | 고정 운영 egress 주소가 등록됨; exact 주소는 private inventory |
 
 2026-08-19 KST 첫 bounded shadow session 후 직접 SSH read-back 결과는 다음과 같다.
 컨테이너는 worker deadline에 exit code 0으로 종료되었고,
@@ -106,17 +91,15 @@ AWS cutover read-back 기준:
 | Stack | `kiwoom-shadow-cstar` / `UPDATE_COMPLETE` |
 | Schedule group | `kiwoom-shadow-cstar` |
 | Generation | `cstar-g000001` |
-| DynamoDB table | `kiwoom-shadow-cstar-CStarTable-1CEKQXHHP1V0K` |
-| Evidence bucket | `kiwoom-shadow-cstar-evidencebucket-zdiarxubp4wk` |
-| Package bucket | `kiwoom-shadow-cstar-packages-380648615401-apne2` |
-| Host authority | `eventbridge-scheduler`, armed `2026-08-22T14:28:34Z` |
+| DynamoDB/S3 resources | active resources are stack-managed; exact names are private inventory |
+| Host authority | `eventbridge-scheduler`, armed for generation `cstar-g000001` |
 
 2026-08-15 KST에 GitHub production-check/shadow 자동화의 AWS target을 후보
 호스트로 전환했다. 기존 호스트는 종료했으며 새 운영 호스트만 유지한다.
 
 | 항목 | 전환 결과 |
 |---|---|
-| Automation target | `i-0e42e09d6c087ba29` / `54.116.97.199` |
+| Automation target | 단일 EC2 운영 대상; exact ID/address는 AWS/private inventory |
 | Production-check document | `KiwoomStock-ProductionCheck`, default/latest `3` |
 | Shadow activation document | `KiwoomStock-ShadowWorker`, default/latest `5` |
 | Shadow rollout document | `KiwoomStock-ShadowWorkerRollout`, default/latest `6` |
@@ -204,8 +187,8 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
   cloud-init hardening과 SG read-back을 요구하는 재생성 계약으로 갱신됐다.
-  `kiwoom-ec2-ssh-20260815` key pair와 현재 preflight 관리 IP
-  `58.127.214.178/32`를 read-back했다. 첫 실행의 CLI 옵션 결함과 IAM 조건
+  승인된 key pair와 현재 preflight 관리 `/32`는 AWS read-back으로 확인했으며,
+  exact 값은 공개 문서에 기록하지 않는다. 첫 실행의 CLI 옵션 결함과 IAM 조건
   revision을 수정한 뒤 resume launch와 후보 호스트 read-back을 완료했으며,
   기존 live host에는 적용하지 않았다;
 - repository의 `local-operator-policy.json.example`에서는 사람용 SSM session
@@ -215,8 +198,8 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   적용했다. `aws-admin` root 세션에서 role과 `KiwoomLocalProvisioner`를
   생성하고, 기존 `KiwoomLocalAssumeOperatorRole`에 provisioner AssumeRole을
   추가했다. `SignInLocalDevelopmentAccess`는 `aws login`용 exact read-back 정책으로
-  유지됐으며, 최종 role ARN은
-  `arn:aws:iam::380648615401:role/kiwoom-local-provisioner`다. 절차는
+  유지됐으며, 최종 role은 `kiwoom-local-provisioner`다. account/ARN은
+  공개 문서에 기록하지 않는다. 절차는
   [provisioner bootstrap 가이드](local-provisioner-bootstrap.md)에 기록했다;
 - 새 실제 Kiwoom 인증/시세 검증은 별도 명시적 read-only window 없이는 수행하지
   않는다. 과거 read-only evidence가 live worker·계좌·주문 capability를 승인하는

@@ -10,10 +10,10 @@ EventBridge Scheduler의 `cstar-g000001` pair다.
 
 ## Context
 
-현재 Shadow session은 GitHub Actions weekday schedule이 exact release tuple을 검증하고
-AWS SSM Run Command로 단일 EC2 worker를 시작·중지한다. 이 경계는 immutable provenance,
-GitHub OIDC, host lock, bounded runtime evidence, Slack receipt와 post-completion audit를
-이미 제공한다.
+Cutover 전 Shadow session은 GitHub Actions weekday schedule이 exact release tuple을
+검증하고 AWS SSM Run Command로 단일 EC2 worker를 시작·중지했다. 이 incumbent 경계는
+immutable provenance, GitHub OIDC, host lock, bounded runtime evidence와
+post-completion audit를 제공했지만 routine market clock으로는 유지하지 않는다.
 
 반면 2026-08-17~21 예정 schedule 10건은 성공 0건이었고 GitHub schedule 생성·queue
 지연과 protected job 대기, SSM/runtime failure가 함께 관찰됐다. GitHub schedule을
@@ -115,10 +115,10 @@ document에는 권한이 없다.
 - accepted runtime evidence, invocation diagnostic, telemetry, schedule observation, notification
   receipt를 동일 occurrence identity로 묶는다.
 - evidence는 content hash를 포함해 off-host S3에 저장한다.
-- 권장 retention은 S3 Object Lock Governance 400일이며 observer role에는 overwrite/delete/
-  bypass 권한을 주지 않는다. 최종 채택은 별도 confirm 대상이다.
-- Slack은 기존 fixed redacted message 계약을 재사용하되 AWS Secrets Manager의 pre-created
-  webhook ARN만 읽는다. template은 secret 값을 만들거나 출력하지 않는다.
+- evidence는 S3 Object Lock Governance 400일 보존 계약을 사용하며 observer role에는
+  overwrite/delete/bypass 권한을 주지 않는다.
+- Slack은 기존 fixed redacted message 계약을 재사용할 수 있지만 현재 cutover의
+  `metrics-only` 경계에서는 webhook secret을 등록하지 않는다.
 - Slack failure는 evidence closure failure지만 host cleanup/recovery command를 자동 실행하지
   않는다.
 
@@ -199,13 +199,13 @@ owners는 availability가 아니라 duplicate/stale command source이므로 금�
 rollback은 EventBridge를 먼저 disable하고 retry, DLQ, in-flight SSM과 host occurrence를
 reconcile한 뒤 마지막에 GitHub schedule을 복구한다.
 
-## Open decisions
+## Applied parameters
 
-구현 전 별도 confirm이 필요한 값은 다음과 같다.
+구현 전 결정이 필요했던 값은 cutover read-back 기준 다음과 같이 확정됐다.
 
 - late start hard cutoff: `08:58:59 KST`
 - evidence retention: S3 Object Lock Governance 400일
-- Slack: 이번 cutover는 `metrics-only`; webhook secret은 등록하지 않음
+- Slack: `metrics-only`; webhook secret은 등록하지 않음
 - observer: exact `KiwoomStock-ShadowEvidenceExport` document만 사용
 
 단계별 write set, 상태 전이, 검증과 rollback은

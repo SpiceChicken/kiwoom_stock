@@ -1,57 +1,44 @@
 # Protected shadow status notifications
 
-Shadow status notifications run in the protected GitHub Actions control plane,
-not inside the Kiwoom application container. The runtime therefore keeps its
-existing `slack=false` side-effect contract and cannot import or call the legacy
+Shadow status notifications run outside the Kiwoom application container through
+the protected C* observer boundary. The runtime therefore keeps its existing
+`slack=false` side-effect contract and cannot import or call the legacy
 buy/sell/report notifier.
 
-The existing Slack operating information is reused only through the protected
-`production-shadow` notification path: prefer
+The existing Slack operating information is reusable only through the protected
+observer notification path: prefer
 `KIWOOM_SHADOW_SLACK_WEBHOOK_URL`, with the documented `CONFIG_JSON.webhook_url`
 compatibility fallback until that migration is closed. This does not mean that
-all historical application Slack/report delivery is restored. A delivery claim
-requires the workflow's redacted `DELIVERED` evidence. See
+all historical application Slack/report delivery is restored. The active C*
+cutover is `metrics-only` and has no registered webhook secret, so Slack delivery
+is currently disabled. If a later explicitly approved deployment enables it, a
+delivery claim requires redacted `DELIVERED` evidence. See
 [current-state.md](current-state.md) for the current no-live-trading status.
 
 ## Secret boundary
 
-Create one incoming webhook dedicated to a shadow-operations Slack channel.
-Store it as the `production-shadow` environment secret named
-`KIWOOM_SHADOW_SLACK_WEBHOOK_URL`. While that dedicated secret is unset or
-empty, the workflow may use the top-level `webhook_url` in repository secret
-`CONFIG_JSON` as a compatibility fallback.
+If Slack is explicitly approved later, create one incoming webhook dedicated to
+a shadow-operations Slack channel and store it in the pre-created AWS Secrets
+Manager secret permitted to the C* observer. The current `metrics-only` cutover
+does not create or read this secret. The historical GitHub environment secret
+path is not an active delivery path.
 
 Do not use a bot token, a channel token, a Kiwoom credential, or a webhook that
 can post to a trading/execution channel. Do not paste the
 webhook into chat, a command argument, a workflow input, or a repository file.
 
-An operator can set the secret through the GitHub environment UI. With an
-authenticated `gh` session, the following command prompts on standard input and
-does not require putting the value in shell history:
-
-```bash
-gh secret set KIWOOM_SHADOW_SLACK_WEBHOOK_URL \
-  --env production-shadow \
-  --repo SpiceChicken/kiwoom_stock
-```
-
-Confirm only the secret name, never its value:
-
-```bash
-gh api repos/SpiceChicken/kiwoom_stock/environments/production-shadow/secrets \
-  --jq '.secrets[].name'
-```
+Provisioning and verifying that secret is a separate AWS change. Never record
+the value, ARN, or a delivery response containing the webhook in Git, chat,
+command arguments, workflow inputs, or this repository.
 
 ## Delivery contract
 
-The activation workflow defaults `status_notification` to `slack`. It validates
-the dedicated secret, or the compatibility fallback only when dedicated is
-empty, before assuming the AWS activation role or sending an SSM command.
-Non-empty invalid dedicated values fail closed and never fall back.
-`CONFIG_JSON` is scoped to the two Slack steps and is never sent to AWS, SSM,
+The C* IaC parameter `AlertMode` defaults to `metrics-only`. An explicitly
+approved `slack` deployment must validate the observer's dedicated secret before
+delivery. Invalid or missing secret metadata fails closed. Legacy `CONFIG_JSON`
+compatibility values are not an active C* input and are never sent to AWS, SSM,
 or runtime.
-`disabled` must be selected explicitly when a no-notification recovery action
-is required.
+`metrics-only` remains the required setting for no-notification recovery.
 
 The sender accepts only `https://hooks.slack.com/services/...`, rejects C0/DEL
 control characters, user information, query strings, fragments, alternate
@@ -89,25 +76,16 @@ Evidence and diagnostic JSON are bounded and parsed strictly. Duplicate keys,
 non-standard numeric constants such as `NaN`, and booleans used in integer
 fields are rejected instead of being interpreted as a valid status artifact.
 
-For a scheduled run, a valid strict `shadow-schedule-observation.json` adds only
-`schedule_delay=<seconds>s` to the end of the fixed message. The notifier
-revalidates the artifact against the current expected GitHub run ID and event
-cron; either mismatch is `invalid`. Manual dispatch does not add a schedule
-suffix. A missing or invalid scheduled observation does not invent `0s` or
-expose the API response; it leaves the message unchanged and records
-`schedule_observation=invalid` in the notification receipt. Manual receipts
-record `schedule_observation=n-a`.
+For a current C* occurrence, the observer binds any notification receipt to the
+cloud occurrence/session identity and the immutable release tuple. Historical
+GitHub run IDs and cron observations are not accepted as current evidence.
 
 Every attempted delivery writes `shadow-status-notification.json` with
-`DELIVERED` or `FAILED`, a safe category, and the bounded schedule-observation
-state. This eight-key receipt is exact schema version 2. Schema version 1 is the
-legacy seven-key shape without `schedule_observation`; producers do not add the
-new key while claiming v1, and strict consumers must select the key set by
-`schema_version`. Requested Slack delivery failure fails the workflow, but it
-runs only after AWS credentials have been cleared and does not prevent the
-host-side runtime cleanup path from executing.
+`DELIVERED` or `FAILED`, a safe category, and the bounded C* occurrence/session
+identity. Legacy schema versions remain read-only compatibility material.
+Notification failure marks evidence closure as failed/alerted but does not
+prevent the host-side runtime cleanup path from executing.
 
-Once `KIWOOM_SHADOW_SLACK_WEBHOOK_URL` is provisioned and verified, remove the
-`CONFIG_JSON` fallback and its two-step wiring as the forward migration. To
-roll back safely, restore only that compatibility wiring; no runtime or AWS
-secret path is involved.
+Do not enable Slack by changing this document. Use a separately reviewed C* IaC
+parameter, pre-created secret, least-privilege observer permission, and
+read-back. The current no-notification state remains `metrics-only`.

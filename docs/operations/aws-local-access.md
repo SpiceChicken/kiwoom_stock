@@ -37,7 +37,9 @@ GitHub OIDC roles
 
 ### 현재 사람용 접속 경계
 
-- 대상: `i-0e42e09d6c087ba29`, `ap-northeast-2`, `ubuntu@54.116.97.199`
+- 대상: 서울 리전의 단일 운영 EC2; exact instance ID와 주소는
+  [현재 운영 기준선](current-state.md) 대신 AWS/private operator inventory에서
+  read-back한다.
 - 접속 도구: [`tools/ssh-direct-shell.sh`](../../tools/ssh-direct-shell.sh)
 - 개인키: repository 밖 `/home/pc/.ssh/kiwoom-recovery`, mode `0600`
 - 네트워크: 현재 PC의 관리용 TCP 22 `/32`만 허용하며 `0.0.0.0/0`은 허용하지
