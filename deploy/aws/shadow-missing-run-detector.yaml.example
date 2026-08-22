@@ -20,8 +20,9 @@ Parameters:
     Description: Optional immutable S3 object version for the Lambda ZIP.
   AlertSecretArn:
     Type: String
-    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
-    Description: Pre-created Slack webhook secret; the template never creates it.
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+    Description: Pre-created Slack webhook secret when AlertMode is slack; the template never creates it.
   AlarmTopicArn:
     Type: String
     Default: ''
@@ -41,6 +42,13 @@ Conditions:
   SlackEnabled: !Equals [!Ref AlertMode, slack]
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, '']]
   HasS3Version: !Not [!Equals [!Ref LambdaCodeS3Version, '']]
+
+Rules:
+  SlackSecretRequired:
+    RuleCondition: !Equals [!Ref AlertMode, slack]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AlertSecretArn, '']]
+        AssertDescription: AlertSecretArn is required when AlertMode is slack.
 
 Resources:
   DetectorTable:
