@@ -41,6 +41,16 @@ def test_detector_template_is_disabled_and_metrics_only_by_default():
     parameters = template["Parameters"]
     assert parameters["EnableSchedules"]["Default"] == "false"
     assert parameters["AlertMode"]["Default"] == "metrics-only"
+    assert parameters["AlertSecretArn"]["Default"] == ""
+    assert template["Rules"]["SlackSecretRequired"]["RuleCondition"] == [
+        "AlertMode", "slack",
+    ]
+    assert template["Rules"]["SlackSecretRequired"]["Assertions"] == [{
+        "Assert": [["AlertSecretArn", ""]],
+        "AssertDescription": (
+            "AlertSecretArn is required when AlertMode is slack."
+        ),
+    }]
     assert template["Resources"]["DetectorFunction"]["Properties"][
         "ReservedConcurrentExecutions"
     ] == 1
