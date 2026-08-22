@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Disabled-by-default, metrics-only boundary for the Shadow missing-run
+  detector. This example never creates resources until explicitly deployed.
+
+Parameters:
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing the reviewed detector Lambda ZIP.
+  LambdaCodeKey:
+    Type: String
+    Description: S3 key for the reviewed detector Lambda ZIP.
+  LambdaCodeSha256:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9+/]{43}=$'
+    Description: Base64-encoded SHA256 accepted by AWS::Lambda::Version.
+  LambdaCodeS3Version:
+    Type: String
+    Default: ''
+    Description: Optional immutable S3 object version for the Lambda ZIP.
+  AlertSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+    Description: Pre-created Slack webhook secret; the template never creates it.
+  AlarmTopicArn:
+    Type: String
+    Default: ''
+    Description: Optional pre-created SNS topic for detector alarms.
+  AlertMode:
+    Type: String
+    Default: metrics-only
+    AllowedValues: [metrics-only, slack]
+  EnableSchedules:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Keep false until one market-day dry-run has been reviewed.
+
+Conditions:
+  SchedulesEnabled: !Equals [!Ref EnableSchedules, 'true']
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, '']]
+  HasS3Version: !Not [!Equals [!Ref LambdaCodeS3Version, '']]
+
+Resources:
+  DetectorTable:
+    Type: AWS::DynamoDB::Table
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  DetectorDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  DetectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: 35
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-shadow-missing-run
+
+  DetectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: detector-exact-boundary
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub '${DetectorLogGroup.Arn}:*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt DetectorTable.Arn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref AlertSecretArn
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Kiwoom/Shadow
+
+  DetectorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DetectorLogGroup
+    Properties:
+      Runtime: python3.13
+      Handler: shadow_missing_run_lambda.handler
+      Role: !GetAtt DetectorRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+        S3ObjectVersion: !If [HasS3Version, !Ref LambdaCodeS3Version, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          SHADOW_DETECTOR_TABLE_NAME: !Ref DetectorTable
+          SHADOW_DETECTOR_ALERT_MODE: !Ref AlertMode
+          SHADOW_DETECTOR_SLACK_SECRET_ARN: !Ref AlertSecretArn
+
+  DetectorVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      CodeSha256: !Ref LambdaCodeSha256
+
+  DetectorAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      FunctionVersion: !GetAtt DetectorVersion.Version
+      Name: live
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-detector-and-dlq
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Ref DetectorAlias
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt DetectorDeadLetterQueue.Arn
+
+  StartPresenceSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(5 9 ? * MON-FRI *)
+      ScheduleExpressionTimezone: Asia/Seoul
+      State: !If [SchedulesEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !Ref DetectorAlias
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"schedule":"start","phase":"presence"}'
+        DeadLetterConfig:
+          Arn: !GetAtt DetectorDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 300
+          MaximumRetryAttempts: 0
+
+  StartClosureSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(35 9 ? * MON-FRI *)
+      ScheduleExpressionTimezone: Asia/Seoul
+      State: !If [SchedulesEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !Ref DetectorAlias
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"schedule":"start","phase":"closure"}'
+        DeadLetterConfig:
+          Arn: !GetAtt DetectorDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 300
+          MaximumRetryAttempts: 0
+
+  StopPresenceSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(50 15 ? * MON-FRI *)
+      ScheduleExpressionTimezone: Asia/Seoul
+      State: !If [SchedulesEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !Ref DetectorAlias
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"schedule":"stop","phase":"presence"}'
+        DeadLetterConfig:
+          Arn: !GetAtt DetectorDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 300
+          MaximumRetryAttempts: 0
+
+  StopClosureSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(20 16 ? * MON-FRI *)
+      ScheduleExpressionTimezone: Asia/Seoul
+      State: !If [SchedulesEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !Ref DetectorAlias
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"schedule":"stop","phase":"closure"}'
+        DeadLetterConfig:
+          Arn: !GetAtt DetectorDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 300
+          MaximumRetryAttempts: 0
+
+  DetectorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Shadow missing-run detector Lambda errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DetectorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+
+  DetectorDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Shadow missing-run detector Scheduler DLQ is non-empty.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DetectorDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+
+Outputs:
+  DetectorFunctionArn:
+    Value: !GetAtt DetectorFunction.Arn
+  DetectorTableName:
+    Value: !Ref DetectorTable
+  SchedulesDefaultState:
+    Value: !If [SchedulesEnabled, ENABLED, DISABLED]
