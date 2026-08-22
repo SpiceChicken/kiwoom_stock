@@ -6,6 +6,27 @@ Slack notifications.
 
 ## Schedule
 
+## C* 단일 SSOT 전환 산출물
+
+기존 GitHub owner를 즉시 끄지 않고, 다음 C* 경계를 apply-later로 구현했다.
+
+EventBridge Scheduler -> submitter Lambda -> KiwoomStock-ShadowCStarActivation
+-> EC2 root-owned durable fence -> existing kiwoom-shadow-worker
+-> SSM status observer/reconciler -> exact evidence-export document -> S3/Slack
+
+deploy/shadow_cstar_contract.py가 schedule generation, KST session date,
+occurrence identity, immutable release/session lease와 ledger state transition의
+SSOT다. delivery execution_id/attempt_number는 retry evidence일 뿐 occurrence
+identity에 들어가지 않는다. start는 08:50 KST, 08:58:59 KST cutoff과 480초/2회
+retry를 사용하고 stop은 15:35 KST, 15:50:59 KST cutoff과 900초/2회 retry를
+사용한다. stop은 active release pointer를 재조회하지 않고 start가 만든 daily
+session lease의 release를 사용한다.
+
+현재 C*는 코드·template·정적 테스트만 존재하며 AWS stack 생성, document 등록,
+EC2 fence 설치/arm, GitHub schedule 제거와 cutover는 수행하지 않았다. 이 상태에서
+현재 GitHub schedule은 유일한 실제 owner로 유지한다. 구체적인 구현·롤백·validator
+게이트는 C* 구현 계획과 C* ADR을 따른다.
+
 The activation workflow has two weekday schedules:
 
 - `50 23 * * 0-4` UTC = 08:50 KST on the following day: start

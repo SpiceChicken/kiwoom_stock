@@ -27,7 +27,6 @@ from kiwoom_stock.application.execution import (
 from kiwoom_stock.domain.models import PhysicalContinuityEvidence
 from kiwoom_stock.domain.models import ShadowDecisionTelemetry
 from kiwoom_stock.application.swing_shadow import SwingShadowEvidence
-from deploy.shadow_schedule_observation import CRON_CONTRACT
 
 
 SCRIPT = Path("deploy/ec2/shadow_worker_control.sh")
@@ -498,11 +497,7 @@ def test_worker_rejects_spoofed_inherited_lock_fd(tmp_path):
 def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     triggers = workflow.get("on", workflow.get(True))
-    assert set(triggers) == {"schedule", "workflow_dispatch"}
-    assert triggers["schedule"] == [
-        {"cron": "50 23 * * 0-4"},
-        {"cron": "35 6 * * 1-5"},
-    ]
+    assert set(triggers) == {"workflow_dispatch"}
     assert set(triggers["workflow_dispatch"]["inputs"]) == {
         "source_sha",
         "image_digest",
@@ -523,6 +518,7 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert workflow["permissions"] == {}
     assert workflow["concurrency"]["cancel-in-progress"] is False
     job = workflow["jobs"]["activate"]
+    assert job["if"] == "${{ false }}"
     assert job["environment"] == "production-shadow"
     assert job["permissions"] == {
         "actions": "read",
@@ -692,27 +688,11 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert upload["with"]["retention-days"] == 14
 
 
-def test_schedule_cron_action_contract_is_in_exact_parity():
+def test_github_schedule_owner_is_disabled_after_cstar_cutover():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     triggers = workflow.get("on", workflow.get(True))
-    workflow_crons = {item["cron"] for item in triggers["schedule"]}
-    resolve = next(
-        step for step in workflow["jobs"]["activate"]["steps"]
-        if step.get("name") == "Resolve effective shadow activation tuple"
-    )
-    resolve_pairs = re.findall(
-        r"'([^']+)'\) desired_state=(oneshot|continuous|stop) ;;",
-        resolve["run"],
-    )
-    resolve_contract = dict(resolve_pairs)
-    helper_contract = {
-        cron: str(contract["desired_state"])
-        for cron, contract in CRON_CONTRACT.items()
-    }
-
-    assert len(resolve_pairs) == len(resolve_contract)
-    assert workflow_crons == set(resolve_contract) == set(helper_contract)
-    assert resolve_contract == helper_contract
+    assert "schedule" not in triggers
+    assert workflow["jobs"]["activate"]["if"] == "${{ false }}"
 
 
 def test_activation_poll_treats_cancelling_as_nonterminal_until_success(tmp_path):
