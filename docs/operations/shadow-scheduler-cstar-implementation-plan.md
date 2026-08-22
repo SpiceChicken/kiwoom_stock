@@ -2,11 +2,11 @@
 
 ## Status
 
-Planned / confirm required — 2026-08-22.
+Implemented and cut over — 2026-08-22. First market-day acceptance evidence pending.
 
-이 문서는 구현 순서와 write set을 확정한다. AWS apply, EventBridge enable, GitHub
-schedule 제거, SSM/EC2 실행은 포함하지 않는다. 구현 전 네 가지 운영 선택은 이 문서의
-권장값으로 별도 확인한다.
+이 문서는 구현 순서와 write set 및 실제 cutover read-back을 기록한다. AWS apply,
+EventBridge enable, GitHub schedule 제거, SSM/EC2 실행은 P8에서 완료되었고 첫
+개장일의 end-to-end evidence만 후속 acceptance 항목이다.
 
 ## Root reconciliation decisions
 
@@ -287,7 +287,7 @@ before cutover; it must not remain as an unfenced bypass.
 | P5 | observer/reconciler/evidence | event loss/order, SSM terminal, export, S3/Slack failure | rule/schedules disabled | no recovery wiring |
 | P6 | deterministic package and disabled IaC | ZIP hash, template defaults/IAM/forbidden capabilities | unapplied template | all triggers disabled |
 | P7 | architect/reviewer/verifier bundle | full targeted tests, checker, failure matrix, Docker where safe | phase commits | C3/C4 reachable RED documented |
-| P8 | separately approved AWS apply/validator/cutover | stack/IAM read-back, one-time C4, actual market-day C3/C4 | break-before-make runbook | same-identity closure PASS |
+| P8 | AWS apply/validator/cutover | stack/IAM read-back, package/doc/host tuple, GitHub drain, EventBridge pair read-back | break-before-make runbook | cutover PASS; market-day C3/C4 evidence pending |
 
 Do not mix structure, functionality, AWS apply and cutover in one commit or rollout.
 
@@ -347,4 +347,3 @@ Recommended defaults:
 
 Choosing metrics-only instead of Slack or prohibiting evidence export leaves parity incomplete and
 keeps cutover NO-GO; it does not block P1–P4 implementation.
-
