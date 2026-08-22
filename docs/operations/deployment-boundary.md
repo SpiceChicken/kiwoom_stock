@@ -2,7 +2,8 @@
 
 The current automation target for the first container deployment is:
 
-- EC2 instance `i-0e42e09d6c087ba29` in `ap-northeast-2`;
+- one EC2 instance in `ap-northeast-2`; exact instance identity is maintained in
+  AWS/private operator inventory, not this public document;
 - human administration through restricted SSH (TCP 22 from the current operator
   `/32` only); GitHub automation remains on the exact SSM command plane;
 - one public GHCR image selected by an exact OCI digest;
@@ -29,8 +30,9 @@ The access planes are intentionally separate:
 - SSM Agent therefore remains active on the host. “SSH management” means the
   human path, not that SSM is disabled globally.
 
-The current host, disk-recovery result, SSH hardening and release tuple are recorded
-in [current-state.md](current-state.md).
+The current host's logical status, disk-recovery result, SSH hardening and release
+tuple are recorded in [current-state.md](current-state.md). Exact host/network
+identifiers remain in AWS/private operator inventory.
 
 ## Five separate activation boundaries
 

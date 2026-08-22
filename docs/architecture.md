@@ -68,13 +68,14 @@ SSM Agent나 CI용 SSM 권한을 제거한 것이 아니며, local operator가 C
 
 현재 운영 범위는 shadow-only다. 실제 주문·취소·계좌 조회 capability는 이
 architecture에 포함되지 않고, side-effect-free check와 bounded shadow evidence만
-승인 대상이다. 호스트·release tuple의 실제 값은
-[current-state.md](operations/current-state.md)가 소유한다.
+승인 대상이다. 호스트·release tuple의 운영 상태와 generation은
+[current-state.md](operations/current-state.md)가 소유하며, exact host/network
+식별자는 AWS/private operator inventory에서만 관리한다.
 
-GitHub schedule을 대체할 목표 control plane과 안전한 single-owner cutover 결정은
+C* control plane과 안전한 single-owner cutover 결정은
 [C* Shadow schedule SSOT ADR](operations/shadow-scheduler-cstar-adr.md)에 기록한다.
-해당 ADR은 `Proposed`이며 parity 구현과 C3/C4 검증 전에는 현재 GitHub+SSM schedule
-owner를 변경하지 않는다.
+해당 ADR은 Accepted and applied 상태이며, 현재 schedule owner는 EventBridge
+Scheduler다. GitHub activation workflow는 disabled rollback artifact로만 보존한다.
 
 ## Composition roots
 

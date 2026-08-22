@@ -9,7 +9,8 @@
 
 현재 운영 대상은
 [`현재 운영 기준선`](current-state.md)에 기록된
-`i-0e42e09d6c087ba29`다. 사람용 접속은 `ubuntu@54.116.97.199`에 대한 직접 SSH이며,
+서울 리전의 단일 EC2다. exact instance ID와 주소는 AWS/private operator
+inventory에서 확인한다. 사람용 접속은 `ubuntu`에 대한 직접 SSH이며,
 다음 helper를 사용한다.
 
 ```bash
@@ -336,8 +337,8 @@ Security Group은 EC2가 실행 중이어도 교체할 수 있다. 기존 group�
 2026-07-26 read-only 확인 기준의 이전 host snapshot:
 
 이 표의 instance/ENI/default SG는 현재 live host의 상태가 아니다. 현재 live
-호스트의 SG와 SSH `/32`는 AWS read-back과 [current-state.md](current-state.md)를
-기준으로 확인한다.
+호스트의 SG와 SSH `/32`는 AWS read-back과 [current-state.md](current-state.md)의
+비공개 inventory 원칙을 기준으로 확인한다. exact 값은 공개 문서에 적지 않는다.
 
 | 구분 | Security Group ID | Group name | 규칙 |
 |---|---|---|---|

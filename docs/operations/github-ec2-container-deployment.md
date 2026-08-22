@@ -25,7 +25,7 @@ manual protected promotion workflow
   → trusted executor checkout + fixed tuple/audit preflight
   → Node 24 OIDC outputs로 authoritative run/job/artifact/Compose/image 검증
   → single exact SSM command + credential clear + evidence upload
-  → i-0e42e09d6c087ba29에서 잠금/자원/secret metadata 검사
+  → 단일 EC2 운영 대상에서 잠금/자원/secret metadata 검사
   → network/운영 volume/실제 key 없는 digest image로 일회성 --check-config
   → current/previous full release tuple을 하나의 JSON으로 기록
   → terminal success/failure/cancel 뒤 approval tuple 3개 삭제 및
