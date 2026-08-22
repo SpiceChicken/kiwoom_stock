@@ -309,3 +309,18 @@ presence, closure, duplicate, delayed, failed, and missing-audit states. Its
 fixture tests do not call GitHub, AWS, EC2, SSM, Slack, or recovery actions. It is
 not wired to an EventBridge/Lambda resource yet; the external adapter, dedupe
 store, alert secret, and schedule enablement remain a separate deployment gate.
+
+The read-only adapter boundary is now available in
+`deploy/shadow_missing_run_lambda.py`. Its production handler accepts only the
+two-field scheduler input (`schedule`, `phase`), queries the bounded public Runs
+API projection, records a conditional occurrence/alert claim, and emits bounded
+CloudWatch metrics. Slack delivery is opt-in through `SHADOW_DETECTOR_ALERT_MODE`
+and a pre-created Secrets Manager value. The CLI requires a local fixture and is
+network-free. It contains no dispatch, rerun, SSM, EC2, broker, account, or order
+operation.
+
+`deploy/aws/shadow-missing-run-detector.yaml.example` is an apply-later
+CloudFormation boundary. It defaults all four schedules to `DISABLED` and the
+Lambda to `metrics-only`; it is a template only, not an applied AWS resource.
+The ZIP, secret, alarm topic, and schedule enablement remain separate review
+inputs.
