@@ -1,0 +1,196 @@
+name: Shadow schedule artifact audit
+
+on:
+  workflow_run:
+    workflows: [Shadow worker activation]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: kiwoom-shadow-schedule-audit-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: audit completed scheduled shadow artifact
+    if: >-
+      github.event.workflow_run.event == 'schedule' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout current trusted audit helpers
+        timeout-minutes: 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Audit triggering scheduled run artifact
+        timeout-minutes: 4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          EXPECTED_SOURCE_SHA: ${{ vars.KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA }}
+          EXPECTED_IMAGE_DIGEST: ${{ vars.KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_fail() {
+            echo "shadow schedule audit failed: ${1}" >&2
+            exit 1
+          }
+          [[ "${TRIGGER_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] \
+            || audit_fail event_invalid
+          audit_dir="$(mktemp -d "${RUNNER_TEMP}/shadow-schedule-audit.XXXXXX")" \
+            || audit_fail temporary_directory_invalid
+          cleanup() {
+            rm -rf -- "${audit_dir}"
+          }
+          trap cleanup EXIT
+          chmod 700 "${audit_dir}" || audit_fail temporary_directory_invalid
+
+          jq -c -e '
+            {
+              repository: {full_name: .repository.full_name},
+              workflow_run: {
+                id: .workflow_run.id,
+                run_attempt: .workflow_run.run_attempt,
+                event: .workflow_run.event,
+                status: .workflow_run.status,
+                conclusion: .workflow_run.conclusion,
+                name: .workflow_run.name,
+                path: .workflow_run.path,
+                head_sha: .workflow_run.head_sha,
+                head_branch: .workflow_run.head_branch,
+                head_repository: {
+                  full_name: .workflow_run.head_repository.full_name
+                },
+                created_at: .workflow_run.created_at,
+                run_started_at: .workflow_run.run_started_at
+              }
+            }
+          ' "${GITHUB_EVENT_PATH}" >"${audit_dir}/event.json" 2>/dev/null \
+            || audit_fail event_invalid
+
+          curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/SpiceChicken/kiwoom_stock/actions/runs/${TRIGGER_RUN_ID}" \
+            2>/dev/null \
+            | jq -c -e \
+              '{id,event,status,conclusion,head_sha,head_branch,path,created_at,run_started_at}' \
+              >"${audit_dir}/run.json" 2>/dev/null \
+            || audit_fail run_api_invalid
+
+          curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/SpiceChicken/kiwoom_stock/actions/runs/${TRIGGER_RUN_ID}/artifacts?per_page=100" \
+            2>/dev/null \
+            | jq -c -e \
+              '{total_count,artifacts:[.artifacts[]|{id,name,size_in_bytes,expired,digest,workflow_run:{id:.workflow_run.id,head_sha:.workflow_run.head_sha}}]}' \
+              >"${audit_dir}/artifact-list.json" 2>/dev/null \
+            || audit_fail artifact_list_api_invalid
+
+          python3 deploy/prepare_shadow_schedule_audit.py \
+            --event-json "${audit_dir}/event.json" \
+            --run-json "${audit_dir}/run.json" \
+            --artifact-list-json "${audit_dir}/artifact-list.json" \
+            --expected-source-sha "${EXPECTED_SOURCE_SHA}" \
+            --output "${audit_dir}/selection.json"
+          artifact_id="$(jq -e -r \
+            '.artifact_id | select(type == "number" and . > 0 and floor == .) | tostring' \
+            "${audit_dir}/selection.json" 2>/dev/null)" \
+            || audit_fail artifact_selection_invalid
+          [[ "${artifact_id}" =~ ^[1-9][0-9]{0,19}$ ]] \
+            || audit_fail artifact_selection_invalid
+
+          curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/SpiceChicken/kiwoom_stock/actions/artifacts/${artifact_id}" \
+            2>/dev/null \
+            | jq -c -e \
+              '{id,name,size_in_bytes,expired,digest,workflow_run:{id:.workflow_run.id,head_sha:.workflow_run.head_sha}}' \
+              >"${audit_dir}/artifact.json" 2>/dev/null \
+            || audit_fail artifact_api_invalid
+
+          python3 deploy/prepare_shadow_schedule_audit.py \
+            --event-json "${audit_dir}/event.json" \
+            --run-json "${audit_dir}/run.json" \
+            --artifact-list-json "${audit_dir}/artifact-list.json" \
+            --artifact-json "${audit_dir}/artifact.json" \
+            --expected-source-sha "${EXPECTED_SOURCE_SHA}" \
+            --output "${audit_dir}/verified-selection.json"
+
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' \
+            --max-filesize 8388608 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/SpiceChicken/kiwoom_stock/actions/artifacts/${artifact_id}/zip" \
+            --output "${audit_dir}/artifact.zip" 2>/dev/null \
+            || audit_fail artifact_download_invalid
+          [[ -s "${audit_dir}/artifact.zip" ]] \
+            || audit_fail artifact_download_invalid
+          (( $(wc -c <"${audit_dir}/artifact.zip") <= 8388608 )) \
+            || audit_fail artifact_download_invalid
+
+          python3 deploy/audit_shadow_schedule_bundle.py \
+            --auto-schedule \
+            --run-json "${audit_dir}/run.json" \
+            --artifact-json "${audit_dir}/artifact.json" \
+            --artifact-zip "${audit_dir}/artifact.zip" \
+            --source-sha "${EXPECTED_SOURCE_SHA}" \
+            --image-digest "${EXPECTED_IMAGE_DIGEST}" \
+            >"${audit_dir}/result.json"
+
+          python3 - "${audit_dir}/result.json" "${GITHUB_STEP_SUMMARY}" <<'PY' || audit_fail result_summary_invalid
+          import json
+          import sys
+          from pathlib import Path
+
+          expected_keys = {
+              "schema_version", "status", "run_id", "artifact_id",
+              "control_plane_sha", "source_sha", "image_digest",
+              "activation_id", "desired_state", "runtime_status", "cycles",
+              "http_attempts", "command_id", "schedule_delay_seconds",
+              "notification_delivery_status", "session_date_kst",
+              "telemetry_rows",
+          }
+          try:
+              raw = Path(sys.argv[1]).read_bytes()
+              if not 0 < len(raw) <= 4096:
+                  raise ValueError
+              value = json.loads(raw.decode("utf-8", errors="strict"))
+              if (
+                  type(value) is not dict
+                  or set(value) != expected_keys
+                  or value.get("schema_version") != 1
+                  or value.get("status") != "PASS"
+              ):
+                  raise ValueError
+              rendered = json.dumps(
+                  value, sort_keys=True, separators=(",", ":"), allow_nan=False
+              )
+              if len(rendered.encode("utf-8")) > 4096:
+                  raise ValueError
+              with Path(sys.argv[2]).open("a", encoding="utf-8") as stream:
+                  stream.write("### Shadow schedule artifact audit\n\n")
+                  stream.write("```json\n" + rendered + "\n```\n")
+          except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+              raise SystemExit(1)
+          PY
