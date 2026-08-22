@@ -16,6 +16,7 @@ from deploy.shadow_missing_run_detector import (
 )
 from deploy.shadow_missing_run_lambda import (
     DetectorAdapterError,
+    DynamoClaimStore,
     MemoryClaimStore,
     evaluate,
     main,
@@ -181,6 +182,30 @@ class _Metrics:
 
     def emit(self, record: dict[str, object]) -> None:
         self.records.append(record)
+
+
+class _ConditionalCheckFailedError(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class _DynamoTable:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def put_item(self, **kwargs: object) -> None:
+        del kwargs
+        raise self.error
+
+
+def test_dynamo_claim_treats_boto_client_error_as_duplicate():
+    store = DynamoClaimStore(_DynamoTable(_ConditionalCheckFailedError()))
+    assert store.claim("alert-key", 123) is False
+
+
+def test_dynamo_claim_propagates_unexpected_store_error():
+    store = DynamoClaimStore(_DynamoTable(RuntimeError("store unavailable")))
+    with pytest.raises(DetectorAdapterError, match="dedupe_store_failure"):
+        store.claim("alert-key", 123)
 
 
 def test_process_claims_each_alert_once_and_emits_heartbeat():

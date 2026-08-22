@@ -38,6 +38,7 @@ Parameters:
 
 Conditions:
   SchedulesEnabled: !Equals [!Ref EnableSchedules, 'true']
+  SlackEnabled: !Equals [!Ref AlertMode, slack]
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, '']]
   HasS3Version: !Not [!Equals [!Ref LambdaCodeS3Version, '']]
 
@@ -94,10 +95,13 @@ Resources:
                 Action:
                   - dynamodb:PutItem
                 Resource: !GetAtt DetectorTable.Arn
-              - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !Ref AlertSecretArn
+              - !If
+                - SlackEnabled
+                - Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                  Resource: !Ref AlertSecretArn
+                - !Ref AWS::NoValue
               - Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData

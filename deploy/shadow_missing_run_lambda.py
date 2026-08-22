@@ -411,6 +411,19 @@ class DynamoClaimStore:
     def __init__(self, table: Any) -> None:
         self._table = table
 
+    @staticmethod
+    def _is_conditional_claim_failure(error: Exception) -> bool:
+        if error.__class__.__name__ == "ConditionalCheckFailedException":
+            return True
+        response = getattr(error, "response", None)
+        if not isinstance(response, Mapping):
+            return False
+        error_info = response.get("Error")
+        return (
+            isinstance(error_info, Mapping)
+            and error_info.get("Code") == "ConditionalCheckFailedException"
+        )
+
     def claim(self, key: str, expires_at: int) -> bool:
         try:
             self._table.put_item(
@@ -419,7 +432,7 @@ class DynamoClaimStore:
             )
             return True
         except Exception as error:  # boto3 is optional in local/test envs.
-            if error.__class__.__name__ == "ConditionalCheckFailedException":
+            if self._is_conditional_claim_failure(error):
                 return False
             raise DetectorAdapterError("dedupe_store_failure") from error
 
