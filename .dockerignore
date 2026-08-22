@@ -4,6 +4,7 @@
 !.github/workflows/ci.yml
 !.github/workflows/cd-production-check.yml
 !.github/workflows/cd-production-promotion.yml
+!.github/workflows/cd-shadow-schedule-audit.yml
 !.github/workflows/cd-shadow-worker-activation.yml
 !.github/workflows/cd-shadow-rollout-document-migration.yml
 .codex

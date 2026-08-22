@@ -86,6 +86,7 @@ def test_docker_test_stage_has_complete_minimal_full_suite_manifest():
             "COPY .github/workflows/ci.yml "
             ".github/workflows/cd-production-check.yml "
                 ".github/workflows/cd-production-promotion.yml "
+                ".github/workflows/cd-shadow-schedule-audit.yml "
                 ".github/workflows/cd-shadow-worker-activation.yml "
                 ".github/workflows/cd-shadow-worker-rollout.yml "
                 ".github/workflows/cd-shadow-rollout-document-migration.yml "
@@ -137,6 +138,7 @@ def test_dockerignore_only_reincludes_tested_workflows_from_github():
         "!.github/workflows/ci.yml",
         "!.github/workflows/cd-production-check.yml",
         "!.github/workflows/cd-production-promotion.yml",
+        "!.github/workflows/cd-shadow-schedule-audit.yml",
         "!.github/workflows/cd-shadow-worker-activation.yml",
         "!.github/workflows/cd-shadow-rollout-document-migration.yml",
     ]
@@ -145,6 +147,7 @@ def test_dockerignore_only_reincludes_tested_workflows_from_github():
         "!.github/workflows/ci.yml",
         "!.github/workflows/cd-production-check.yml",
         "!.github/workflows/cd-production-promotion.yml",
+        "!.github/workflows/cd-shadow-schedule-audit.yml",
         "!.github/workflows/cd-shadow-worker-activation.yml",
         "!.github/workflows/cd-shadow-rollout-document-migration.yml",
         "!.env.example",
@@ -225,6 +228,7 @@ def test_test_image_manifest_covers_repository_assets_and_host_only_compose():
         Path(".github/workflows/ci.yml"),
         Path(".github/workflows/cd-production-check.yml"),
         Path(".github/workflows/cd-production-promotion.yml"),
+        Path(".github/workflows/cd-shadow-schedule-audit.yml"),
         Path(".github/workflows/cd-shadow-worker-activation.yml"),
         Path(".github/workflows/cd-shadow-rollout-document-migration.yml"),
     ]

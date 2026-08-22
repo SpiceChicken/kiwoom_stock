@@ -51,7 +51,7 @@ COPY Dockerfile .dockerignore .gitleaks.toml ./
 COPY docs/configuration.md ./docs/configuration.md
 COPY docs/operations ./docs/operations
 COPY compose.yaml compose.dev.yaml compose.mock.yaml compose.prod.yaml compose.shadow.yaml ./
-COPY .github/workflows/ci.yml .github/workflows/cd-production-check.yml .github/workflows/cd-production-promotion.yml .github/workflows/cd-shadow-worker-activation.yml .github/workflows/cd-shadow-worker-rollout.yml .github/workflows/cd-shadow-rollout-document-migration.yml ./.github/workflows/
+COPY .github/workflows/ci.yml .github/workflows/cd-production-check.yml .github/workflows/cd-production-promotion.yml .github/workflows/cd-shadow-schedule-audit.yml .github/workflows/cd-shadow-worker-activation.yml .github/workflows/cd-shadow-worker-rollout.yml .github/workflows/cd-shadow-rollout-document-migration.yml ./.github/workflows/
 
 RUN mkdir /app/.git
 
