@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Mapping
+from typing import Mapping, TypedDict
 
 
 MAX_RUN_INPUT_BYTES = 4_096
@@ -34,7 +34,15 @@ OBSERVATION_KEYS = {
     "queue_delay_seconds",
     "total_start_delay_seconds",
 }
-CRON_CONTRACT = {
+
+class CronContract(TypedDict):
+    desired_state: str
+    hour: int
+    minute: int
+    weekdays: set[int]
+
+
+CRON_CONTRACT: dict[str, CronContract] = {
     "50 23 * * 0-4": {
         "desired_state": "continuous",
         "hour": 23,
@@ -116,8 +124,8 @@ def _expected_occurrence(created_at: datetime, cron: str) -> datetime:
             day.year,
             day.month,
             day.day,
-            int(contract["hour"]),
-            int(contract["minute"]),
+            contract["hour"],
+            contract["minute"],
             tzinfo=timezone.utc,
         )
         if (
