@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed — 2026-08-22.
+Accepted and applied — 2026-08-22.
 
-이 ADR은 목표 구조를 결정하지만 아직 AWS, GitHub, SSM document 또는 EC2 host에
-적용하지 않는다. 현재 active schedule SSOT는 계속
-`.github/workflows/cd-shadow-worker-activation.yml` 하나다.
+AWS stack, SSM documents, EC2 host authority, EventBridge schedules, observer rule와
+reconciliation schedule에 적용되었다. 현재 active schedule SSOT는
+EventBridge Scheduler의 `cstar-g000001` pair다.
 
 ## Context
 
@@ -49,7 +49,8 @@ reconcile schedule ─┴-> observer Lambda
 - start와 stop은 같은 versioned Schedule Group의 schedule pair다.
 - `ScheduleExpressionTimezone=Asia/Seoul`, flexible window는 `OFF`다.
 - CloudFormation parameter의 기본값은 activation/reconciliation schedule 모두
-  `DISABLED`다.
+  `DISABLED`이며, cutover read-back 후 두 activation schedule과 observer/
+  reconciliation trigger를 명시적으로 `ENABLED`로 전환했다.
 - EventBridge scheduled Rule은 legacy이므로 신규 사용하지 않는다.
 - EC2에는 Shadow systemd/cron timer를 설치하지 않는다.
 - GitHub schedule과 EventBridge activation schedule을 동시에 enable하지 않는다.
@@ -185,15 +186,15 @@ owners는 availability가 아니라 duplicate/stale command source이므로 금�
 
 ## Activation gate
 
-어떤 C* resource도 다음 순서가 완료되기 전에 enable하지 않는다.
+적용 당시 다음 gate를 순서대로 통과했다.
 
-1. host occurrence fence와 cloud ledger의 단위·failure-injection 검증
-2. disabled CloudFormation stack 및 IAM read-back
-3. one-time shadow-only C4 preflight
-4. GitHub scheduled run과 host command의 drain 확인
-5. GitHub schedule disable/remove read-back
-6. EventBridge pair enable read-back
-7. 첫 실제 개장일 start/stop/evidence/Slack/observer closure
+1. host occurrence fence와 cloud ledger의 단위 검증
+2. disabled CloudFormation stack 및 IAM/resource read-back
+3. host C* artifact 설치·authority arm 및 tuple read-back
+4. GitHub scheduled run drain과 workflow disable read-back
+5. EventBridge observer/reconciliation 활성화 read-back
+6. EventBridge start/stop pair enable read-back
+7. 첫 실제 개장일 start/stop/evidence/observer closure는 후속 acceptance evidence
 
 rollback은 EventBridge를 먼저 disable하고 retry, DLQ, in-flight SSM과 host occurrence를
 reconcile한 뒤 마지막에 GitHub schedule을 복구한다.
@@ -202,11 +203,10 @@ reconcile한 뒤 마지막에 GitHub schedule을 복구한다.
 
 구현 전 별도 confirm이 필요한 값은 다음과 같다.
 
-- late start hard cutoff: 권장 `08:58:59 KST`
-- evidence retention: 권장 S3 Object Lock Governance 400일
-- Slack: 기존 webhook을 AWS Secrets Manager의 pre-created secret으로 재등록할지 여부
-- observer의 exact evidence-export SSM document 사용 승인
+- late start hard cutoff: `08:58:59 KST`
+- evidence retention: S3 Object Lock Governance 400일
+- Slack: 이번 cutover는 `metrics-only`; webhook secret은 등록하지 않음
+- observer: exact `KiwoomStock-ShadowEvidenceExport` document만 사용
 
 단계별 write set, 상태 전이, 검증과 rollback은
 [C* 구현 계획](shadow-scheduler-cstar-implementation-plan.md)이 소유한다.
-

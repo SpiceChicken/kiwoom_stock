@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-19 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-08-22 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다.
 
@@ -81,24 +81,35 @@ password/kbd-interactive/root login을 막고 public-key login만 허용한다. 
 
 ### C* 전환 구현 상태
 
-2026-08-22 KST 기준 C* 단일 SSOT 전환의 코드·계약 산출물은 repository에
-구현되어 있다. 순수 occurrence identity/session lease/state contract, root-owned
-durable host fence, 별도 C* activation/evidence SSM documents, submitter/observer
-adapter, deterministic Lambda ZIP builder, 그리고 disabled-by-default
-EventBridge/DynamoDB/S3/IAM/DLQ CloudFormation 예시가 포함된다.
+2026-08-22 KST 기준 C* 단일 SSOT 전환이 AWS와 단일 운영 호스트에 적용되었다.
+순수 occurrence identity/session lease/state contract, root-owned durable host
+fence, 별도 C* activation/evidence SSM documents, submitter/observer adapter,
+deterministic Lambda ZIP, EventBridge/DynamoDB/S3/IAM/DLQ CloudFormation stack이
+동일 generation으로 read-back되었다.
 
-이 변경은 AWS에 적용되거나 스케줄을 활성화한 상태가 아니다. 현재 실제 owner는
-아래 표의 기존 GitHub Actions 경계이며, C* 적용 전까지 기존 activation document와
-workflow bytes는 보존한다. C*로 전환할 때는 C* ADR 문서의 break-before-make
-순서와 validator evidence를 별도로 통과해야 한다.
+기존 GitHub activation workflow는 schedule trigger를 제거하고 job을 비활성화했다.
+실제 clock owner는 EventBridge Scheduler이며, 다음 개장일의 start/stop 실행과
+observer/reconciliation closure evidence를 별도 확인한다.
 
 | 항목 | 현재 상태 |
 |---|---|
-| C* stack / EventBridge schedules | 미적용, activation/observer/reconciliation 모두 disabled 설계 |
-| C* host fence | 코드·결정론 테스트 구현, EC2 설치/arm 미수행 |
-| C* SSM documents | 신규 파일·정적 checker 구현, AWS 등록 미수행 |
-| C* submitter/observer | 코드·mock/contract 검증 완료, AWS alias/실환경 미검증 |
-| 실제 schedule owner | 기존 GitHub Actions (cd-shadow-worker-activation.yml) |
+| C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
+| C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
+| C* SSM documents | `KiwoomStock-ShadowCStarActivation` / `KiwoomStock-ShadowEvidenceExport`, Active v1 |
+| C* submitter/observer | Lambda alias `live`, observer EventBridge rule ENABLED, reconciliation 5분 |
+| 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
+
+AWS cutover read-back 기준:
+
+| 항목 | 값 |
+|---|---|
+| Stack | `kiwoom-shadow-cstar` / `UPDATE_COMPLETE` |
+| Schedule group | `kiwoom-shadow-cstar` |
+| Generation | `cstar-g000001` |
+| DynamoDB table | `kiwoom-shadow-cstar-CStarTable-1CEKQXHHP1V0K` |
+| Evidence bucket | `kiwoom-shadow-cstar-evidencebucket-zdiarxubp4wk` |
+| Package bucket | `kiwoom-shadow-cstar-packages-380648615401-apne2` |
+| Host authority | `eventbridge-scheduler`, armed `2026-08-22T14:28:34Z` |
 
 2026-08-15 KST에 GitHub production-check/shadow 자동화의 AWS target을 후보
 호스트로 전환했다. 기존 호스트는 종료했으며 새 운영 호스트만 유지한다.
@@ -166,9 +177,9 @@ artifact rollout/read-back 통과 tuple이어야 한다. workflow preflight가 �
 
 ## 다음 실제 장 운영 창
 
-현재 workflow cron은 평일 시각을 예약하지만 거래소 휴장일 자체를 스케줄
-레이어에서 제거하지 않으므로, runtime holiday/calendar guard와 exact tuple
-preflight가 자동으로 fail-closed 경계를 담당한다.
+EventBridge Scheduler가 평일 KST 시각을 예약하지만 거래소 휴장일 자체를
+스케줄 레이어에서 제거하지 않으므로, runtime holiday/calendar guard와 exact
+tuple preflight가 자동으로 fail-closed 경계를 담당한다.
 
 - 08:50 KST: automatic `continuous` activation admission
 - 09:00 KST 이후: 첫 safe tick 허용
@@ -184,8 +195,7 @@ schedule은 required reviewer 없이 main branch policy와 exact tuple 검증을
 통과한 뒤 실행된다.
 
 호스트에 별도의 중복 timer를 만들지 않는다. 스케줄 SSOT는
-`.github/workflows/cd-shadow-worker-activation.yml`이며, 호스트 SSH는
-preflight·복구·read-back에만 사용한다.
+EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만 사용한다.
 
 ## 현재 남은 차단 항목
 

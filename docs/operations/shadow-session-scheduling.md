@@ -8,7 +8,7 @@ Slack notifications.
 
 ## C* 단일 SSOT 전환 산출물
 
-기존 GitHub owner를 즉시 끄지 않고, 다음 C* 경계를 apply-later로 구현했다.
+기존 GitHub owner를 drain/disable한 뒤, 다음 C* 경계를 단일 SSOT로 적용했다.
 
 EventBridge Scheduler -> submitter Lambda -> KiwoomStock-ShadowCStarActivation
 -> EC2 root-owned durable fence -> existing kiwoom-shadow-worker
@@ -22,23 +22,26 @@ retry를 사용하고 stop은 15:35 KST, 15:50:59 KST cutoff과 900초/2회 retr
 사용한다. stop은 active release pointer를 재조회하지 않고 start가 만든 daily
 session lease의 release를 사용한다.
 
-현재 C*는 코드·template·정적 테스트만 존재하며 AWS stack 생성, document 등록,
-EC2 fence 설치/arm, GitHub schedule 제거와 cutover는 수행하지 않았다. 이 상태에서
-현재 GitHub schedule은 유일한 실제 owner로 유지한다. 구체적인 구현·롤백·validator
-게이트는 C* 구현 계획과 C* ADR을 따른다.
+현재 C* stack, SSM documents, EC2 fence 설치/arm, GitHub schedule 제거와
+EventBridge cutover가 완료되었다. generation은 `cstar-g000001`이며 실제
+activation clock owner는 EventBridge Scheduler다. 첫 개장일의 submission→host
+effect→observer→evidence closure를 추가 acceptance evidence로 확인한다.
 
-The activation workflow has two weekday schedules:
+이전 GitHub activation workflow의 weekday schedules는 cutover 시 제거되었다.
+원격 workflow는 `workflow_dispatch` 선언만 보존하지만 activation job은
+`if: ${{ false }}`로 비활성화되어 second owner가 아니다.
 
-- `50 23 * * 0-4` UTC = 08:50 KST on the following day: start
-  `shadow-continuous` Monday-Friday KST.
-- `35 6 * * 1-5` UTC = 15:35 KST: issue `stop` for the same daily activation.
+현재 EventBridge Scheduler pair는 다음과 같다.
 
-GitHub Actions schedule delivery may be delayed. The worker therefore waits
+- `cron(50 8 ? * MON-FRI *)` / `Asia/Seoul`: start `continuous` admission.
+- `cron(35 15 ? * MON-FRI *)` / `Asia/Seoul`: stop for the same daily lease.
+
+Scheduler delivery may be delayed. The worker therefore waits
 before its first cycle until 09:00 KST and enforces the absolute 15:30 KST
 close independently of the scheduler. The 15:35 stop removes the exited
 container and validates terminal evidence.
 
-Each run that GitHub actually starts queries only its own Actions run metadata
+Each legacy GitHub run that was already started queried only its own Actions run metadata
 (`event`, `id`, `created_at`, `run_started_at`, and `head_branch`). A strict
 helper accepts only the two cron/action pairs above, exact UTC timestamps, the
 current run ID on `main`, and non-negative delays below 24 hours. It writes the
@@ -62,12 +65,10 @@ contract remains GitHub schedule plus the existing controlled
 `workflow_dispatch`; an external missing-run watchdog is not part of this
 change.
 
-The implementation is in
-`.github/workflows/cd-shadow-worker-activation.yml`. The scheduled job runs
-from `main` without a human environment-review gate; the repository branch
-policy, immutable tuple validation, OIDC role, exact SSM document, and broker
-order deny boundary remain in force. Manual `workflow_dispatch` remains
-available for controlled recovery.
+The active implementation is the C* submitter/observer and EC2 fence. The retired
+GitHub workflow remains as a disabled rollback artifact; it is not an activation
+path. The repository branch policy, immutable tuple validation, exact SSM
+documents, and broker order deny boundary remain in force.
 
 ## 현재 개장일과 사전 점검
 
@@ -94,10 +95,10 @@ immutable tuple binding, evidence, Slack, rollback을 동등하게 재검증할 
 후보다. 두 scheduler를 함께 켜면 duplicate owner, tuple drift, concurrency 충돌이
 생길 수 있으므로 fallback으로 병행하지 않는다.
 
-EventBridge는 새 AWS resource와 IAM의 owner가 승인되고 immutable tuple 전달,
-SSM/notification/evidence parity, 비용과 rollback이 정의되며 C3/C4 validator를
-통과할 때만 전환 후보다. 이번 변경은 systemd timer, EventBridge resource, IAM,
-외부 watchdog을 생성하거나 변경하지 않는다.
+EventBridge Scheduler, observer rule, reconciliation schedule, IAM, DLQ와
+immutable tuple 전달 경계가 C* stack으로 적용되었다. start/stop pair는
+generation `cstar-g000001`과 host authority에 결속되어 있으며, rollback 시에는
+먼저 C* start/stop을 disable하고 in-flight command/evidence를 drain한다.
 
 schedule delivery가 지연되더라도 worker가 장 시작 전 safe tick을 막고,
 15:30 KST deadline을 자체 적용한다. schedule은 평일 시각을 예약할 뿐
