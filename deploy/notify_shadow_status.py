@@ -58,9 +58,6 @@ SAFE_FAILURE_CATEGORIES = {
     "image_pull_failed",
     PHYSICAL_STATE_CATEGORY,
     STOP_TARGET_ABSENT_CATEGORY,
-    # One-release input compatibility for diagnostics produced before
-    # stop_target_absent became action-specific.
-    "container_absent",
     "container_identity_mismatch",
     "graceful_stop_timeout",
     "runtime_terminal_nonoperational",
@@ -186,10 +183,22 @@ def _load_json(path: Path) -> Mapping[str, object] | None:
     if len(raw) > MAX_ARTIFACT_BYTES:
         return None
     try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeError):
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_json_constant,
+        )
+    except (json.JSONDecodeError, UnicodeError, ValueError):
         return None
     return value if isinstance(value, Mapping) else None
+
+
+def _is_optional_int(value: object) -> bool:
+    return value is None or type(value) is int
+
+
+def _is_optional_nonnegative_int(value: object) -> bool:
+    return value is None or (type(value) is int and value >= 0)
 
 
 def _matching_tuple(
@@ -227,6 +236,7 @@ def _success_message(
         or not isinstance(command_id, str)
         or COMMAND_RE.fullmatch(command_id) is None
         or value.get("ssm_status") != "Success"
+        or type(value.get("ssm_response_code")) is not int
         or value.get("ssm_response_code") != 0
         or not isinstance(side, Mapping)
         or set(side) != {
@@ -259,6 +269,7 @@ def _failure_message(
             "desired_state", "command_id", "ssm_status", "ssm_response_code",
             "stdout_bytes", "stderr_bytes", "failure_category", "terminal",
         }
+        or type(value.get("schema_version")) is not int
         or value.get("schema_version") != 1
         or not _matching_tuple(
             value,
@@ -269,15 +280,23 @@ def _failure_message(
         )
         or not isinstance(value.get("command_id"), str)
         or COMMAND_RE.fullmatch(str(value["command_id"])) is None
+        or value.get("ssm_status") not in {
+            None, "Success", "Failed", "Cancelled", "TimedOut",
+        }
+        or not _is_optional_int(value.get("ssm_response_code"))
+        or not _is_optional_nonnegative_int(value.get("stdout_bytes"))
+        or not _is_optional_nonnegative_int(value.get("stderr_bytes"))
+        or not (
+            value.get("terminal") is None
+            or isinstance(value.get("terminal"), Mapping)
+        )
         or value.get("failure_category") not in SAFE_FAILURE_CATEGORIES
     ):
         return None
     category = value["failure_category"]
     if category == STOP_TARGET_ABSENT_CATEGORY and desired_state != "stop":
         return None
-    if desired_state == "stop" and category in {
-        STOP_TARGET_ABSENT_CATEGORY, "container_absent",
-    }:
+    if desired_state == "stop" and category == STOP_TARGET_ABSENT_CATEGORY:
         return (
             "[KIWOOM SHADOW] STOP TARGET ABSENT | action=stop | "
             f"category={category} | activation={activation_id} | "

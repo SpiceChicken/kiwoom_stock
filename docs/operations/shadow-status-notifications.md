@@ -81,8 +81,13 @@ fixed Slack prefix is
 `STOP TARGET ABSENT`. This means only that there was no target whose identity
 could be proven for cleanup. It does not claim that start failed, cleanup had
 already completed, or the tuple drifted. The bare phrase and prefixed/suffixed
-near matches are rejected. The sender temporarily accepts legacy
-`container_absent` diagnostics for stop with the same cause-neutral wording.
+near matches are rejected. The retired legacy `container_absent` category is
+not accepted; current producer and consumer both use the action-specific
+`stop_target_absent` contract.
+
+Evidence and diagnostic JSON are bounded and parsed strictly. Duplicate keys,
+non-standard numeric constants such as `NaN`, and booleans used in integer
+fields are rejected instead of being interpreted as a valid status artifact.
 
 For a scheduled run, a valid strict `shadow-schedule-observation.json` adds only
 `schedule_delay=<seconds>s` to the end of the fixed message. The notifier

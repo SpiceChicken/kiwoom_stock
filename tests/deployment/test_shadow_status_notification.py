@@ -280,23 +280,117 @@ def test_stop_target_absent_message_is_cause_neutral_exact_golden():
     )
 
 
-def test_legacy_container_absent_uses_same_cause_neutral_stop_wording():
+def test_retired_legacy_container_absent_category_is_rejected():
     diagnostic = {
         **_diagnostic(),
         "desired_state": "stop",
         "failure_category": "container_absent",
     }
-    message = notification._failure_message(
+    assert notification._failure_message(
         diagnostic,
         source_sha=SOURCE_SHA,
         image_digest=IMAGE,
         activation_id=ACTIVATION_ID,
         desired_state="stop",
+    ) is None
+
+
+def test_status_artifacts_reject_duplicate_keys_and_non_json_constants(
+    tmp_path,
+):
+    evidence = tmp_path / "evidence.json"
+    diagnostic = tmp_path / "diagnostic.json"
+
+    success = json.dumps(_success(), separators=(",", ":"))
+    evidence.write_text(
+        success.replace(
+            '{"source_sha":',
+            '{"source_sha":"' + "c" * 40 + '","source_sha":',
+            1,
+        ),
+        encoding="utf-8",
     )
-    assert message is not None
-    assert "STOP TARGET ABSENT" in message
-    assert "category=container_absent" in message
-    assert "already" not in message.lower()
+    with pytest.raises(SlackStatusError, match="status_artifact_invalid"):
+        build_message(
+            evidence_path=evidence,
+            diagnostic_path=diagnostic,
+            source_sha=SOURCE_SHA,
+            image_digest=IMAGE,
+            activation_id=ACTIVATION_ID,
+            desired_state="continuous",
+        )
+
+    evidence.write_text(
+        success.replace('"http_attempts":6', '"http_attempts":NaN'),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackStatusError, match="status_artifact_invalid"):
+        build_message(
+            evidence_path=evidence,
+            diagnostic_path=diagnostic,
+            source_sha=SOURCE_SHA,
+            image_digest=IMAGE,
+            activation_id=ACTIVATION_ID,
+            desired_state="continuous",
+        )
+
+    evidence.unlink()
+    failure = json.dumps(_diagnostic(), separators=(",", ":"))
+    diagnostic.write_text(
+        failure.replace(
+            '"failure_category":',
+            '"failure_category":"unsafe","failure_category":',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackStatusError, match="status_artifact_invalid"):
+        build_message(
+            evidence_path=evidence,
+            diagnostic_path=diagnostic,
+            source_sha=SOURCE_SHA,
+            image_digest=IMAGE,
+            activation_id=ACTIVATION_ID,
+            desired_state="continuous",
+        )
+
+    diagnostic.write_text(
+        failure.replace('"terminal":null', '"terminal":NaN'),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackStatusError, match="status_artifact_invalid"):
+        build_message(
+            evidence_path=evidence,
+            diagnostic_path=diagnostic,
+            source_sha=SOURCE_SHA,
+            image_digest=IMAGE,
+            activation_id=ACTIVATION_ID,
+            desired_state="continuous",
+        )
+
+
+def test_status_artifact_integer_fields_reject_boolean_aliases():
+    assert notification._success_message(
+        {**_success(), "ssm_response_code": False},
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    ) is None
+    assert notification._failure_message(
+        {**_diagnostic(), "schema_version": True},
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    ) is None
+    assert notification._failure_message(
+        {**_diagnostic(), "stdout_bytes": True},
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    ) is None
 
 
 def test_stop_target_absent_is_rejected_for_non_stop_action():
