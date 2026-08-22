@@ -606,6 +606,9 @@ def test_shadow_workflow_is_protected_and_never_receives_kiwoom_secrets():
     assert 'if [[ "${DESIRED_STATE}" == stop ]]' in text
     assert 'actual_compose_shadow_sha256="$(sha256sum compose.shadow.yaml' in text
     assert '[[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]' in text
+    assert "shadow_activation_preflight_failed category=" in text
+    assert "compose_shadow_hash_mismatch" in text
+    assert "image_entrypoint_mismatch" in text
     assert '"${command_id}" "${document_version}" \\' in text
     assert '"${WORKER_SHA256}" "${VALIDATOR_SHA256}" \\' in text
     assert '"document_version": document_version' in text
@@ -772,6 +775,10 @@ def test_stop_pre_oidc_rejects_non_main_source_before_checkout_python(tmp_path):
         capture_output=True, text=True,
     )
     assert completed.returncode != 0
+    assert (
+        "shadow_activation_preflight_failed "
+        "category=github_compare_status_invalid"
+    ) in completed.stderr
     assert not marker.exists()
 
 

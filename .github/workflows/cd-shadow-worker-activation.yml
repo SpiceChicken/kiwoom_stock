@@ -228,52 +228,80 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${GITHUB_REF}" == refs/heads/main ]]
-          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          validation_failed() {
+            printf 'shadow_activation_preflight_failed category=%s\n' "$1" >&2
+            exit 1
+          }
+          [[ "${GITHUB_REF}" == refs/heads/main ]] \
+            || validation_failed ref_not_main
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] \
+            || validation_failed source_sha_invalid
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]] \
+            || validation_failed github_sha_invalid
           compare_result="$(gh api --method GET \
             -H 'Accept: application/vnd.github+json' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "/repos/${GITHUB_REPOSITORY}/compare/${SOURCE_SHA}...${GITHUB_SHA}" \
-            --jq '[.status,.merge_base_commit.sha,.base_commit.sha] | @tsv')"
+            --jq '[.status,.merge_base_commit.sha,.base_commit.sha] | @tsv' \
+            || validation_failed github_compare_unavailable)"
           IFS=$'\t' read -r compare_status merge_base_sha base_sha <<<"${compare_result}"
-          [[ "${compare_status}" == ahead || "${compare_status}" == identical ]]
-          [[ "${merge_base_sha}" == "${SOURCE_SHA}" ]]
-          [[ "${base_sha}" == "${SOURCE_SHA}" ]]
-          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
-          [[ "$(git -C .shadow-control-plane rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          [[ "$(git -C .shadow-control-plane status --short)" == "" ]]
-          [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
-          [[ "${ACTIVATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
-          [[ "${WORKER_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "${VALIDATOR_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "${SHADOW_DOCUMENT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "${DESIRED_STATE}" == oneshot || "${DESIRED_STATE}" == continuous || "${DESIRED_STATE}" == stop ]]
+          [[ "${compare_status}" == ahead || "${compare_status}" == identical ]] \
+            || validation_failed github_compare_status_invalid
+          [[ "${merge_base_sha}" == "${SOURCE_SHA}" ]] \
+            || validation_failed github_compare_base_invalid
+          [[ "${base_sha}" == "${SOURCE_SHA}" ]] \
+            || validation_failed github_compare_target_invalid
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]] \
+            || validation_failed source_checkout_mismatch
+          [[ "$(git -C .shadow-control-plane rev-parse HEAD)" == "${GITHUB_SHA}" ]] \
+            || validation_failed control_plane_checkout_mismatch
+          [[ "$(git -C .shadow-control-plane status --short)" == "" ]] \
+            || validation_failed control_plane_checkout_dirty
+          [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]] \
+            || validation_failed image_digest_invalid
+          [[ "${ACTIVATION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+            || validation_failed activation_id_invalid
+          [[ "${WORKER_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+            || validation_failed worker_sha_invalid
+          [[ "${VALIDATOR_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+            || validation_failed validator_sha_invalid
+          [[ "${SHADOW_DOCUMENT_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+            || validation_failed shadow_document_sha_invalid
+          [[ "${DESIRED_STATE}" == oneshot || "${DESIRED_STATE}" == continuous || "${DESIRED_STATE}" == stop ]] \
+            || validation_failed desired_state_invalid
           actual_validator_sha256="$(sha256sum deploy/ec2/shadow_runtime_evidence.py | cut -d' ' -f1)"
-          [[ "${actual_validator_sha256}" == "${VALIDATOR_SHA256}" ]]
+          [[ "${actual_validator_sha256}" == "${VALIDATOR_SHA256}" ]] \
+            || validation_failed validator_sha_mismatch
           python3 -m py_compile deploy/ec2/shadow_runtime_evidence.py
           python3 -m py_compile \
             .shadow-control-plane/deploy/ec2/shadow_invocation_diagnostic.py \
             .shadow-control-plane/deploy/shadow_schedule_observation.py \
             .shadow-control-plane/deploy/notify_shadow_status.py
           if [[ "${DESIRED_STATE}" == stop ]]; then
-            [[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]]
+            [[ -z "${BUILD_RUN_ID}${COMPOSE_SHADOW_SHA256}" ]] \
+              || validation_failed stop_inputs_present
             exit 0
           fi
-          [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
-          [[ "${BUILD_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]] \
+            || validation_failed source_not_current_main
+          [[ "${BUILD_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] \
+            || validation_failed build_run_id_invalid
           actual_compose_shadow_sha256="$(sha256sum compose.shadow.yaml | cut -d' ' -f1)"
-          [[ "${actual_compose_shadow_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${actual_compose_shadow_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+            || validation_failed compose_shadow_sha_invalid
           if [[ -n "${COMPOSE_SHADOW_SHA256}" ]]; then
-            [[ "${COMPOSE_SHADOW_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-            [[ "${actual_compose_shadow_sha256}" == "${COMPOSE_SHADOW_SHA256}" ]]
+            [[ "${COMPOSE_SHADOW_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+              || validation_failed compose_shadow_input_invalid
+            [[ "${actual_compose_shadow_sha256}" == "${COMPOSE_SHADOW_SHA256}" ]] \
+              || validation_failed compose_shadow_hash_mismatch
           fi
           run_json="${RUNNER_TEMP}/candidate-run.json"
           gh api --method GET \
             -H 'Accept: application/vnd.github+json' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "/repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}" \
-            >"${run_json}"
+            >"${run_json}" \
+            || validation_failed candidate_run_unavailable
           python3 - "${run_json}" "${SOURCE_SHA}" <<'PY'
           import json
           from pathlib import Path
@@ -289,10 +317,14 @@ jobs:
           if any(run.get(key) != value for key, value in required.items()):
               raise SystemExit("candidate run provenance mismatch")
           PY
-          docker pull "${IMAGE_DIGEST}"
-          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" == "${SOURCE_SHA}" ]]
-          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Config.User}}')" == "10001:10001" ]]
-          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{json .Config.Entrypoint}}')" == '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]' ]]
+          docker pull "${IMAGE_DIGEST}" \
+            || validation_failed image_pull_failed
+          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" == "${SOURCE_SHA}" ]] \
+            || validation_failed image_revision_mismatch
+          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{.Config.User}}')" == "10001:10001" ]] \
+            || validation_failed image_user_mismatch
+          [[ "$(docker image inspect "${IMAGE_DIGEST}" --format '{{json .Config.Entrypoint}}')" == '["python","/usr/local/bin/kiwoom-runtime-entrypoint.py"]' ]] \
+            || validation_failed image_entrypoint_mismatch
 
       - name: Preflight protected Slack status boundary
         if: steps.resolve.outputs.status_notification == 'slack'
