@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from http.client import HTTPException
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -96,6 +97,13 @@ def _reject_non_json_constant(value: str) -> object:
     raise ValueError("non-JSON constant")
 
 
+def _parse_finite_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("non-finite JSON number")
+    return result
+
+
 def _legacy_webhook() -> object:
     raw = os.environ.get("CONFIG_JSON")
     if raw is None:
@@ -111,6 +119,7 @@ def _legacy_webhook() -> object:
             encoded.decode("utf-8", errors="strict"),
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_non_json_constant,
+            parse_float=_parse_finite_float,
         )
     except (json.JSONDecodeError, UnicodeError, TypeError, ValueError):
         raise SlackStatusError("webhook_invalid") from None
@@ -187,6 +196,7 @@ def _load_json(path: Path) -> Mapping[str, object] | None:
             raw.decode("utf-8", errors="strict"),
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_non_json_constant,
+            parse_float=_parse_finite_float,
         )
     except (json.JSONDecodeError, UnicodeError, ValueError):
         return None
@@ -321,6 +331,28 @@ def build_message(
     desired_state: str,
 ) -> tuple[str, str]:
     evidence = _load_json(evidence_path)
+    diagnostic = _load_json(diagnostic_path)
+    return build_message_values(
+        evidence=evidence,
+        diagnostic=diagnostic,
+        source_sha=source_sha,
+        image_digest=image_digest,
+        activation_id=activation_id,
+        desired_state=desired_state,
+    )
+
+
+def build_message_values(
+    *,
+    evidence: Mapping[str, object] | None,
+    diagnostic: Mapping[str, object] | None,
+    source_sha: str,
+    image_digest: str,
+    activation_id: str,
+    desired_state: str,
+) -> tuple[str, str]:
+    """Build the fixed message from already strict-decoded artifacts."""
+
     if evidence is not None:
         message = _success_message(
             evidence,
@@ -331,7 +363,6 @@ def build_message(
         )
         if message is not None:
             return "runtime_accepted", message
-    diagnostic = _load_json(diagnostic_path)
     if diagnostic is not None:
         message = _failure_message(
             diagnostic,
