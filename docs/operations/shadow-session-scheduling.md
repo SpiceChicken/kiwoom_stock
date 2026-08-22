@@ -302,3 +302,10 @@ signal, an EC2 timer conflicts with the current single schedule owner, and a
 third-party monitor adds a new vendor and credential boundary. None of these
 detectors, credentials, alerts, or recovery actions is created by the current
 workflow.
+
+The pure pre-deployment classifier in
+`deploy/shadow_missing_run_detector.py` now fixes the local decision contract for
+presence, closure, duplicate, delayed, failed, and missing-audit states. Its
+fixture tests do not call GitHub, AWS, EC2, SSM, Slack, or recovery actions. It is
+not wired to an EventBridge/Lambda resource yet; the external adapter, dedupe
+store, alert secret, and schedule enablement remain a separate deployment gate.
