@@ -106,17 +106,17 @@ rollout:
 - `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST`
 - `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID`
 
-The source SHA must be an immutable released commit on `main` and an exact
-ancestor of the current control-plane `main` SHA. The image digest must carry
-that source revision, and the build run ID must be the successful
-`cd-production-check.yml` candidate run for that tuple. The worker, validator,
-SSM document, and `compose.shadow.yaml` hashes are calculated from that exact
-source by the workflow; the host rollout binding must already contain the same
-worker/document artifact set. A runner-only control-plane change may advance
-`main` without replacing the runtime tuple only when the runtime image,
-Compose, worker, validator, and SSM document inputs are unchanged and the
-workflow ancestry check remains exact. Any runtime payload change requires a
-new production check, image digest, rollout, and tuple update.
+The source SHA must be the immutable released commit currently at the tip of
+`main`. The image digest must carry that same source revision, and the build
+run ID must be the successful `cd-production-check.yml` candidate run for that
+tuple. The worker, validator, SSM document, and `compose.shadow.yaml` hashes
+are calculated from that exact source by the workflow; the host rollout
+binding must already contain the same worker/document artifact set. The
+continuous and oneshot activation gates intentionally require
+`source_sha == GITHUB_SHA`, so a control-plane-only commit also requires a new
+production check, image digest, exact rollout, and tuple update before the next
+market-day schedule. This keeps the current control plane, runtime image, and
+release evidence on one exact source revision.
 
 Keep the tuple unchanged from the 08:50 start through the 15:35 stop and the
 stop run's post-completion artifact audit. Update it only after both the start
