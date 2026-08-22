@@ -90,11 +90,11 @@
     },
     "SubmitterFunction": {
       "Type":"AWS::Lambda::Function",
-      "Properties":{"Runtime":"python3.11","Handler":"shadow_cstar_submitter.lambda_handler","Role":{"Fn::GetAtt":["SubmitterRole","Arn"]},"Code":{"S3Bucket":{"Ref":"PackageBucket"},"S3Key":{"Ref":"SubmitterPackageKey"}},"Environment":{"Variables":{"CSTAR_TABLE_NAME":{"Ref":"CStarTable"}}},"Timeout":30,"MemorySize":256,"ReservedConcurrentExecutions":{"Ref":"SubmitterReservedConcurrency"}}
+      "Properties":{"Runtime":"python3.11","Handler":"shadow_cstar_submitter.lambda_handler","Role":{"Fn::GetAtt":["SubmitterRole","Arn"]},"Code":{"S3Bucket":{"Ref":"PackageBucket"},"S3Key":{"Ref":"SubmitterPackageKey"}},"Environment":{"Variables":{"CSTAR_TABLE_NAME":{"Ref":"CStarTable"}}},"Timeout":30,"MemorySize":256,"ReservedConcurrentExecutions":{"Fn::If":["ActivationEnabled",{"Ref":"AWS::NoValue"},{"Ref":"SubmitterReservedConcurrency"}]}}
     },
     "ObserverFunction": {
       "Type":"AWS::Lambda::Function",
-      "Properties":{"Runtime":"python3.11","Handler":"shadow_cstar_observer.lambda_handler","Role":{"Fn::GetAtt":["ObserverRole","Arn"]},"Code":{"S3Bucket":{"Ref":"PackageBucket"},"S3Key":{"Ref":"ObserverPackageKey"}},"Environment":{"Variables":{"CSTAR_TABLE_NAME":{"Ref":"CStarTable"},"CSTAR_EVIDENCE_BUCKET":{"Ref":"EvidenceBucket"},"CSTAR_ALERT_MODE":{"Ref":"AlertMode"},"CSTAR_SLACK_SECRET_ARN":{"Ref":"SlackSecretArn"}}},"Timeout":60,"MemorySize":256,"ReservedConcurrentExecutions":{"Ref":"ObserverReservedConcurrency"}}
+      "Properties":{"Runtime":"python3.11","Handler":"shadow_cstar_observer.lambda_handler","Role":{"Fn::GetAtt":["ObserverRole","Arn"]},"Code":{"S3Bucket":{"Ref":"PackageBucket"},"S3Key":{"Ref":"ObserverPackageKey"}},"Environment":{"Variables":{"CSTAR_TABLE_NAME":{"Ref":"CStarTable"},"CSTAR_EVIDENCE_BUCKET":{"Ref":"EvidenceBucket"},"CSTAR_ALERT_MODE":{"Ref":"AlertMode"},"CSTAR_SLACK_SECRET_ARN":{"Ref":"SlackSecretArn"}}},"Timeout":60,"MemorySize":256,"ReservedConcurrentExecutions":{"Fn::If":["ObserverEnabled",{"Ref":"AWS::NoValue"},{"Ref":"ObserverReservedConcurrency"}]}}
     },
     "SubmitterVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"SubmitterFunction"}}},
     "ObserverVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"ObserverFunction"}}},
