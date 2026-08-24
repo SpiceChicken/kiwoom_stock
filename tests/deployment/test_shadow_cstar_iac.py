@@ -31,6 +31,7 @@ def test_all_activation_paths_are_disabled_by_default():
     template = load()
     parameters = template["Parameters"]
     assert parameters["EnableActivationSchedules"]["Default"] == "false"
+    assert parameters["ActivationScheduleState"]["Default"] == "DISABLED"
     assert parameters["EnableObserverRule"]["Default"] == "false"
     assert parameters["EnableReconciliationSchedules"]["Default"] == "false"
     assert parameters["SubmitterReservedConcurrency"]["Default"] == 0
@@ -38,6 +39,8 @@ def test_all_activation_paths_are_disabled_by_default():
     assert parameters["AlertMode"]["Default"] == "metrics-only"
     assert template["Resources"]["StartSchedule"]["Condition"] == "ActivationEnabled"
     assert template["Resources"]["StopSchedule"]["Condition"] == "ActivationEnabled"
+    assert template["Resources"]["StartSchedule"]["Properties"]["State"] == {"Ref": "ActivationScheduleState"}
+    assert template["Resources"]["StopSchedule"]["Properties"]["State"] == {"Ref": "ActivationScheduleState"}
     assert template["Resources"]["ObserverRule"]["Condition"] == "ObserverEnabled"
     assert template["Resources"]["ReconcileSchedule"]["Condition"] == "ReconciliationEnabled"
 

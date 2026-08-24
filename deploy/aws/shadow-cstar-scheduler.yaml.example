@@ -3,6 +3,7 @@
   "Description": "Disabled-by-default C* shadow scheduler, ledger, observer, and evidence boundary",
   "Parameters": {
     "EnableActivationSchedules": {"Type":"String","AllowedValues":["true","false"],"Default":"false"},
+    "ActivationScheduleState": {"Type":"String","AllowedValues":["ENABLED","DISABLED"],"Default":"DISABLED"},
     "EnableObserverRule": {"Type":"String","AllowedValues":["true","false"],"Default":"false"},
     "EnableReconciliationSchedules": {"Type":"String","AllowedValues":["true","false"],"Default":"false"},
     "SubmitterReservedConcurrency": {"Type":"Number","Default":0,"MinValue":0,"MaxValue":10},
@@ -116,11 +117,11 @@
     "ObserverAlias": {"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":{"Ref":"ObserverFunction"},"FunctionVersion":{"Fn::GetAtt":["ObserverVersion","Version"]},"Name":"live"}},
     "StartSchedule": {
       "Condition":"ActivationEnabled","Type":"AWS::Scheduler::Schedule",
-      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-start","ScheduleExpression":"cron(50 8 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"start\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":480,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
+      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-start","State":{"Ref":"ActivationScheduleState"},"ScheduleExpression":"cron(50 8 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"start\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":480,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
     },
     "StopSchedule": {
       "Condition":"ActivationEnabled","Type":"AWS::Scheduler::Schedule",
-      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-stop","ScheduleExpression":"cron(35 15 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"stop\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":900,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
+      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-stop","State":{"Ref":"ActivationScheduleState"},"ScheduleExpression":"cron(35 15 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"stop\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":900,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
     },
     "ObserverRule": {
       "Condition":"ObserverEnabled","Type":"AWS::Events::Rule",

@@ -23,6 +23,7 @@ def check(root: Path) -> str:
     parameters = value.get("Parameters", {})
     defaults = {
         "EnableActivationSchedules": "false",
+        "ActivationScheduleState": "DISABLED",
         "EnableObserverRule": "false",
         "EnableReconciliationSchedules": "false",
         "SubmitterReservedConcurrency": 0,

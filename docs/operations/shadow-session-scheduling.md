@@ -83,8 +83,9 @@ generation `cstar-g000001`과 host authority에 결속되어 있으며, rollback
 - `CONTROL#CSTAR/RELEASE`: 위 release를 가리키는 `ACTIVE` pointer
 
 따라서 CloudFormation stack을 처음 만들거나 release를 바꿀 때는 template의
-activation/reconciliation schedule을 먼저 `false`로 적용한 뒤, 다음 fail-closed
-bootstrap을 실행한다.
+activation/reconciliation schedule을 먼저 `false`로 적용하고
+`ActivationScheduleState=DISABLED`를 유지한 뒤, 다음 fail-closed bootstrap을
+실행한다. ledger read-back 후에만 `ActivationScheduleState=ENABLED`로 바꾼다.
 
 ```bash
 export AWS_DEFAULT_REGION=ap-northeast-2
