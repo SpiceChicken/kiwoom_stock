@@ -111,8 +111,8 @@
       "UpdateReplacePolicy":"Retain",
       "Properties":{"LogGroupName":{"Fn::Sub":["/aws/lambda/${FunctionName}",{"FunctionName":{"Ref":"ObserverFunction"}}]},"RetentionInDays":30}
     },
-    "SubmitterVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"SubmitterFunction"}}},
-    "ObserverVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"ObserverFunction"}}},
+    "SubmitterVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"SubmitterFunction"},"Description":{"Ref":"SubmitterPackageKey"}}},
+    "ObserverVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"ObserverFunction"},"Description":{"Ref":"ObserverPackageKey"}}},
     "SubmitterAlias": {"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":{"Ref":"SubmitterFunction"},"FunctionVersion":{"Fn::GetAtt":["SubmitterVersion","Version"]},"Name":"live"}},
     "ObserverAlias": {"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":{"Ref":"ObserverFunction"},"FunctionVersion":{"Fn::GetAtt":["ObserverVersion","Version"]},"Name":"live"}},
     "StartSchedule": {
