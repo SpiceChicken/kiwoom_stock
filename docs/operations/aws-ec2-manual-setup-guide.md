@@ -367,7 +367,8 @@ Group name: kiwoom-prod-https-egress
 
 7. 저장한다.
 8. EC2의 `보안` 탭을 새로 고쳐 새 group 한 개만 표시되는지 확인한다.
-9. Session Manager 연결이 계속 가능한지 확인한다.
+9. Fleet Manager의 managed-node 상태가 `Online`인지 확인한다. 이것은 SSM
+   자동화 health 확인이며 사람용 Session Manager shell을 열지 않는다.
 
 EC2 화면에서 변경 메뉴를 찾기 어렵다면 다음 경로를 사용한다.
 
