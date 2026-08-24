@@ -70,3 +70,9 @@ def test_schedule_retry_windows_match_approved_cutoffs():
     stop = resources["StopSchedule"]["Properties"]["Target"]["RetryPolicy"]
     assert start == {"MaximumEventAgeInSeconds": 480, "MaximumRetryAttempts": 2}
     assert stop == {"MaximumEventAgeInSeconds": 900, "MaximumRetryAttempts": 2}
+
+
+def test_lambda_versions_change_when_immutable_package_key_changes():
+    resources = load()["Resources"]
+    assert resources["SubmitterVersion"]["Properties"]["Description"] == {"Ref": "SubmitterPackageKey"}
+    assert resources["ObserverVersion"]["Properties"]["Description"] == {"Ref": "ObserverPackageKey"}
