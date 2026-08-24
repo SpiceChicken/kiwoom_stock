@@ -13,6 +13,9 @@ from deploy.ec2.shadow_schedule_fence import (
 from deploy.shadow_cstar_contract import release_id_for
 
 
+ON_TIME_START = datetime(2026, 8, 23, 23, 51, tzinfo=timezone.utc)
+
+
 def _payload(**updates):
     value = {
         "schema_version": 1,
@@ -70,7 +73,7 @@ def test_claim_persists_before_apply_and_duplicate_terminal_has_no_effect(tmp_pa
     first = fence.claim(
         _payload(),
         release_id=release_id,
-        observed_at=datetime(2026, 8, 23, 23, 51, tzinfo=timezone.utc),
+        observed_at=ON_TIME_START,
     )
     assert first["state"] == "CLAIMED"
     applying = fence.apply(first["occurrence_id"])
@@ -91,9 +94,13 @@ def test_claim_persists_before_apply_and_duplicate_terminal_has_no_effect(tmp_pa
 
 def test_applying_duplicate_is_not_replayed_and_can_only_be_marked_ambiguous(tmp_path):
     fence, release_id = _fence(tmp_path)
-    claimed = fence.claim(_payload(), release_id=release_id)
+    claimed = fence.claim(_payload(), release_id=release_id, observed_at=ON_TIME_START)
     fence.apply(claimed["occurrence_id"])
-    again = fence.claim(_payload(execution_id="retry"), release_id=release_id)
+    again = fence.claim(
+        _payload(execution_id="retry"),
+        release_id=release_id,
+        observed_at=ON_TIME_START,
+    )
     assert again["state"] == "APPLYING"
     ambiguous = fence.ambiguous(claimed["occurrence_id"], reason="reboot during apply")
     assert ambiguous["state"] == "AMBIGUOUS"
@@ -103,7 +110,7 @@ def test_applying_duplicate_is_not_replayed_and_can_only_be_marked_ambiguous(tmp
 
 def test_worker_effect_holds_protocol_and_incumbent_boundary_until_effect(tmp_path):
     fence, release_id = _fence(tmp_path)
-    claimed = fence.claim(_payload(), release_id=release_id)
+    claimed = fence.claim(_payload(), release_id=release_id, observed_at=ON_TIME_START)
     with fence.worker_effect(claimed["occurrence_id"], phase="start"):
         pass
     assert fence.read()["occurrences"][claimed["occurrence_id"]]["state"] == "EFFECT_OBSERVED"
@@ -111,7 +118,7 @@ def test_worker_effect_holds_protocol_and_incumbent_boundary_until_effect(tmp_pa
 
 def test_worker_effect_failure_is_ambiguous_not_success(tmp_path):
     fence, release_id = _fence(tmp_path)
-    claimed = fence.claim(_payload(), release_id=release_id)
+    claimed = fence.claim(_payload(), release_id=release_id, observed_at=ON_TIME_START)
     with pytest.raises(RuntimeError):
         with fence.worker_effect(claimed["occurrence_id"], phase="start"):
             raise RuntimeError("worker failed")
@@ -125,9 +132,11 @@ def test_invalid_generation_or_lease_is_durable_rejection(tmp_path, reason):
         schedule_generation="cstar-g000002" if reason == "stale" else "cstar-g000001"
     )
     actual_release = "f" * 64 if reason == "lease" else release_id
+    observed_at = ON_TIME_START
     if reason == "no_session":
         payload = _payload(scheduled_time="2026-08-24T23:50:00Z")
-    rejected = fence.claim(payload, release_id=actual_release)
+        observed_at = datetime(2026, 8, 24, 23, 51, tzinfo=timezone.utc)
+    rejected = fence.claim(payload, release_id=actual_release, observed_at=observed_at)
     assert rejected["state"] == "REJECTED"
     assert fence.read()["occurrences"][rejected["occurrence_id"]]["state"] == "REJECTED"
 
