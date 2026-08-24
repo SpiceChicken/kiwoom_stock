@@ -110,15 +110,16 @@ observer/reconciliation closure evidence를 별도 확인한다.
   바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter/observer alias는
   새 package와 일치하는 Version 2다.
 
-현재 자동 실행 경계는 다음 exact tuple로 정렬되어 있다.
+현재 자동 실행 경계는 다음 SSOT로 정렬되어 있다. 정확한 release 값은 공개
+문서에 복제하지 않고 repository Actions 변수와 AWS C* ledger에서 read-back한다.
 
 | 항목 | 현재 read-back |
 |---|---|
-| Source SHA | `93f77a5b6e648696f0b16122e126f46f2609c133` |
-| Production check | `32739587435` |
-| Shadow rollout | `32740281707` |
-| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:312b4807cd033d36d134340e0355767c6de78f057f7a034910c1c1d067362da4` |
-| Active release | `5f11672b3b52ded79308fae214cd52bf9855b9f43aea1e11635b8e43e2bb7726` |
+| Source SHA | repository variable `KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA`와 AWS `ACTIVE` release |
+| Production check | repository variable `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID` |
+| Shadow rollout | AWS `ACTIVE` release의 `rollout_attempt_id` |
+| Image | repository variable `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST`와 AWS `ACTIVE` release |
+| Active release | DynamoDB `CONTROL#CSTAR/RELEASE` pointer와 참조 `RELEASE#<release_id>/META` |
 | Schedule state | start/stop `ENABLED`, `Asia/Seoul`, exact 08:50/15:35 KST |
 
 실거래·계좌 조회·주문 capability는 계속 비활성이다. 다음 평일 start/stop에서

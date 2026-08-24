@@ -149,17 +149,16 @@ rollout:
 - `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST`
 - `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID`
 
-The source SHA must be the immutable released commit currently at the tip of
-`main`. The image digest must carry that same source revision, and the build
-run ID must be the successful `cd-production-check.yml` candidate run for that
-tuple. The worker, validator, SSM document, and `compose.shadow.yaml` hashes
-are calculated from that exact source by the workflow; the host rollout
-binding must already contain the same worker/document artifact set. The
-continuous and oneshot activation gates intentionally require
-`source_sha == GITHUB_SHA`, so a control-plane-only commit also requires a new
-production check, image digest, exact rollout, and tuple update before the next
-market-day schedule. This keeps the current control plane, runtime image, and
-release evidence on one exact source revision.
+The source SHA must be the immutable released commit used by the current runtime
+image and host rollout. The image digest must carry that same source revision,
+and the build run ID must be the successful `cd-production-check.yml` candidate
+run for that tuple. The worker, validator, SSM document, and
+`compose.shadow.yaml` hashes are calculated from that exact source by the
+workflow; the host rollout binding must already contain the same worker/document
+artifact set. Runtime, deployment-template, or package changes require a new
+production check, exact rollout, and tuple update before the next market-day
+schedule. Documentation-only commits do not change the runtime tuple and are
+not copied into the C* ledger.
 
 Keep the tuple unchanged from the 08:50 start through the 15:35 stop and the
 observer's post-completion evidence closure. Update it only after both the start
