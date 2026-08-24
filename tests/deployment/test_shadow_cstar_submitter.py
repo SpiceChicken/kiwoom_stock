@@ -110,6 +110,8 @@ def test_stop_without_daily_session_is_durable_rejection_without_ssm():
     assert result.submission_state == "REJECTED"
     assert result.reason == "REJECTED_NO_SESSION"
     assert sender.calls == []
+    assert ledger.rejections[result.occurrence_id]["ssm_sent"] is False
+    assert ledger.rejections[result.occurrence_id]["reason"] == "REJECTED_NO_SESSION"
 
 
 def test_sender_failure_is_ambiguous_and_not_claimed_as_success():
@@ -129,6 +131,18 @@ def test_generation_schedule_arn_mismatch_rejects_without_ssm():
     assert result.submission_state == "REJECTED"
     assert result.reason == "STALE_GENERATION"
     assert sender.calls == []
+    assert ledger.rejections[result.occurrence_id]["reason"] == "STALE_GENERATION"
+
+
+def test_missing_active_release_is_durable_rejection_without_ssm():
+    ledger, _ = _configured()
+    ledger.active_release = None
+    sender = FakeSender()
+    result = CStarSubmitter(ledger, sender).submit(_payload())
+    assert result.submission_state == "REJECTED"
+    assert result.reason == "NO_ACTIVE_RELEASE"
+    assert sender.calls == []
+    assert ledger.rejections[result.occurrence_id]["reason"] == "NO_ACTIVE_RELEASE"
 
 
 def test_boto_sender_uses_only_exact_document_and_exact_instance():
