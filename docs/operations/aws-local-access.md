@@ -49,8 +49,11 @@ GitHub OIDC roles
   GitHub 자동화·상태 확인을 위해 남아 있을 수 있으므로, 이를 “SSM 완전 제거”로
   해석하지 않는다.
 - 저장소의 `local-operator-policy.json.example`은 사람용 SSM session 권한을
-  포함하지 않는다. AWS에 이미 연결된 inline policy를 교체·삭제하는 작업은
-  별도 관리자 IAM 변경과 read-back 대상이다.
+  포함하지 않는다. 2026-08-24 KST에 AWS의 `kiwoom-local-operator`도 이
+  canonical read-only 정책 하나로 교체했고, 종료된 host용 `StartSession`과
+  session recovery/data-channel 권한이 있던 두 inline policy 및 임시 목록 정책을
+  삭제했다. 실제 live target의 `start-session`은 AccessDenied이며 EC2 inventory와
+  SSM managed-node health read만 계속 허용된다.
 
 현재 키는 EC2 console의 `KeyName` launch metadata와 별개로 `ubuntu`의
 `authorized_keys`에 설치돼 있다. 키를 교체할 때는 새 키로 별도 SSH 연결을

@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-23 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-08-24 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다. 이 문서는 공개
 저장소에 있으므로 live host의 주소·네트워크·리소스 식별자는 기록하지 않는다.
@@ -61,6 +61,15 @@ EC2 console의 `KeyName`이 비어 있어도 현재 SSH가 끊긴다는 뜻은 �
 공개 키가 `ubuntu`의 `authorized_keys`에 설치되어 있으며 SSH daemon은
 password/kbd-interactive/root login을 막고 public-key login만 허용한다. 키를
 교체하거나 SG의 관리 `/32`를 바꿀 때는 먼저 새 SSH 연결을 별도로 확인한다.
+
+2026-08-24 KST 관리자 read-back에서 repository 밖 PEM 개인키와 host
+`authorized_keys`의 공개키 지문이 일치했고, 양쪽 파일은 regular file·link count
+1·mode `0600`이었다. 실제 SSH는 `ubuntu`로 성공했으며 `sshd -T`는
+`PermitRootLogin no`, `PasswordAuthentication no`,
+`KbdInteractiveAuthentication no`, `PubkeyAuthentication yes`,
+`X11Forwarding no`, `AllowUsers ubuntu`를 반환했다. Security Group inbound는
+관리 주소의 TCP 22 단일 `/32`이고 IPv6 SSH ingress는 없다. exact 주소·resource
+ID·key fingerprint는 private operator inventory에만 둔다.
 
 ## 자동화 target 전환 상태
 
@@ -191,9 +200,14 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   exact 값은 공개 문서에 기록하지 않는다. 첫 실행의 CLI 옵션 결함과 IAM 조건
   revision을 수정한 뒤 resume launch와 후보 호스트 read-back을 완료했으며,
   기존 live host에는 적용하지 않았다;
-- repository의 `local-operator-policy.json.example`에서는 사람용 SSM session
-  권한을 제거했다. AWS에 이미 연결된 inline policy의 실제 교체·삭제는 별도
-  관리자 IAM 변경과 read-back이 필요하며, 그 전에도 사람용 접속은 SSH만 사용한다;
+- repository의 `local-operator-policy.json.example`과 AWS의
+  `kiwoom-local-operator` 실제 inline policy에서 사람용 SSM session 권한을
+  제거했다. 2026-08-24 KST에 canonical read-only 정책 하나로 교체하고 종료된
+  host를 가리키던 session/recovery 정책과 임시 SSM 목록 정책을 삭제했다.
+  `StartSession`, resume/terminate, data channel, `SendCommand`와 parameter read는
+  implicit deny이며 exact live target에 대한 실제 `start-session`도 AccessDenied를
+  반환했다. EC2 inventory와 SSM managed-node health read는 허용되고 SSM Agent는
+  Online이므로 GitHub/C* Run Command 자동화 의존성은 유지된다;
 - `kiwoom-local-provisioner` 역할·trust·inline policy와 관리자 1회 bootstrap을
   적용했다. `aws-admin` root 세션에서 role과 `KiwoomLocalProvisioner`를
   생성하고, 기존 `KiwoomLocalAssumeOperatorRole`에 provisioner AssumeRole을
