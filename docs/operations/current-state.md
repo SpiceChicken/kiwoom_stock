@@ -93,6 +93,38 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* submitter/observer | Lambda alias `live`, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
+2026-08-24 KST schedule incident와 remediation read-back:
+
+- EventBridge Scheduler의 start/stop invocation은 발생했지만, 당시 submitter는
+  active release/ledger admission 실패를 영속 기록하지 않아 SSM command·session·
+  occurrence가 생성되지 않았다. 이는 scheduler clock 자체의 중단이 아니라
+  ledger admission과 rejection observability가 부족했던 문제였다.
+- Submitter는 이제 거부를 `REJ#<occurrence_id>/META`에 기록하고 structured Lambda
+  log와 `Kiwoom/ShadowCStar:cstar_activation_rejected` metric을 남긴다. 전용
+  rejection alarm, Lambda log group(30일), 올바른 Logs/CloudWatch IAM도 적용했다.
+- CloudFormation에 `ActivationScheduleState`를 추가해 ledger 준비 전에는
+  schedule이 `DISABLED`인 상태만 배포할 수 있게 했다. immutable release
+  bootstrap은 schedule을 끄고 generation/release/pointer를 조건부 seed/read-back한
+  뒤에만 다시 켠다.
+- `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
+  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter/observer alias는
+  새 package와 일치하는 Version 2다.
+
+현재 자동 실행 경계는 다음 exact tuple로 정렬되어 있다.
+
+| 항목 | 현재 read-back |
+|---|---|
+| Source SHA | `93f77a5b6e648696f0b16122e126f46f2609c133` |
+| Production check | `32739587435` |
+| Shadow rollout | `32740281707` |
+| Image | `ghcr.io/spicechicken/kiwoom_stock@sha256:312b4807cd033d36d134340e0355767c6de78f057f7a034910c1c1d067362da4` |
+| Active release | `5f11672b3b52ded79308fae214cd52bf9855b9f43aea1e11635b8e43e2bb7726` |
+| Schedule state | start/stop `ENABLED`, `Asia/Seoul`, exact 08:50/15:35 KST |
+
+실거래·계좌 조회·주문 capability는 계속 비활성이다. 다음 평일 start/stop에서
+실제 SSM submission, host fence effect, paper shadow terminal, observer evidence
+closure를 확인하는 acceptance만 남아 있다.
+
 AWS cutover read-back 기준:
 
 | 항목 | 값 |

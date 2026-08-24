@@ -2,11 +2,15 @@
 
 ## Status
 
-Implemented and cut over — 2026-08-22. First market-day acceptance evidence pending.
+Implemented and repaired — 2026-08-24. First post-repair market-day acceptance
+evidence is pending.
 
 이 문서는 구현 순서와 write set 및 실제 cutover read-back을 기록한다. AWS apply,
 EventBridge enable, GitHub schedule 제거, SSM/EC2 실행은 P8에서 완료되었고 첫
-개장일의 end-to-end evidence만 후속 acceptance 항목이다.
+개장일의 end-to-end evidence만 후속 acceptance 항목이다. 2026-08-24 보수에서
+submitter rejection audit, fail-closed ledger bootstrap, explicit schedule state,
+그리고 Lambda immutable-version refresh를 추가하고 새 production-check/
+exact-rollout tuple로 read-back했다.
 
 ## Root reconciliation decisions
 
