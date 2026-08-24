@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import os
 import re
 from threading import RLock
@@ -81,6 +82,15 @@ class CStarLedger(Protocol):
         attempt_number: int,
     ) -> None: ...
 
+    def record_rejection(
+        self,
+        *,
+        occurrence_id: str,
+        payload: Mapping[str, object],
+        reason: str,
+        release_id: str | None,
+    ) -> None: ...
+
 
 class SsmCommandSender(Protocol):
     def send(
@@ -121,13 +131,9 @@ class CStarSubmitter:
         if isinstance(schedule_arns, Mapping):
             expected_arn = schedule_arns.get(str(payload["phase"]))
         if generation is None or expected_arn != payload["schedule_arn"]:
-            return SubmissionResult(
-                occurrence_id=occurrence_id_for(payload),
-                session_date_kst=session_date_kst(payload),
-                release_id=None,
-                submission_state="REJECTED",
-                command_id=None,
-                reason="STALE_GENERATION",
+            return self._rejected(
+                payload,
+                "STALE_GENERATION",
             )
 
         session_date = session_date_kst(payload)
@@ -218,13 +224,13 @@ class CStarSubmitter:
         if callable(marker):
             marker(occurrence_id=occurrence_id, reason=reason[:128])
 
-    @staticmethod
     def _rejected(
+        self,
         payload: Mapping[str, object],
         reason: str,
         release_id: str | None = None,
     ) -> SubmissionResult:
-        return SubmissionResult(
+        result = SubmissionResult(
             occurrence_id=occurrence_id_for(payload),
             session_date_kst=session_date_kst(payload),
             release_id=release_id,
@@ -232,6 +238,13 @@ class CStarSubmitter:
             command_id=None,
             reason=reason,
         )
+        self.ledger.record_rejection(
+            occurrence_id=result.occurrence_id,
+            payload=payload,
+            reason=reason,
+            release_id=release_id,
+        )
+        return result
 
 
 class Boto3SsmCommandSender:
@@ -292,6 +305,7 @@ class InMemoryCStarLedger:
         self.sessions: dict[str, dict[str, object]] = {}
         self.occurrences: dict[str, dict[str, object]] = {}
         self.commands: dict[str, str] = {}
+        self.rejections: dict[str, dict[str, object]] = {}
         self._lock = RLock()
 
     def get_generation(self, generation: str) -> Mapping[str, object] | None:
@@ -336,6 +350,33 @@ class InMemoryCStarLedger:
             self.commands[occurrence_id] = command_id
             item = self.occurrences[occurrence_id]
             item.update({"submission_state": "SUBMITTED", "command_id": command_id, "attempt_number": attempt_number})
+
+    def record_rejection(
+        self,
+        *,
+        occurrence_id: str,
+        payload: Mapping[str, object],
+        reason: str,
+        release_id: str | None,
+    ) -> None:
+        with self._lock:
+            item = {
+                "occurrence_id": occurrence_id,
+                "phase": payload["phase"],
+                "schedule_generation": payload["schedule_generation"],
+                "schedule_arn": payload["schedule_arn"],
+                "scheduled_time": payload["scheduled_time"],
+                "session_date_kst": session_date_kst(payload),
+                "submission_state": "REJECTED",
+                "reason": reason,
+                "ssm_sent": False,
+            }
+            if release_id is not None:
+                item["release_id"] = release_id
+            existing = self.rejections.get(occurrence_id)
+            if existing is not None and existing != item:
+                raise SubmitterError("rejection audit mismatch")
+            self.rejections.setdefault(occurrence_id, item)
 
     def mark_ambiguous(self, *, occurrence_id: str, reason: str) -> None:
         with self._lock:
@@ -546,6 +587,54 @@ class DynamoCStarLedger:
         }
         self.client.update_item(**kwargs)
 
+    def record_rejection(
+        self,
+        *,
+        occurrence_id: str,
+        payload: Mapping[str, object],
+        reason: str,
+        release_id: str | None,
+    ) -> None:
+        item: dict[str, object] = {
+            **self._key(f"REJ#{occurrence_id}", "META"),
+            "schema_version": 1,
+            "occurrence_id": occurrence_id,
+            "phase": payload["phase"],
+            "schedule_generation": payload["schedule_generation"],
+            "schedule_arn": payload["schedule_arn"],
+            "scheduled_time": payload["scheduled_time"],
+            "session_date_kst": session_date_kst(payload),
+            "submission_state": "REJECTED",
+            "reason": reason,
+            "ssm_sent": False,
+        }
+        if release_id is not None:
+            item["release_id"] = release_id
+        try:
+            self._transact([
+                {
+                    "Put": {
+                        "TableName": self.table_name,
+                        "Item": item,
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }
+                }
+            ])
+        except Exception:
+            existing = self._get(f"REJ#{occurrence_id}", "META")
+            if existing is None:
+                raise
+            expected = {
+                key: value for key, value in item.items()
+                if key not in {"PK", "SK", "schema_version"}
+            }
+            actual = {
+                key: value for key, value in existing.items()
+                if key not in {"PK", "SK", "schema_version"}
+            }
+            if actual != expected:
+                raise SubmitterError("rejection audit mismatch")
+
 
 def release_id_for_lease(lease: Mapping[str, object]) -> str:
     value = lease.get("release_id")
@@ -567,10 +656,35 @@ def lambda_handler(event: Mapping[str, object], _context: object) -> dict[str, o
     ledger = DynamoCStarLedger(table_name, boto3.resource("dynamodb").Table(table_name))
     sender = Boto3SsmCommandSender(boto3.client("ssm", region_name=REGION))
     result = CStarSubmitter(ledger, sender).submit(event)
-    return {
+    response = {
         "schema_version": 1,
         "occurrence_id": result.occurrence_id,
         "submission_state": result.submission_state,
         "command_id": result.command_id,
         "reason": result.reason,
     }
+    print(json.dumps({
+        "event": "cstar-submit",
+        "phase": event.get("phase", "unknown"),
+        "session_date_kst": result.session_date_kst,
+        "occurrence_id": result.occurrence_id,
+        "submission_state": result.submission_state,
+        "reason": result.reason,
+        "ssm_sent": result.command_id is not None,
+    }, sort_keys=True, separators=(",", ":")))
+    if result.submission_state == "REJECTED":
+        try:
+            boto3.client("cloudwatch", region_name=REGION).put_metric_data(
+                Namespace="Kiwoom/ShadowCStar",
+                MetricData=[{
+                    "MetricName": "cstar_activation_rejected",
+                    "Unit": "Count",
+                    "Value": 1.0,
+                }],
+            )
+        except Exception:
+            print(json.dumps({
+                "event": "cstar-submit-metric-failed",
+                "metric": "cstar_activation_rejected",
+            }, sort_keys=True, separators=(",", ":")))
+    return response

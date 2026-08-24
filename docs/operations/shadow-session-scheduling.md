@@ -73,6 +73,54 @@ immutable tuple 전달 경계가 C* stack으로 적용되었다. start/stop pair
 generation `cstar-g000001`과 host authority에 결속되어 있으며, rollback 시에는
 먼저 C* start/stop을 disable하고 in-flight command/evidence를 drain한다.
 
+## 릴리스 ledger와 스케줄의 원자적 admission
+
+스케줄이 `ENABLED`인 것만으로는 실행 준비가 끝난 상태가 아니다. Submitter는
+다음 세 항목이 모두 존재하고 서로 정확히 일치할 때만 SSM을 호출한다.
+
+- `GEN#<generation>/META`: 현재 start/stop schedule ARN과 protocol hash
+- `RELEASE#<release_id>/META`: host rollout과 image의 immutable tuple
+- `CONTROL#CSTAR/RELEASE`: 위 release를 가리키는 `ACTIVE` pointer
+
+따라서 CloudFormation stack을 처음 만들거나 release를 바꿀 때는 template의
+activation/reconciliation schedule을 먼저 `false`로 적용하고
+`ActivationScheduleState=DISABLED`를 유지한 뒤, 다음 fail-closed bootstrap을
+실행한다. ledger read-back 후에만 `ActivationScheduleState=ENABLED`로 바꾼다.
+
+```bash
+export AWS_DEFAULT_REGION=ap-northeast-2
+eval "$(aws --profile aws-admin configure export-credentials --format env)"
+unset AWS_PROFILE
+
+./.venv/bin/python deploy/bootstrap_shadow_cstar_ledger.py \
+  --region ap-northeast-2 \
+  --table-name '<CSTAR_TABLE_NAME>' \
+  --generation '<CSTAR_GENERATION>' \
+  --protocol-sha256 '<PROTOCOL_SHA256>' \
+  --source-sha '<SOURCE_SHA>' \
+  --image-digest '<IMAGE_DIGEST>' \
+  --compose-shadow-sha256 '<COMPOSE_SHADOW_SHA256>' \
+  --worker-sha256 '<WORKER_SHA256>' \
+  --validator-sha256 '<VALIDATOR_SHA256>' \
+  --shadow-document-sha256 '<SHADOW_DOCUMENT_SHA256>' \
+  --rollout-attempt-id '<ROLLOUT_ATTEMPT_ID>' \
+  --check
+```
+
+`--check`는 읽기 전용이다. 실제 적용은 동일한 인자로 `--check`만 제거한다.
+도구는 start/stop schedule의 ARN·timezone·expression·target generation을 먼저
+검증하고, 필요하면 두 schedule을 `DISABLED`로 만든다. 그 뒤 누락된 ledger item만
+조건부 transaction으로 추가하고 exact read-back을 통과한 경우에만 두 schedule을
+`ENABLED`로 복귀시킨다. 어느 단계라도 실패하면 schedule은 disabled 상태로 남아
+반복 실행이나 반쪽 release를 막는다. 이미 다른 generation/release가 존재하면
+덮어쓰지 않고 중단한다.
+
+Submitter가 admission을 거부하면 이제 `REJ#<occurrence_id>/META`에
+`REJECTED`, 거부 사유, schedule context와 `ssm_sent=false`를 저장하고
+`Kiwoom/ShadowCStar:cstar_activation_rejected` metric을 기록한다. 이 기록과
+Lambda 구조화 로그가 다음 개장일의 “스케줄 호출은 있었지만 SSM이 없었다”를
+구분하는 기준이다. 이 경로는 실거래 capability를 추가하지 않는다.
+
 schedule delivery가 지연되더라도 worker가 장 시작 전 safe tick을 막고,
 15:30 KST deadline을 자체 적용한다. schedule은 평일 시각을 예약할 뿐
 한국거래소 휴장일을 cron에서 제거하지 않으므로, runtime calendar guard가

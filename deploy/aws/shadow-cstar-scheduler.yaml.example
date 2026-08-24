@@ -3,6 +3,7 @@
   "Description": "Disabled-by-default C* shadow scheduler, ledger, observer, and evidence boundary",
   "Parameters": {
     "EnableActivationSchedules": {"Type":"String","AllowedValues":["true","false"],"Default":"false"},
+    "ActivationScheduleState": {"Type":"String","AllowedValues":["ENABLED","DISABLED"],"Default":"DISABLED"},
     "EnableObserverRule": {"Type":"String","AllowedValues":["true","false"],"Default":"false"},
     "EnableReconciliationSchedules": {"Type":"String","AllowedValues":["true","false"],"Default":"false"},
     "SubmitterReservedConcurrency": {"Type":"Number","Default":0,"MinValue":0,"MaxValue":10},
@@ -60,7 +61,8 @@
         "Policies":[{"PolicyName":"cstar-submitter-minimal","PolicyDocument":{"Version":"2012-10-17","Statement":[
           {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:TransactWriteItems","dynamodb:UpdateItem"],"Resource":{"Fn::GetAtt":["CStarTable","Arn"]}},
           {"Effect":"Allow","Action":"ssm:SendCommand","Resource":[{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":ssm:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":document/KiwoomStock-ShadowCStarActivation"]]},{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":ec2:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":instance/",{"Ref":"InstanceId"}]]}]},
-          {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","cloudwatch:PutMetricData"],"Resource":"*","Condition":{"StringEquals":{"cloudwatch:namespace":"Kiwoom/ShadowCStar"}}}
+          {"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":{"Fn::Sub":"arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*"}},
+          {"Effect":"Allow","Action":"cloudwatch:PutMetricData","Resource":"*","Condition":{"StringEquals":{"cloudwatch:namespace":"Kiwoom/ShadowCStar"}}}
         ]}}]
       }
     },
@@ -74,7 +76,8 @@
           {"Effect":"Allow","Action":"ssm:SendCommand","Resource":[{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":ssm:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":document/KiwoomStock-ShadowEvidenceExport"]]},{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":ec2:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":instance/",{"Ref":"InstanceId"}]]}]},
           {"Effect":"Allow","Action":["s3:PutObject","s3:AbortMultipartUpload"],"Resource":{"Fn::Join":["", [{"Fn::GetAtt":["EvidenceBucket","Arn"]},"/sessions/*"]]}},
           {"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":{"Fn::If":["SlackEnabled",{"Ref":"SlackSecretArn"},{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":secretsmanager:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":secret:cstar-disabled"]]}]},"Condition":{"StringEquals":{"aws:ResourceTag/kiwoom-cstar-observer":"true"}}},
-          {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","cloudwatch:PutMetricData"],"Resource":"*","Condition":{"StringEquals":{"cloudwatch:namespace":"Kiwoom/ShadowCStar"}}}
+          {"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":{"Fn::Sub":"arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*"}},
+          {"Effect":"Allow","Action":"cloudwatch:PutMetricData","Resource":"*","Condition":{"StringEquals":{"cloudwatch:namespace":"Kiwoom/ShadowCStar"}}}
         ]}}]
       }
     },
@@ -96,17 +99,29 @@
       "Type":"AWS::Lambda::Function",
       "Properties":{"Runtime":"python3.11","Handler":"shadow_cstar_observer.lambda_handler","Role":{"Fn::GetAtt":["ObserverRole","Arn"]},"Code":{"S3Bucket":{"Ref":"PackageBucket"},"S3Key":{"Ref":"ObserverPackageKey"}},"Environment":{"Variables":{"CSTAR_TABLE_NAME":{"Ref":"CStarTable"},"CSTAR_EVIDENCE_BUCKET":{"Ref":"EvidenceBucket"},"CSTAR_ALERT_MODE":{"Ref":"AlertMode"},"CSTAR_SLACK_SECRET_ARN":{"Ref":"SlackSecretArn"}}},"Timeout":60,"MemorySize":256,"ReservedConcurrentExecutions":{"Fn::If":["ObserverEnabled",{"Ref":"AWS::NoValue"},{"Ref":"ObserverReservedConcurrency"}]}}
     },
+    "SubmitterLogGroup": {
+      "Type":"AWS::Logs::LogGroup",
+      "DeletionPolicy":"Retain",
+      "UpdateReplacePolicy":"Retain",
+      "Properties":{"LogGroupName":{"Fn::Sub":["/aws/lambda/${FunctionName}",{"FunctionName":{"Ref":"SubmitterFunction"}}]},"RetentionInDays":30}
+    },
+    "ObserverLogGroup": {
+      "Type":"AWS::Logs::LogGroup",
+      "DeletionPolicy":"Retain",
+      "UpdateReplacePolicy":"Retain",
+      "Properties":{"LogGroupName":{"Fn::Sub":["/aws/lambda/${FunctionName}",{"FunctionName":{"Ref":"ObserverFunction"}}]},"RetentionInDays":30}
+    },
     "SubmitterVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"SubmitterFunction"}}},
     "ObserverVersion": {"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"ObserverFunction"}}},
     "SubmitterAlias": {"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":{"Ref":"SubmitterFunction"},"FunctionVersion":{"Fn::GetAtt":["SubmitterVersion","Version"]},"Name":"live"}},
     "ObserverAlias": {"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":{"Ref":"ObserverFunction"},"FunctionVersion":{"Fn::GetAtt":["ObserverVersion","Version"]},"Name":"live"}},
     "StartSchedule": {
       "Condition":"ActivationEnabled","Type":"AWS::Scheduler::Schedule",
-      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-start","ScheduleExpression":"cron(50 8 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"start\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":480,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
+      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-start","State":{"Ref":"ActivationScheduleState"},"ScheduleExpression":"cron(50 8 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"start\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":480,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
     },
     "StopSchedule": {
       "Condition":"ActivationEnabled","Type":"AWS::Scheduler::Schedule",
-      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-stop","ScheduleExpression":"cron(35 15 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"stop\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":900,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
+      "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-stop","State":{"Ref":"ActivationScheduleState"},"ScheduleExpression":"cron(35 15 ? * MON-FRI *)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"SubmitterAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"schema_version\":1,\"phase\":\"stop\",\"schedule_generation\":\"cstar-g000001\",\"schedule_arn\":\"<aws.scheduler.schedule-arn>\",\"scheduled_time\":\"<aws.scheduler.scheduled-time>\",\"execution_id\":\"<aws.scheduler.execution-id>\",\"attempt_number\":\"<aws.scheduler.attempt-number>\"}","RetryPolicy":{"MaximumEventAgeInSeconds":900,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["SubmitterDlq","Arn"]}}}}
     },
     "ObserverRule": {
       "Condition":"ObserverEnabled","Type":"AWS::Events::Rule",
@@ -117,7 +132,8 @@
       "Condition":"ReconciliationEnabled","Type":"AWS::Scheduler::Schedule",
       "Properties":{"GroupName":{"Ref":"ScheduleGroup"},"Name":"kiwoom-shadow-cstar-reconcile","ScheduleExpression":"rate(5 minutes)","ScheduleExpressionTimezone":"Asia/Seoul","FlexibleTimeWindow":{"Mode":"OFF"},"Target":{"Arn":{"Ref":"ObserverAlias"},"RoleArn":{"Fn::GetAtt":["SchedulerRole","Arn"]},"Input":"{\"kind\":\"reconcile\",\"schema_version\":1}","RetryPolicy":{"MaximumEventAgeInSeconds":300,"MaximumRetryAttempts":2},"DeadLetterConfig":{"Arn":{"Fn::GetAtt":["ReconciliationDlq","Arn"]}}}}
     },
-    "SubmitterErrorAlarm": {"Type":"AWS::CloudWatch::Alarm","Properties":{"Namespace":"AWS/Lambda","MetricName":"Errors","Dimensions":[{"Name":"FunctionName","Value":{"Ref":"SubmitterFunction"}}],"Statistic":"Sum","Period":300,"EvaluationPeriods":1,"Threshold":1,"ComparisonOperator":"GreaterThanOrEqualToThreshold","TreatMissingData":"notBreaching","AlarmDescription":"C* submitter error"}}
+    "SubmitterErrorAlarm": {"Type":"AWS::CloudWatch::Alarm","Properties":{"Namespace":"AWS/Lambda","MetricName":"Errors","Dimensions":[{"Name":"FunctionName","Value":{"Ref":"SubmitterFunction"}}],"Statistic":"Sum","Period":300,"EvaluationPeriods":1,"Threshold":1,"ComparisonOperator":"GreaterThanOrEqualToThreshold","TreatMissingData":"notBreaching","AlarmDescription":"C* submitter error"}},
+    "SubmitterRejectedAlarm": {"Type":"AWS::CloudWatch::Alarm","Properties":{"Namespace":"Kiwoom/ShadowCStar","MetricName":"cstar_activation_rejected","Statistic":"Sum","Period":300,"EvaluationPeriods":1,"Threshold":1,"ComparisonOperator":"GreaterThanOrEqualToThreshold","TreatMissingData":"notBreaching","AlarmDescription":"C* submitter admission rejection"}}
   },
   "Outputs": {
     "CStarTableName": {"Value":{"Ref":"CStarTable"}},
