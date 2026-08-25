@@ -110,6 +110,16 @@ observer/reconciliation closure evidence를 별도 확인한다.
   바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter/observer alias는
   새 package와 일치하는 Version 2다.
 
+2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
+정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
+`dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
+각 schedule은 최초 호출과 두 번의 retry 후 종료되었고 SSM command·EC2 worker·
+브로커 side effect는 발생하지 않았다. PR #122에서 `PutItem`을 C* table ARN에만
+허용하도록 IaC와 회귀 검사를 보강했고, 2026-08-25 KST CloudFormation
+`UPDATE_COMPLETE` 및 IAM policy simulation/read-back을 완료했다. 현재 start/stop
+schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→stop closure는
+다음 개장일 acceptance에서 확인한다.
+
 현재 자동 실행 경계는 다음 SSOT로 정렬되어 있다. 정확한 release 값은 공개
 문서에 복제하지 않고 repository Actions 변수와 AWS C* ledger에서 read-back한다.
 
@@ -224,7 +234,8 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
 
 ## 현재 남은 차단 항목
 
-- 다음 개장일 schedule에서 자동 start/stop이 다시 수행되는지 확인할 운영 모니터링;
+- 다음 개장일 schedule에서 IAM 수정 후 자동 start/stop이 다시 수행되는지 확인할
+  운영 모니터링;
 - 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
