@@ -64,6 +64,27 @@ def test_observer_iam_mentions_only_exact_evidence_document_for_send_command():
     assert "scheduler:UpdateSchedule" not in text
 
 
+def test_submitter_iam_allows_transaction_put_only_on_cstar_table():
+    policies = load()["Resources"]["SubmitterRole"]["Properties"]["Policies"]
+    statements = [
+        statement
+        for policy in policies
+        for statement in policy["PolicyDocument"]["Statement"]
+    ]
+    table_statement = next(
+        statement
+        for statement in statements
+        if statement.get("Resource") == {"Fn::GetAtt": ["CStarTable", "Arn"]}
+    )
+    assert set(table_statement["Action"]) >= {
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:TransactWriteItems",
+        "dynamodb:UpdateItem",
+    }
+    assert "dynamodb:*" not in table_statement["Action"]
+
+
 def test_schedule_retry_windows_match_approved_cutoffs():
     resources = load()["Resources"]
     start = resources["StartSchedule"]["Properties"]["Target"]["RetryPolicy"]

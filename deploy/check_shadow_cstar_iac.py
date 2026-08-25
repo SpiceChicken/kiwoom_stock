@@ -60,6 +60,32 @@ def check(root: Path) -> str:
         or "iam:PassRole" in observer_text
     ):
         raise IacError("observer-iam")
+    submitter_policies = resources.get("SubmitterRole", {}).get(
+        "Properties", {}
+    ).get("Policies", [])
+    submitter_statements = [
+        statement
+        for policy in submitter_policies
+        for statement in policy.get("PolicyDocument", {}).get("Statement", [])
+    ]
+    submitter_dynamodb_actions = {
+        action
+        for statement in submitter_statements
+        if statement.get("Effect") == "Allow"
+        and statement.get("Resource") == {"Fn::GetAtt": ["CStarTable", "Arn"]}
+        for action in (
+            statement.get("Action", [])
+            if isinstance(statement.get("Action"), list)
+            else [statement.get("Action")]
+        )
+    }
+    if not {
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:TransactWriteItems",
+        "dynamodb:UpdateItem",
+    }.issubset(submitter_dynamodb_actions):
+        raise IacError("submitter-iam")
     return "PASS cstar_iac=disabled schedules=2 observer=exact-evidence"
 
 
