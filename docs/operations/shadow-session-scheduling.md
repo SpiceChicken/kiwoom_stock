@@ -121,6 +121,14 @@ Submitter가 admission을 거부하면 이제 `REJ#<occurrence_id>/META`에
 Lambda 구조화 로그가 다음 개장일의 “스케줄 호출은 있었지만 SSM이 없었다”를
 구분하는 기준이다. 이 경로는 실거래 capability를 추가하지 않는다.
 
+2026-08-25 KST에는 이 rejection audit 자체가 Submitter role의 누락된
+`dynamodb:PutItem` 권한 때문에 실패했다. 그 결과 start/stop은 Lambda retry 후
+종료되었고 SSM은 호출되지 않았다. PR #122에서 `dynamodb:PutItem`을 C* table
+ARN에만 추가하고 IaC checker·회귀 테스트를 통과시킨 뒤 CloudFormation에
+적용했다. 다음 개장일에는 `SESSION#`, `OCC#`, SSM command와 host evidence가
+연속적으로 생성되는지 확인하며, 오류가 재발하면 수동 재실행하지 않고 Lambda
+오류·DynamoDB ledger·SSM command evidence를 먼저 보존한다.
+
 schedule delivery가 지연되더라도 worker가 장 시작 전 safe tick을 막고,
 15:30 KST deadline을 자체 적용한다. schedule은 평일 시각을 예약할 뿐
 한국거래소 휴장일을 cron에서 제거하지 않으므로, runtime calendar guard가
