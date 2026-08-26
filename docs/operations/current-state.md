@@ -125,7 +125,10 @@ observer/reconciliation closure evidence를 별도 확인한다.
   command·EC2·Kiwoom 호출이 발생하지 않았다.
 - 동일 경계를 Botocore 실제 변환 이벤트로 검증하는 회귀 테스트와 전체 테스트를
   통과했다. Submitter Lambda error alarm은 `OK`이며 Submitter/Observer/
-  Reconciliation DLQ의 가시·비가시 메시지는 모두 0이다.
+  Reconciliation DLQ의 가시·비가시 메시지는 모두 0이다. 세 DLQ에는 이제
+  `ApproximateNumberOfMessagesVisible >= 1` metrics-only alarm도 연결되어,
+  Scheduler/EventBridge delivery 실패가 보관만 되고 조용히 지나가지 않도록
+  한다. 자동 DLQ 재처리나 Slack 전송은 여전히 활성화하지 않았다.
 
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
