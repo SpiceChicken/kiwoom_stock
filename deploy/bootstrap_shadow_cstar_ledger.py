@@ -11,7 +11,6 @@ from typing import Any, Mapping
 
 try:
     import boto3
-    from boto3.dynamodb.types import TypeSerializer
     from botocore.exceptions import BotoCoreError
 except ImportError as error:  # pragma: no cover - operational dependency
     raise SystemExit("boto3 is required") from error
@@ -183,11 +182,6 @@ def _validate_schedule(
     return arn
 
 
-def _wire_item(value: Mapping[str, object]) -> dict[str, object]:
-    serializer = TypeSerializer()
-    return {key: serializer.serialize(item) for key, item in value.items()}
-
-
 def _read(table: Any, key: Mapping[str, str]) -> dict[str, object] | None:
     response = table.get_item(Key=dict(key), ConsistentRead=True)
     item = response.get("Item") if isinstance(response, Mapping) else None
@@ -236,7 +230,10 @@ def _seed_ledger(table: Any, config: BootstrapConfig, start_arn: str, stop_arn: 
             puts.append({
                 "Put": {
                     "TableName": config.table_name,
-                    "Item": _wire_item(item),
+                    # The backing client of a Table resource performs the
+                    # AttributeValue conversion.  Supplying pre-serialized
+                    # maps here would turn every value into a DynamoDB Map.
+                    "Item": dict(item),
                     "ConditionExpression": "attribute_not_exists(PK)",
                 }
             })

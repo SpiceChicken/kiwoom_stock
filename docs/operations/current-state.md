@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-24 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-08-27 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다. 이 문서는 공개
 저장소에 있으므로 live host의 주소·네트워크·리소스 식별자는 기록하지 않는다.
@@ -90,7 +90,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
 | C* SSM documents | `KiwoomStock-ShadowCStarActivation` / `KiwoomStock-ShadowEvidenceExport`, Active v1 |
-| C* submitter/observer | Lambda alias `live`, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 2, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -107,8 +107,25 @@ observer/reconciliation closure evidence를 별도 확인한다.
   bootstrap은 schedule을 끄고 generation/release/pointer를 조건부 seed/read-back한
   뒤에만 다시 켠다.
 - `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
-  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter/observer alias는
-  새 package와 일치하는 Version 2다.
+  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias는 version 7,
+  observer alias는 version 2다.
+
+2026-08-27 KST DynamoDB transaction remediation read-back:
+
+- 원인은 테이블 키나 IAM 권한이 아니라 `boto3.resource("dynamodb").Table`의
+  backing client에 붙은 변환기와 `TypeSerializer`의 이중 적용이었다. 입력의
+  `PK`/`SK`는 코드상 `S`였지만 실제 HTTP body에서 `M(Map)`로 변환되어
+  `PK expected: S actual: M`이 발생했다.
+- Submitter ledger는 resource-backed client에는 native Python 값을 전달하고,
+  standalone low-level client에만 `AttributeValue`를 직렬화하도록 경계를
+  고정했다. ledger bootstrap도 같은 규칙으로 정렬했다.
+- 실제 Lambda version 7의 무거래 `stop/no-session` probe가
+  `REJECTED_NO_SESSION`으로 정상 종료했고, `REJ#<occurrence_id>/META`의
+  `REJECTED` 감사 레코드와 `ssm_sent=false`를 확인했다. 이 probe에서는 SSM
+  command·EC2·Kiwoom 호출이 발생하지 않았다.
+- 동일 경계를 Botocore 실제 변환 이벤트로 검증하는 회귀 테스트와 전체 테스트를
+  통과했다. Submitter Lambda error alarm은 `OK`이며 Submitter/Observer/
+  Reconciliation DLQ의 가시·비가시 메시지는 모두 0이다.
 
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
