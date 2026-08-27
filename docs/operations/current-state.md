@@ -108,7 +108,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
   뒤에만 다시 켠다.
 - `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
   바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias는 version 7,
-  observer alias는 version 4다.
+  observer alias는 version 5다.
 
 2026-08-27 KST DynamoDB transaction remediation read-back:
 
