@@ -93,6 +93,26 @@ def test_schedule_retry_windows_match_approved_cutoffs():
     assert stop == {"MaximumEventAgeInSeconds": 900, "MaximumRetryAttempts": 2}
 
 
+def test_all_scheduler_dlqs_have_metrics_only_nonempty_alarms():
+    resources = load()["Resources"]
+    expected = {
+        "SubmitterDlqAlarm": "SubmitterDlq",
+        "ObserverDlqAlarm": "ObserverDlq",
+        "ReconciliationDlqAlarm": "ReconciliationDlq",
+    }
+    for alarm_name, queue_name in expected.items():
+        properties = resources[alarm_name]["Properties"]
+        assert properties["Namespace"] == "AWS/SQS"
+        assert properties["MetricName"] == "ApproximateNumberOfMessagesVisible"
+        assert properties["Threshold"] == 1
+        assert properties["TreatMissingData"] == "notBreaching"
+        assert properties["Dimensions"] == [{
+            "Name": "QueueName",
+            "Value": {"Fn::GetAtt": [queue_name, "QueueName"]},
+        }]
+        assert "AlarmActions" not in properties
+
+
 def test_lambda_versions_change_when_immutable_package_key_changes():
     resources = load()["Resources"]
     assert resources["SubmitterVersion"]["Properties"]["Description"] == {"Ref": "SubmitterPackageKey"}

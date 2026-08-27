@@ -27,7 +27,7 @@
     "inputs": {
       "timeoutSeconds": "1020",
       "runCommand": [
-        "set -Eeuo pipefail",
+        "set -eu",
         "exec /usr/local/libexec/kiwoom-shadow-schedule-fence.py activate --phase \"$SSM_Phase\" --schedule-generation \"$SSM_ScheduleGeneration\" --schedule-arn \"$SSM_ScheduleArn\" --scheduled-time \"$SSM_ScheduledTime\" --occurrence-id \"$SSM_OccurrenceId\" --session-date-kst \"$SSM_SessionDateKst\" --release-id \"$SSM_ReleaseId\" --desired-state \"$SSM_DesiredState\" --image \"$SSM_ImageDigest\" --source-sha \"$SSM_SourceSha\" --activation-id \"$SSM_ActivationId\" --compose-shadow-sha256 \"$SSM_ComposeShadowSha256\" --expected-worker-sha256 \"$SSM_ExpectedWorkerSha256\" --expected-validator-sha256 \"$SSM_ExpectedValidatorSha256\" --expected-shadow-document-sha256 \"$SSM_ExpectedShadowDocumentSha256\" --expected-instance-id \"$SSM_ExpectedInstanceId\" --region \"$SSM_Region\""
       ]
     }

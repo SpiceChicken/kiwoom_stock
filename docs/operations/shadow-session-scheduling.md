@@ -121,6 +121,15 @@ Submitter가 admission을 거부하면 이제 `REJ#<occurrence_id>/META`에
 Lambda 구조화 로그가 다음 개장일의 “스케줄 호출은 있었지만 SSM이 없었다”를
 구분하는 기준이다. 이 경로는 실거래 capability를 추가하지 않는다.
 
+2026-08-27 KST start acceptance에서는 Scheduler와 Submitter Lambda가 정상적으로
+SSM command를 제출했지만, activation document의 첫 셸 명령이 Linux 기본
+`/bin/sh`에서 Bash 전용 `set -Eeuo pipefail`을 사용해 exit code 2로 종료되었다.
+호스트 fence·worker·Kiwoom 호출 전 단계의 실패라 외부 주문 side effect는 없었다.
+문서는 POSIX 호환 `set -eu`로 수정되어 AWS 기본/latest v2로 read-back되었고,
+계약 검사와 회귀 테스트도 추가했다. 이미 생성된 occurrence를 중복 실행하지
+않으며 다음 평일 스케줄에서 수정 문서의 SSM 성공과 host/evidence closure를
+확인한다.
+
 2026-08-25 KST에는 이 rejection audit 자체가 Submitter role의 누락된
 `dynamodb:PutItem` 권한 때문에 실패했다. 그 결과 start/stop은 Lambda retry 후
 종료되었고 SSM은 호출되지 않았다. PR #122에서 `dynamodb:PutItem`을 C* table

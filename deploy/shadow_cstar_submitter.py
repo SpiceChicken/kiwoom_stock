@@ -107,6 +107,124 @@ def _reject(message: str) -> SubmitterError:
     return SubmitterError(message)
 
 
+def _ledger_error_details(error: Exception) -> dict[str, object]:
+    """Return bounded, non-secret details for a cloud ledger exception."""
+
+    details: dict[str, object] = {
+        "error_type": type(error).__name__,
+    }
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return details
+    error_value = response.get("Error")
+    if isinstance(error_value, Mapping):
+        code = error_value.get("Code")
+        if isinstance(code, str):
+            details["error_code"] = code[:128]
+    cancellation_reasons = response.get("CancellationReasons")
+    if isinstance(cancellation_reasons, list):
+        reasons: list[dict[str, str]] = []
+        for value in cancellation_reasons[:100]:
+            if not isinstance(value, Mapping):
+                continue
+            reason: dict[str, str] = {}
+            reason_code = value.get("Code")
+            reason_message = value.get("Message")
+            if isinstance(reason_code, str):
+                reason["code"] = reason_code[:128]
+            if isinstance(reason_message, str):
+                reason["message"] = reason_message[:256]
+            if reason:
+                reasons.append(reason)
+        details["cancellation_reasons"] = reasons
+    return details
+
+
+def _log_ledger_failure(operation: str, error: Exception) -> None:
+    """Log only bounded service metadata; never log request values or secrets."""
+
+    print(json.dumps({
+        "event": "cstar-ledger-failure",
+        "operation": operation,
+        **_ledger_error_details(error),
+    }, sort_keys=True, separators=(",", ":")))
+
+
+def _ledger_request_shape(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Describe only serialized AttributeValue types for a failed request."""
+
+    result: list[dict[str, object]] = []
+    for transaction in items:
+        operation = next(iter(transaction), "unknown")
+        raw_body = transaction.get(operation)
+        if not isinstance(raw_body, Mapping):
+            result.append({"operation": operation, "body": type(raw_body).__name__})
+            continue
+        body = dict(raw_body)
+        entry: dict[str, object] = {"operation": operation}
+        for field in ("Item", "Key", "ExpressionAttributeValues"):
+            value = body.get(field)
+            if not isinstance(value, Mapping):
+                continue
+            entry[field] = {
+                str(key): next(iter(attribute), "unknown")
+                if isinstance(attribute, Mapping)
+                else type(attribute).__name__
+                for key, attribute in value.items()
+            }
+        result.append(entry)
+    return result
+
+
+def _ledger_transport_shape(client: Any, wire_items: list[dict[str, object]]) -> object:
+    """Inspect botocore's serialized JSON shape without exposing values."""
+
+    try:
+        serializer = client._serializer
+        operation_model = client._service_model.operation_model("TransactWriteItems")
+        request = serializer.serialize_to_request(
+            {"TransactItems": wire_items}, operation_model
+        )
+        body = request.get("body")
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        decoded = json.loads(body) if isinstance(body, str) else body
+        if not isinstance(decoded, Mapping):
+            return {"body": type(decoded).__name__}
+        transactions = decoded.get("TransactItems")
+        if not isinstance(transactions, list):
+            return {"transactions": type(transactions).__name__}
+        return _ledger_request_shape(transactions)
+    except Exception as error:
+        return {"error_type": type(error).__name__}
+
+
+def _ledger_body_shape(body: object) -> object:
+    """Describe AttributeValue types from an already serialized HTTP body."""
+
+    try:
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        decoded = json.loads(body) if isinstance(body, str) else body
+        if not isinstance(decoded, Mapping):
+            return {"body": type(decoded).__name__}
+        transactions = decoded.get("TransactItems")
+        if not isinstance(transactions, list):
+            return {"transactions": type(transactions).__name__}
+        return _ledger_request_shape(transactions)
+    except Exception as error:
+        return {"error_type": type(error).__name__}
+
+
+def _botocore_version() -> str:
+    try:
+        import botocore
+    except ImportError:
+        return "unknown"
+    value = getattr(botocore, "__version__", "unknown")
+    return value if isinstance(value, str) else "unknown"
+
+
 def _release_id(value: Mapping[str, object]) -> str:
     item = value.get("release_id")
     if not isinstance(item, str) or len(item) != 64 or any(c not in "0123456789abcdef" for c in item):
@@ -167,6 +285,7 @@ class CStarSubmitter:
                 release=release,
             )
         except Exception as error:
+            _log_ledger_failure("prepare_occurrence", error)
             raise _reject("ledger failure") from error
         state = str(prepared.get("submission_state", ""))
         if state in {"SUBMITTED", "AMBIGUOUS", "REJECTED"}:
@@ -202,6 +321,7 @@ class CStarSubmitter:
                 attempt_number=int(str(payload["attempt_number"])),
             )
         except Exception as error:
+            _log_ledger_failure("record_command", error)
             self._mark_ambiguous(occurrence_id, "record_failed")
             return SubmissionResult(
                 occurrence_id=occurrence_id,
@@ -238,12 +358,16 @@ class CStarSubmitter:
             command_id=None,
             reason=reason,
         )
-        self.ledger.record_rejection(
-            occurrence_id=result.occurrence_id,
-            payload=payload,
-            reason=reason,
-            release_id=release_id,
-        )
+        try:
+            self.ledger.record_rejection(
+                occurrence_id=result.occurrence_id,
+                payload=payload,
+                reason=reason,
+                release_id=release_id,
+            )
+        except Exception as error:
+            _log_ledger_failure("record_rejection", error)
+            raise
         return result
 
 
@@ -393,15 +517,27 @@ class DynamoCStarLedger:
             raise SubmitterError("table name invalid")
         self.table_name = table_name
         self.table = client
-        self.client = getattr(getattr(client, "meta", None), "client", client)
+        self._resource_table = (
+            client
+            if type(client).__module__.startswith("boto3.resources.")
+            and hasattr(client, "meta")
+            else None
+        )
+        self.client = (
+            self._resource_table.meta.client
+            if self._resource_table is not None
+            else client
+        )
 
     @staticmethod
     def _key(pk: str, sk: str) -> dict[str, str]:
         return {"PK": pk, "SK": sk}
 
     def _get(self, pk: str, sk: str) -> dict[str, object] | None:
-        if hasattr(self.table, "meta"):
-            response = self.table.get_item(Key=self._key(pk, sk), ConsistentRead=True)
+        if self._resource_table is not None:
+            response = self._resource_table.get_item(
+                Key=self._key(pk, sk), ConsistentRead=True
+            )
         else:
             response = self.client.get_item(
                 TableName=self.table_name,
@@ -412,9 +548,15 @@ class DynamoCStarLedger:
         return dict(item) if isinstance(item, Mapping) else None
 
     def _transact(self, items: list[dict[str, object]]) -> None:
-        from boto3.dynamodb.types import TypeSerializer
+        # A Table resource installs a DynamoDB transformation handler on its
+        # backing client.  It expects native Python values and serializes them
+        # once.  A standalone low-level client has no such handler and expects
+        # AttributeValue maps, so it needs explicit serialization here.
+        serializer = None
+        if self._resource_table is None:
+            from boto3.dynamodb.types import TypeSerializer
 
-        serializer = TypeSerializer()
+            serializer = TypeSerializer()
         wire_items: list[dict[str, object]] = []
         for transaction in items:
             operation = next(iter(transaction))
@@ -422,23 +564,58 @@ class DynamoCStarLedger:
             if not isinstance(raw_body, Mapping):
                 raise SubmitterError("transaction shape invalid")
             body = dict(raw_body)
-            if "Item" in body:
+            if serializer is not None and "Item" in body:
                 body["Item"] = {
                     key: serializer.serialize(item)
                     for key, item in body["Item"].items()
                 }
-            if "Key" in body:
+            if serializer is not None and "Key" in body:
                 body["Key"] = {
                     key: serializer.serialize(item)
                     for key, item in body["Key"].items()
                 }
-            if "ExpressionAttributeValues" in body:
+            if serializer is not None and "ExpressionAttributeValues" in body:
                 body["ExpressionAttributeValues"] = {
                     key: serializer.serialize(item)
                     for key, item in body["ExpressionAttributeValues"].items()
                 }
             wire_items.append({operation: body})
-        self.client.transact_write_items(TransactItems=wire_items)
+        transport_body_shape: dict[str, object] = {}
+        events = getattr(getattr(self.client, "meta", None), "events", None)
+        event_id = f"kiwoom-cstar-ledger-shape-{id(wire_items)}"
+
+        def capture_transport_body(*args: object, **kwargs: object) -> None:
+            params = kwargs.get("params")
+            if params is None and len(args) >= 2:
+                params = args[1]
+            if isinstance(params, Mapping):
+                transport_body_shape["value"] = _ledger_body_shape(params.get("body"))
+
+        if events is not None:
+            events.register(
+                "before-call.dynamodb.TransactWriteItems",
+                capture_transport_body,
+                unique_id=event_id,
+            )
+        try:
+            self.client.transact_write_items(TransactItems=wire_items)
+        except Exception:
+            print(json.dumps({
+                "event": "cstar-ledger-request-shape",
+                "botocore_version": _botocore_version(),
+                "client_type": type(self.client).__name__,
+                "table_type": type(self.table).__name__,
+                "transactions": _ledger_request_shape(wire_items),
+                "transport_transactions": _ledger_transport_shape(self.client, wire_items),
+                "http_transactions": transport_body_shape.get("value", "unavailable"),
+            }, sort_keys=True, separators=(",", ":")))
+            raise
+        finally:
+            if events is not None:
+                events.unregister(
+                    "before-call.dynamodb.TransactWriteItems",
+                    unique_id=event_id,
+                )
 
     def get_generation(self, generation: str) -> Mapping[str, object] | None:
         return self._get(f"GEN#{generation}", "META")
@@ -570,8 +747,8 @@ class DynamoCStarLedger:
                 ":submitting": "SUBMITTING",
             },
         }
-        if hasattr(self.table, "meta"):
-            self.table.update_item(**kwargs)
+        if self._resource_table is not None:
+            self._resource_table.update_item(**kwargs)
             return
         from boto3.dynamodb.types import TypeSerializer
 

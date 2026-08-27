@@ -77,6 +77,10 @@ def check(root: Path) -> tuple[int, str]:
         raise ContractError("activation desired state")
     activation_script = _script(activation, ACTIVATION)
     evidence_script = _script(evidence, EVIDENCE)
+    if not activation_script.startswith("set -eu\n"):
+        raise ContractError("activation shell must be POSIX-compatible")
+    if "pipefail" in activation_script or "set -E" in activation_script:
+        raise ContractError("activation shell must not require bash")
     if "/usr/local/libexec/kiwoom-shadow-schedule-fence.py activate" not in activation_script:
         raise ContractError("activation fence boundary")
     if "/usr/local/sbin/kiwoom-shadow-worker" in activation_script:
