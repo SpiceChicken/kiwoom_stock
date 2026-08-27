@@ -17,7 +17,7 @@
     "inputs": {
       "timeoutSeconds": "120",
       "runCommand": [
-        "set -Eeuo pipefail",
+        "set -eu",
         "exec 9>/run/lock/kiwoom-stock-shadow.lock",
         "flock -x -w 30 9 || exit 75",
         "exec /usr/local/libexec/kiwoom-shadow-evidence-export.py --session-date-kst \"$SSM_SessionDateKst\" --occurrence-id \"$SSM_OccurrenceId\" --release-id \"$SSM_ReleaseId\" --offset \"$SSM_EvidenceOffset\" --length \"$SSM_EvidenceLength\" --expected-instance-id \"$SSM_ExpectedInstanceId\" --region \"$SSM_Region\""
