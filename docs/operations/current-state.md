@@ -100,7 +100,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 |---|---|
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
-| C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v1, both Active |
+| C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v2, both Active |
 | C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 6, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
@@ -154,6 +154,10 @@ observer/reconciliation closure evidence를 별도 확인한다.
   재발을 막도록 C* SSM contract checker와 회귀 테스트를 보강했다. 로컬 검증 후
   AWS `KiwoomStock-ShadowCStarActivation` default/latest를 v2로 갱신하고,
   실제 문서 내용에서 `set -eu`를 read-back했다.
+- 증거 수집 문서도 동일한 전용 deployer 역할로 AWS `KiwoomStock-ShadowEvidenceExport`
+  default/latest v2로 갱신했으며, live 문서 내용의 SHA-256과 저장소 canonical
+  문서가 일치함을 read-back했다. 전용 역할은 이 문서의 버전 갱신과 C* schedule
+  read-back만 허용하고, worker 실행·SendCommand·parameter·log·IAM 변경은 허용하지 않는다.
 - 오늘 start occurrence는 이미 `SUBMITTED`로 기록된 command이므로 중복 start를
   수동 발행하지 않는다. 다음 평일 acceptance에서 v2 문서의 SSM 성공, host fence,
   paper shadow terminal 및 observer closure를 순서대로 확인한다.
