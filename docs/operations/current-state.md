@@ -30,9 +30,9 @@ clean-rebuild 전의 기존 호스트는 2026-08-15 KST에 종료했고, 현재 
 ## 현재 단일 운영 호스트
 
 기존 live host를 대체한 단일 clean-rebuild 호스트다. 호스트 자체의
-cloud-init/SSH/Docker/SSM 검증, 설정 전용 production-check와 shadow artifact
-rollout/read-back을 완료했으며, shadow worker와 실제 credential은 시작하거나
-사용하지 않았다.
+cloud-init completion marker/SSH/Docker/SSM 검증, 설정 전용 production-check와
+shadow artifact rollout/read-back을 완료했으며, shadow worker와 실제 credential은
+시작하거나 사용하지 않았다.
 
 | 항목 | 현재 값/판정 |
 |---|---|
@@ -43,8 +43,19 @@ rollout/read-back을 완료했으며, shadow worker와 실제 credential은 시�
 | Root volume | 8 GiB gp3, encrypted; exact volume ID는 private inventory |
 | Key pair | repository 밖의 승인된 키; 이름과 경로는 공개 문서에 기록하지 않음 |
 | State file | repository 밖, mode `0600`; 경로는 공개 문서에 기록하지 않음 |
-| Host validation | cloud-init complete, `sshd -t` valid, Docker active, snap `amazon-ssm-agent` active; bounded shadow session completed with terminal evidence |
+| Host validation | `cloud-init-complete` marker present, `sshd -t` valid, Docker active, snap `amazon-ssm-agent` active; bounded shadow session completed with terminal evidence |
 | Kiwoom REST API allowlist | 고정 운영 egress 주소가 등록됨; exact 주소는 private inventory |
+
+2026-08-27 KST 직접 SSH read-back에서 현재 호스트의 `cloud-init status`는
+`error - done`으로 남아 있음을 확인했다. 최초 user-data가 `/run/sshd`를 생성하기
+전에 `sshd -t`를 실행해 `cloud-final`이 실패한 historical 상태이며, 현재 호스트에는
+completion marker가 있고 `/run/sshd`, SSH, Docker, SSM Agent가 정상이다. 저장소의
+현재 [cloud-init script](../../deploy/ec2/cloud-init-ubuntu-24.04.sh)는 이 순서를
+수정해 `/run/sshd`를 먼저 생성한다. 기존 호스트에서 cloud-init을 clean/re-run하지
+않은 이유는 bootstrap 전체를 재실행해 서비스와 호스트 설정을 다시 변경할 위험이
+있기 때문이다. 이 historical 상태는 현재 C* Scheduler 실행을 차단하지 않지만,
+호스트 재생성 acceptance에서는 `cloud-init status`와 completion marker를 모두
+확인한다.
 
 2026-08-19 KST 첫 bounded shadow session 후 직접 SSH read-back 결과는 다음과 같다.
 컨테이너는 worker deadline에 exit code 0으로 종료되었고,
