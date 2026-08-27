@@ -32,6 +32,13 @@ def test_activation_document_does_not_expose_legacy_telemetry_or_worker_directly
     assert "/usr/local/libexec/kiwoom-shadow-schedule-fence.py activate" in text
 
 
+def test_activation_document_uses_posix_shell_options_for_ssm_run_shell_script():
+    text = (ROOT / "deploy/ssm/shadow-cstar-activation-document.yaml").read_text()
+    assert '"set -eu"' in text
+    assert "pipefail" not in text
+    assert '"set -E' not in text
+
+
 def test_evidence_document_has_no_activation_or_fence_mutation_boundary():
     text = (ROOT / "deploy/ssm/shadow-evidence-export-document.yaml").read_text()
     assert "shadow-schedule-fence.py" not in text
