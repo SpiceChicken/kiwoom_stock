@@ -330,6 +330,12 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   유지됐으며, 최종 role은 `kiwoom-local-provisioner`다. account/ARN은
   공개 문서에 기록하지 않는다. 절차는
   [provisioner bootstrap 가이드](local-provisioner-bootstrap.md)에 기록했다;
+- `kiwoom-cstar-document-deployer` 역할·trust·inline policy를 추가하고,
+  `kiwoom-local-user`의 AssumeRole 대상에 exact 역할을 추가했다. 이 역할은
+  `KiwoomStock-ShadowEvidenceExport` 문서의 version update/default 전환과 C*
+  schedule read-back만 허용하며 worker activation, SendCommand, parameter,
+  log, IAM 변경 권한은 없다. 저장소 템플릿은
+  `cstar-document-deployer-*.json.example`이다;
 - 새 실제 Kiwoom 인증/시세 검증은 별도 명시적 read-only window 없이는 수행하지
   않는다. 과거 read-only evidence가 live worker·계좌·주문 capability를 승인하는
   근거가 되지는 않는다.

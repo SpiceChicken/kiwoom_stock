@@ -213,6 +213,15 @@ def test_local_user_can_only_assume_exact_local_roles():
         ),
     }
     assert statements[2] == {
+        "Sid": "AssumeExactCStarDocumentDeployerRole",
+        "Effect": "Allow",
+        "Action": ["sts:AssumeRole"],
+        "Resource": (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/"
+            "kiwoom-cstar-document-deployer"
+        ),
+    }
+    assert statements[3] == {
         "Sid": "AuthorizeExactSameDeviceLocalLogin",
         "Effect": "Allow",
         "Action": [
@@ -224,6 +233,54 @@ def test_local_user_can_only_assume_exact_local_roles():
             "oauth2/public-client/localhost"
         ),
     }
+
+
+def test_cstar_document_deployer_trust_requires_exact_user_and_temporary_session():
+    statement = _statements(
+        _policy("cstar-document-deployer-trust-policy.json.example")
+    )[0]
+
+    assert statement["Principal"] == {
+        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
+    }
+    assert statement["Action"] == "sts:AssumeRole"
+    assert statement["Condition"] == {"Null": {"aws:TokenIssueTime": "false"}}
+
+
+def test_cstar_document_deployer_is_limited_to_evidence_document_and_schedules():
+    statements = _statements(
+        _policy("cstar-document-deployer-policy.json.example")
+    )
+    assert statements == [
+        {
+            "Sid": "ManageExactCStarEvidenceDocument",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:DescribeDocument",
+                "ssm:GetDocument",
+                "ssm:ListDocumentVersions",
+                "ssm:UpdateDocument",
+                "ssm:UpdateDocumentDefaultVersion",
+            ],
+            "Resource": (
+                "arn:aws:ssm:<AWS_REGION>:<AWS_ACCOUNT_ID>:document/"
+                "KiwoomStock-ShadowEvidenceExport"
+            ),
+        },
+        {
+            "Sid": "ReadExactCStarSchedules",
+            "Effect": "Allow",
+            "Action": ["scheduler:GetSchedule"],
+            "Resource": [
+                "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/"
+                "kiwoom-shadow-cstar/kiwoom-shadow-cstar-start",
+                "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/"
+                "kiwoom-shadow-cstar/kiwoom-shadow-cstar-stop",
+                "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/"
+                "kiwoom-shadow-cstar/kiwoom-shadow-cstar-reconcile",
+            ],
+        },
+    ]
 
 
 def test_local_operator_trust_requires_exact_user_and_temporary_session():

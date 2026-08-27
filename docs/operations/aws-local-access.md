@@ -17,7 +17,7 @@ kiwoom-local-user (IAM console user)
   ├─ console password + MFA
   ├─ access key 없음
   ├─ 서울 리전 same-device `aws login` OAuth 권한
-  └─ kiwoom-local-operator·kiwoom-local-provisioner만 AssumeRole
+  └─ kiwoom-local-operator·kiwoom-local-provisioner·kiwoom-cstar-document-deployer만 AssumeRole
 
 kiwoom-local-operator (IAM role)
   ├─ EC2/SSM 상태와 기존 command 결과 조회
@@ -29,6 +29,11 @@ kiwoom-local-provisioner (IAM role, 관리자 1회 bootstrap 후 사용)
   ├─ reviewed EC2 clean-rebuild의 서울 리전 인프라 생성·구성·read-back
   ├─ 정확한 kiwoom-stock-ec2-role만 iam:PassRole
   └─ IAM 변경, 삭제/종료/release, SSM shell/command, Parameter Store 조회 권한 없음
+
+kiwoom-cstar-document-deployer (IAM role, 문서 배포 전용)
+  ├─ C* evidence SSM 문서 1개의 조회·버전 생성·default 전환
+  ├─ C* start/stop/reconciliation schedule 3개의 조회
+  └─ EC2, SendCommand, Parameter Store, Logs, IAM 변경 권한 없음
 
 GitHub OIDC roles
   ├─ production-check·shadow rollout·shadow activation의 보호된 SSM command
@@ -82,6 +87,8 @@ rollout 실패를 로컬 `send-command`, 사람용 Session Manager 또는 장기
 - `deploy/iam/local-operator-policy.json.example`
 - `deploy/iam/local-provisioner-trust-policy.json.example`
 - `deploy/iam/local-provisioner-policy.json.example`
+- `deploy/iam/cstar-document-deployer-trust-policy.json.example`
+- `deploy/iam/cstar-document-deployer-policy.json.example`
 
 렌더링 파일은 Git 저장소 밖의 임시 디렉터리에 둔다. 아래 값만 치환한다.
 
@@ -109,8 +116,14 @@ root 로그인은 이 단계에서만 사용한다. IAM console에서 다음 순
    요구하므로 장기 Access Key로는 역할을 맡을 수 없다.
 6. 역할의 Maximum session duration을 `12 hours`로 설정한다.
 7. 역할에 렌더링한 `local-operator-policy`만 inline policy로 연결한다.
-8. 사용자로 처음 로그인해 비밀번호를 변경하고 MFA를 등록한다.
-9. root에서 로그아웃한다.
+8. 렌더링한 `cstar-document-deployer-trust-policy`로
+   `kiwoom-cstar-document-deployer`를 만들고, `cstar-document-deployer-policy`만
+   inline policy로 연결한다. 이 역할은 `KiwoomStock-ShadowEvidenceExport` 문서의
+   version update/default 전환과 C* schedule read-back만 허용한다.
+9. `local-user-assume-role-policy`의 exact third-role statement가 위 역할을
+   가리키는지 read-back한다.
+10. 사용자로 처음 로그인해 비밀번호를 변경하고 MFA를 등록한다.
+11. root에서 로그아웃한다.
 
 비밀번호나 MFA 코드를 CLI 인자, shell history, 문서, GitHub Secret에 입력하지 않는다.
 
@@ -152,6 +165,14 @@ role_session_name = kiwoom-local
 duration_seconds = 3600
 region = ap-northeast-2
 output = json
+
+[profile kiwoom-cstar-deployer]
+role_arn = arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-cstar-document-deployer
+source_profile = kiwoom-login
+role_session_name = kiwoom-cstar-deployer
+duration_seconds = 3600
+region = ap-northeast-2
+output = json
 ```
 
 처음에는 `kiwoom-login`에 `login_session` 항목이 없다. 다음 명령으로 IAM 사용자
@@ -184,14 +205,31 @@ key를 출력하지 않는다.
 arn:aws:sts::<AWS_ACCOUNT_ID>:assumed-role/kiwoom-local-operator/kiwoom-local
 ```
 
+C* evidence 문서 배포가 필요한 경우에만 별도 profile을 사용한다.
+
+```bash
+aws sts get-caller-identity --profile kiwoom-cstar-deployer
+aws ssm describe-document \
+  --name KiwoomStock-ShadowEvidenceExport \
+  --region ap-northeast-2 \
+  --profile kiwoom-cstar-deployer
+```
+
+정상 deployer caller ARN은 다음 형태다.
+
+```text
+arn:aws:sts::<AWS_ACCOUNT_ID>:assumed-role/kiwoom-cstar-document-deployer/kiwoom-cstar-deployer
+```
+
 `arn:aws:iam::<AWS_ACCOUNT_ID>:root`가 나오면 잘못된 profile이므로 즉시 중단한다.
 
 EC2 재생성까지 로컬에서 자동화해야 하면 관리자 세션에서
 [로컬 provisioner 1회 bootstrap](local-provisioner-bootstrap.md)을 먼저 수행한다.
 현재 `kiwoom-local`과 `kiwoom-admin-bootstrap`은 `kiwoom-local-user` 및
-`kiwoom-local-operator`만 사용할 수 있으므로 이 bootstrap을 직접 수행할 권한이
-없다. bootstrap 뒤에는 별도 `kiwoom-provisioner` profile을 사용하고,
-일상 진단에는 기존 `kiwoom-local`을 계속 사용한다.
+`kiwoom-local-operator`를 사용하고, C* 문서 배포는 별도
+`kiwoom-cstar-deployer` profile을 사용한다. provisioner bootstrap은 별도
+`kiwoom-provisioner` profile을 사용하고, 일상 진단에는 기존 `kiwoom-local`을
+계속 사용한다.
 
 ## 4. 허용·거부 검증
 
@@ -220,6 +258,10 @@ SSH 연결은 실제 주문·외부 API 호출을 하지 않는 shell 연결만 
 - `aws ssm get-parameter --name /kiwoom-stock/prod/oauth/app-key --with-decryption ...`
 - 사람용 `ssm start-session` 사용
 - `ssm send-command`
+
+`kiwoom-cstar-deployer`는 위 거부 목록의 예외로 evidence 문서 version update와
+default 전환만 허용하며, worker activation이나 evidence command 실행 권한은
+갖지 않는다.
 
 Parameter Store 거부 검사에서 오류 메시지만 확인하고 응답이나 shell trace를
 artifact에 저장하지 않는다.
