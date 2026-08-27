@@ -130,10 +130,11 @@ SSM command를 제출했지만, activation document의 첫 셸 명령이 Linux �
 않으며 다음 평일 스케줄에서 수정 문서의 SSM 성공과 host/evidence closure를
 확인한다.
 
-이후 Observer v4를 배포해 reconciliation이 `PENDING/IN_PROGRESS` command의
-`GetCommandInvocation` 상태를 직접 읽도록 보강했다. status event가 누락되어도
-기존 occurrence ID에 상태를 적용하며, command index의 audit 행과 occurrence
-`META` 행이 함께 조회되는 경우에도 `META`만 사용한다. 오늘 실패 occurrence는
+이후 Observer v5를 배포해 reconciliation이 `PENDING/IN_PROGRESS` command의
+`GetCommandInvocation` 상태를 직접 읽도록 보강하고, terminal activation/evidence
+failure에 `cstar_observer_alerted` metric과 metrics-only alarm을 연결했다. status
+event가 누락되어도 기존 occurrence ID에 상태를 적용하며, command index의 audit 행과
+occurrence `META` 행이 함께 조회되는 경우에도 `META`만 사용한다. 오늘 실패 occurrence는
 새 activation command 없이 `FAILED/ALERTED`로 확정했다.
 
 2026-08-25 KST에는 이 rejection audit 자체가 Submitter role의 누락된
