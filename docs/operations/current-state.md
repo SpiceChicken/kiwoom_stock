@@ -90,7 +90,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
 | C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v1, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 5, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 6, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -108,7 +108,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
   뒤에만 다시 켠다.
 - `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
   바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias는 version 7,
-  observer alias는 version 5다.
+  observer alias는 version 6이다.
 
 2026-08-27 KST DynamoDB transaction remediation read-back:
 
@@ -153,7 +153,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
   실제 상태를 읽지 않아, status event가 누락되면 `PENDING/UNKNOWN/OPEN` 상태가
   남을 수 있었다. 또한 command index에는 occurrence `META`와 command audit 행이
   함께 존재했다.
-- Observer v5는 v4의 `PENDING/IN_PROGRESS` command reconciliation을 유지하면서
+- Observer v6는 v5의 `PENDING/IN_PROGRESS` command reconciliation을 유지하면서
   terminal activation/evidence failure metric과 alarm을 추가했다. `PENDING/IN_PROGRESS` command에 대해
   `GetCommandInvocation`을 조회하고, reconciliation이 이미 보유한 occurrence ID를
   명시해 상태를 적용한다. command index fallback도 `META` 행만 선택하도록

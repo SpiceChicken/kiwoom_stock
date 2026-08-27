@@ -130,7 +130,7 @@ SSM command를 제출했지만, activation document의 첫 셸 명령이 Linux �
 않으며 다음 평일 스케줄에서 수정 문서의 SSM 성공과 host/evidence closure를
 확인한다.
 
-이후 Observer v5를 배포해 reconciliation이 `PENDING/IN_PROGRESS` command의
+이후 Observer v6를 배포해 reconciliation이 `PENDING/IN_PROGRESS` command의
 `GetCommandInvocation` 상태를 직접 읽도록 보강하고, terminal activation/evidence
 failure에 `cstar_observer_alerted` metric과 metrics-only alarm을 연결했다. status
 event가 누락되어도 기존 occurrence ID에 상태를 적용하며, command index의 audit 행과
