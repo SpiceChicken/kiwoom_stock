@@ -90,7 +90,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
 | C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v1, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 2, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 4, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -108,7 +108,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
   뒤에만 다시 켠다.
 - `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
   바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias는 version 7,
-  observer alias는 version 2다.
+  observer alias는 version 4다.
 
 2026-08-27 KST DynamoDB transaction remediation read-back:
 
@@ -146,6 +146,20 @@ observer/reconciliation closure evidence를 별도 확인한다.
 - 오늘 start occurrence는 이미 `SUBMITTED`로 기록된 command이므로 중복 start를
   수동 발행하지 않는다. 다음 평일 acceptance에서 v2 문서의 SSM 성공, host fence,
   paper shadow terminal 및 observer closure를 순서대로 확인한다.
+
+2026-08-27 KST observer reconciliation remediation:
+
+- Observer는 기존에 reconciliation 대상 occurrence를 조회만 하고 SSM command의
+  실제 상태를 읽지 않아, status event가 누락되면 `PENDING/UNKNOWN/OPEN` 상태가
+  남을 수 있었다. 또한 command index에는 occurrence `META`와 command audit 행이
+  함께 존재했다.
+- Observer v4는 `PENDING/IN_PROGRESS` command에 대해
+  `GetCommandInvocation`을 조회하고, reconciliation이 이미 보유한 occurrence ID를
+  명시해 상태를 적용한다. command index fallback도 `META` 행만 선택하도록
+  보강했다.
+- 오늘 실패 command를 새 SSM 명령 없이 reconciliation 경로로 검증했고,
+  occurrence 원장을 `FAILED/FAILED/ALERTED`로 확정했다. 이후 같은 항목은 due
+  대상에서 제거된다.
 
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
