@@ -113,6 +113,15 @@ def test_all_scheduler_dlqs_have_metrics_only_nonempty_alarms():
         assert "AlarmActions" not in properties
 
 
+def test_observer_alert_alarm_is_metrics_only():
+    properties = load()["Resources"]["ObserverAlertAlarm"]["Properties"]
+    assert properties["Namespace"] == "Kiwoom/ShadowCStar"
+    assert properties["MetricName"] == "cstar_observer_alerted"
+    assert properties["Threshold"] == 1
+    assert properties["TreatMissingData"] == "notBreaching"
+    assert "AlarmActions" not in properties
+
+
 def test_lambda_versions_change_when_immutable_package_key_changes():
     resources = load()["Resources"]
     assert resources["SubmitterVersion"]["Properties"]["Description"] == {"Ref": "SubmitterPackageKey"}

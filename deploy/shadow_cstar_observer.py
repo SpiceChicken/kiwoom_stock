@@ -243,6 +243,25 @@ class CStarObserver:
         )
         evidence_requested = False
         reason: str | None = None
+        if status in TERMINAL_STATUS_MAP and self.sink is not None:
+            try:
+                self.sink.notify(
+                    category="observer_alert",
+                    message=json.dumps(
+                        {
+                            "occurrence_id": occurrence_id,
+                            "command_id": command_id,
+                            "document": document,
+                            "status": status,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            except Exception:
+                # The terminal state is durable already; notification failure
+                # must not turn a known SSM failure into a retryable event.
+                reason = "observer_alert_failed"
         if status == "Success" and occurrence.get("phase") == "stop":
             if self.evidence_sender is not None:
                 try:
@@ -471,6 +490,7 @@ class Boto3EvidenceSink:
         metric = {
             "evidence_exported": "cstar_evidence_exported",
             "evidence_failure": "cstar_observer_alerted",
+            "observer_alert": "cstar_observer_alerted",
         }.get(category)
         if metric is None:
             raise ObserverError("notification category invalid")

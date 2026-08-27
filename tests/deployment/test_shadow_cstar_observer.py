@@ -81,6 +81,36 @@ def test_terminal_failure_never_becomes_runtime_success(status):
     assert result.closure_state == "ALERTED"
 
 
+def test_activation_failure_emits_observer_alert_after_terminal_state_is_saved():
+    class Sink:
+        def __init__(self):
+            self.notifications = []
+
+        def notify(self, **kwargs):
+            self.notifications.append(kwargs)
+
+    sink = Sink()
+    ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
+    result = CStarObserver(ledger, sink=sink).process_ssm_event(_event("Failed"))
+    assert result.reason is None
+    assert ledger.occurrences[OCCURRENCE["occurrence_id"]]["closure_state"] == "ALERTED"
+    assert sink.notifications == [{
+        "category": "observer_alert",
+        "message": '{"command_id":"command-1","document":"KiwoomStock-ShadowCStarActivation","occurrence_id":"' + "a" * 64 + '","status":"Failed"}',
+    }]
+
+
+def test_activation_failure_survives_alert_sink_failure():
+    class Sink:
+        def notify(self, **kwargs):
+            raise RuntimeError("metric unavailable")
+
+    ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
+    result = CStarObserver(ledger, sink=Sink()).process_ssm_event(_event("Failed"))
+    assert result.reason == "observer_alert_failed"
+    assert ledger.occurrences[OCCURRENCE["occurrence_id"]]["closure_state"] == "ALERTED"
+
+
 def test_foreign_document_and_unknown_occurrence_are_rejected():
     ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
     with pytest.raises(ObserverError, match="foreign command"):
