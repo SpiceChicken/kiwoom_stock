@@ -263,6 +263,13 @@ valid terminal cleanup, evidence closure, and all side-effect flags remaining
 false. Missing event delivery is handled by reconciliation; no component
 automatically dispatches a replacement activation.
 
+After a successful stop command, the observer durably records the evidence
+command ID on the occurrence. Reconciliation polls that evidence command while
+the occurrence is `EVIDENCE_PENDING`, so a missing evidence status event cannot
+leave the session permanently unverified. Non-terminal evidence statuses remain
+pending; terminal evidence failures become `ALERTED` and emit the same bounded
+observer alert metric without retrying activation.
+
 When the observer confirms a terminal activation or evidence failure, it first
 persists the occurrence as `ALERTED` and then emits the
 `Kiwoom/ShadowCStar:cstar_observer_alerted` metric. The corresponding
