@@ -65,6 +65,8 @@ class ObserverLedger(Protocol):
 
 
 class EvidenceCommandSender(Protocol):
+    def read_status(self, *, command_id: str) -> str: ...
+
     def send_evidence(
         self,
         *,
@@ -263,6 +265,40 @@ class CStarObserver:
             command_state = str(occurrence.get("command_state", "UNKNOWN"))
             runtime_state = str(occurrence.get("runtime_state", "UNKNOWN"))
             closure_state = str(occurrence.get("closure_state", "OPEN"))
+            command_id = occurrence.get("command_id")
+            read_status = getattr(self.evidence_sender, "read_status", None)
+            if (
+                command_state in {"PENDING", "IN_PROGRESS"}
+                and isinstance(command_id, str)
+                and callable(read_status)
+            ):
+                try:
+                    status = read_status(command_id=command_id)
+                    return_event = {
+                        "detail-type": EVENT_TYPE,
+                        "source": "aws.ssm",
+                        "detail": {
+                            "command-id": command_id,
+                            "instance-id": INSTANCE_ID,
+                            "status": status,
+                            "document-name": "KiwoomStock-ShadowCStarActivation",
+                            "comment": f"cstar:{occurrence['occurrence_id']}",
+                        },
+                    }
+                    results.append(self.process_ssm_event(return_event))
+                    continue
+                except Exception:
+                    results.append(
+                        ObservationResult(
+                            occurrence_id=str(occurrence["occurrence_id"]),
+                            command_state=command_state,
+                            runtime_state=runtime_state,
+                            closure_state=closure_state,
+                            evidence_requested=False,
+                            reason="command_status_read_failed",
+                        )
+                    )
+                    continue
             results.append(
                 ObservationResult(
                     occurrence_id=str(occurrence["occurrence_id"]),
@@ -370,6 +406,16 @@ class Boto3EvidenceCommandSender:
         if not isinstance(command_id, str) or not command_id:
             raise ObserverError("evidence command id missing")
         return command_id
+
+    def read_status(self, *, command_id: str) -> str:
+        response = self.client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=self.instance_id,
+        )
+        status = response.get("Status") if isinstance(response, Mapping) else None
+        if not isinstance(status, str) or status not in COMMAND_STATUSES:
+            raise ObserverError("command status invalid")
+        return status
 
     def read_output(self, *, command_id: str) -> bytes:
         response = self.client.get_command_invocation(
@@ -525,12 +571,13 @@ class DynamoCStarObserverLedger:
         response = self.table.query(
             IndexName="command-index",
             KeyConditionExpression=Key("command_id").eq(command_id),
-            Limit=2,
+            Limit=100,
         )
         items = response.get("Items", []) if isinstance(response, Mapping) else []
-        if len(items) != 1 or not isinstance(items[0], Mapping):
-            return None
-        return dict(items[0])
+        for item in items:
+            if isinstance(item, Mapping) and item.get("SK") == "META":
+                return dict(item)
+        return None
 
     def advance(
         self,

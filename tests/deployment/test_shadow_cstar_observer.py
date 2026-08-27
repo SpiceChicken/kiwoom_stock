@@ -8,6 +8,7 @@ from deploy.shadow_cstar_observer import (
     Boto3EvidenceCommandSender,
     Boto3EvidenceSink,
     CStarObserver,
+    DynamoCStarObserverLedger,
     EVIDENCE_DOCUMENT_NAME,
     InMemoryObserverLedger,
     ObserverError,
@@ -101,6 +102,59 @@ def test_status_event_without_comment_uses_command_ledger_binding():
     assert result.occurrence_id == OCCURRENCE["occurrence_id"]
 
 
+def test_reconcile_reads_pending_ssm_status_when_event_is_missing():
+    class Sender:
+        def read_status(self, **kwargs):
+            assert kwargs == {"command_id": "command-1"}
+            return "Failed"
+
+    ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
+    result = CStarObserver(ledger, evidence_sender=Sender()).reconcile()
+    assert result[0].command_state == "FAILED"
+    assert result[0].runtime_state == "FAILED"
+    assert result[0].closure_state == "ALERTED"
+    assert ledger.occurrences[OCCURRENCE["occurrence_id"]]["closure_state"] == "ALERTED"
+
+
+def test_reconcile_binds_polled_status_to_known_occurrence():
+    class Sender:
+        def read_status(self, **kwargs):
+            return "Failed"
+
+    occurrence = {**OCCURRENCE, "occurrence_id": "d" * 64}
+    ledger = InMemoryObserverLedger({occurrence["occurrence_id"]: occurrence})
+    result = CStarObserver(ledger, evidence_sender=Sender()).reconcile()
+    assert result[0].occurrence_id == occurrence["occurrence_id"]
+    assert result[0].closure_state == "ALERTED"
+
+
+def test_dynamo_command_lookup_selects_occurrence_meta_over_command_audit_item():
+    class Table:
+        def query(self, **kwargs):
+            assert kwargs["IndexName"] == "command-index"
+            return {
+                "Items": [
+                    {
+                        "PK": "OCC#a" * 64,
+                        "SK": "CMD#command-1",
+                        "command_id": "command-1",
+                        "occurrence_id": "a" * 64,
+                    },
+                    {
+                        "PK": "OCC#" + "a" * 64,
+                        "SK": "META",
+                        "command_id": "command-1",
+                        "occurrence_id": "a" * 64,
+                        "phase": "start",
+                    },
+                ]
+            }
+
+    result = DynamoCStarObserverLedger(Table()).get_occurrence_by_command("command-1")
+    assert result is not None
+    assert result["SK"] == "META"
+
+
 def test_evidence_export_is_bounded_and_content_addressed():
     class Sink:
         def __init__(self):
@@ -143,6 +197,19 @@ def test_evidence_sender_uses_exact_document_and_no_activation_fields():
     assert command_id == "evidence-1"
     assert client.kwargs["DocumentName"] == EVIDENCE_DOCUMENT_NAME
     assert "DesiredState" not in client.kwargs["Parameters"]
+
+
+def test_evidence_sender_reads_bounded_ssm_status():
+    class Client:
+        def get_command_invocation(self, **kwargs):
+            assert kwargs == {
+                "CommandId": "command-1",
+                "InstanceId": "i-0e42e09d6c087ba29",
+            }
+            return {"Status": "Failed"}
+
+    sender = Boto3EvidenceCommandSender(Client())
+    assert sender.read_status(command_id="command-1") == "Failed"
 
 
 def test_metrics_only_sink_does_not_read_or_send_slack_secret():
