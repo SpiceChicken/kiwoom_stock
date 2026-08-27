@@ -158,6 +158,10 @@ observer/reconciliation closure evidence를 별도 확인한다.
   `GetCommandInvocation`을 조회하고, reconciliation이 이미 보유한 occurrence ID를
   명시해 상태를 적용한다. command index fallback도 `META` 행만 선택하도록
   보강했다.
+- stop 성공 후 evidence command ID도 occurrence에 영속 기록하며, `EVIDENCE_PENDING`
+  상태에서는 해당 command를 reconciliation으로 조회한다. evidence status event가
+  누락되거나 비종료 상태여도 조기 `ALERTED` 처리나 무한 미검증 상태가 발생하지
+  않으며, terminal evidence failure는 동일한 observer alert metric으로 드러난다.
 - 오늘 실패 command를 새 SSM 명령 없이 reconciliation 경로로 검증했고,
   occurrence 원장을 `FAILED/FAILED/ALERTED`로 확정했다. 이후 같은 항목은 due
   대상에서 제거된다.

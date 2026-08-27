@@ -35,6 +35,7 @@ COMMAND_STATUSES = {
     "Pending", "InProgress", "Delayed", "Success", "Failed",
     "TimedOut", "Cancelled", "Undeliverable", "Terminated",
 }
+NON_TERMINAL_STATUSES = {"Pending", "InProgress", "Delayed"}
 TERMINAL_STATUS_MAP = {
     "Success": "SUCCESS",
     "Failed": "FAILED",
@@ -53,6 +54,7 @@ class ObserverError(ValueError):
 class ObserverLedger(Protocol):
     def get_occurrence(self, occurrence_id: str) -> Mapping[str, object] | None: ...
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None: ...
+    def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None: ...
     def advance(
         self,
         *,
@@ -149,6 +151,34 @@ class CStarObserver:
         self.evidence_sender = evidence_sender
         self.sink = sink
 
+    def _notify_failure(
+        self,
+        *,
+        occurrence_id: str,
+        command_id: str,
+        document: str,
+        status: str,
+    ) -> str | None:
+        if self.sink is None:
+            return None
+        try:
+            self.sink.notify(
+                category="observer_alert",
+                message=json.dumps(
+                    {
+                        "occurrence_id": occurrence_id,
+                        "command_id": command_id,
+                        "document": document,
+                        "status": status,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        except Exception:
+            return "observer_alert_failed"
+        return None
+
     def process_ssm_event(self, event: Mapping[str, object]) -> ObservationResult:
         command_id, occurrence_id, status, document = _event_fields(event)
         if occurrence_id is None:
@@ -161,6 +191,12 @@ class CStarObserver:
         if occurrence is None:
             raise ObserverError("unknown occurrence")
         if document == EVIDENCE_DOCUMENT_NAME:
+            expected_command_id = occurrence.get("evidence_command_id")
+            if (
+                isinstance(expected_command_id, str)
+                and expected_command_id != command_id
+            ):
+                raise ObserverError("evidence command mismatch")
             current_command = str(occurrence.get("command_state", "SUCCESS"))
             current_runtime = str(occurrence.get("runtime_state", "STOPPED"))
             current_closure = str(occurrence.get("closure_state", "EVIDENCE_PENDING"))
@@ -180,6 +216,16 @@ class CStarObserver:
                 runtime_state=current_runtime,
                 closure_state=closure,
             )
+            reason: str | None = None
+            if status in NON_TERMINAL_STATUSES:
+                return ObservationResult(
+                    occurrence_id=occurrence_id,
+                    command_state=current_command,
+                    runtime_state=current_runtime,
+                    closure_state=closure,
+                    evidence_requested=False,
+                    reason="evidence_pending",
+                )
             if status == "Success":
                 try:
                     reader = getattr(self.evidence_sender, "read_output", None)
@@ -204,6 +250,12 @@ class CStarObserver:
                         closure_state="ALERTED",
                     )
                     closure = "ALERTED"
+                    reason = self._notify_failure(
+                        occurrence_id=occurrence_id,
+                        command_id=command_id,
+                        document=document,
+                        status=status,
+                    ) or "evidence_failed"
             else:
                 self.ledger.advance(
                     occurrence_id=occurrence_id,
@@ -212,13 +264,19 @@ class CStarObserver:
                     closure_state="ALERTED",
                 )
                 closure = "ALERTED"
+                reason = self._notify_failure(
+                    occurrence_id=occurrence_id,
+                    command_id=command_id,
+                    document=document,
+                    status=status,
+                ) or "evidence_failed"
             return ObservationResult(
                 occurrence_id=occurrence_id,
                 command_state=current_command,
                 runtime_state=current_runtime,
                 closure_state=closure,
                 evidence_requested=False,
-                reason=None if status == "Success" else "evidence_failed",
+                reason=reason,
             )
         command_state = {
             "Pending": "PENDING",
@@ -244,31 +302,33 @@ class CStarObserver:
         evidence_requested = False
         reason: str | None = None
         if status in TERMINAL_STATUS_MAP and self.sink is not None:
-            try:
-                self.sink.notify(
-                    category="observer_alert",
-                    message=json.dumps(
-                        {
-                            "occurrence_id": occurrence_id,
-                            "command_id": command_id,
-                            "document": document,
-                            "status": status,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                )
-            except Exception:
-                # The terminal state is durable already; notification failure
-                # must not turn a known SSM failure into a retryable event.
-                reason = "observer_alert_failed"
+            # The terminal state is durable already; notification failure must
+            # not turn a known SSM failure into a retryable event.
+            reason = self._notify_failure(
+                occurrence_id=occurrence_id,
+                command_id=command_id,
+                document=document,
+                status=status,
+            )
         if status == "Success" and occurrence.get("phase") == "stop":
             if self.evidence_sender is not None:
                 try:
                     self.request_evidence(occurrence=occurrence)
                     evidence_requested = True
                 except Exception:
-                    reason = "evidence_request_failed"
+                    self.ledger.advance(
+                        occurrence_id=occurrence_id,
+                        command_state=command_state,
+                        runtime_state=runtime_state,
+                        closure_state="ALERTED",
+                    )
+                    closure_state = "ALERTED"
+                    reason = self._notify_failure(
+                        occurrence_id=occurrence_id,
+                        command_id=command_id,
+                        document=EVIDENCE_DOCUMENT_NAME,
+                        status="evidence_request_failed",
+                    ) or "evidence_request_failed"
         return ObservationResult(
             occurrence_id=occurrence_id,
             command_state=command_state,
@@ -284,8 +344,41 @@ class CStarObserver:
             command_state = str(occurrence.get("command_state", "UNKNOWN"))
             runtime_state = str(occurrence.get("runtime_state", "UNKNOWN"))
             closure_state = str(occurrence.get("closure_state", "OPEN"))
-            command_id = occurrence.get("command_id")
             read_status = getattr(self.evidence_sender, "read_status", None)
+            evidence_command_id = occurrence.get("evidence_command_id")
+            if (
+                closure_state == "EVIDENCE_PENDING"
+                and isinstance(evidence_command_id, str)
+                and callable(read_status)
+            ):
+                try:
+                    status = read_status(command_id=evidence_command_id)
+                    return_event = {
+                        "detail-type": EVENT_TYPE,
+                        "source": "aws.ssm",
+                        "detail": {
+                            "command-id": evidence_command_id,
+                            "instance-id": INSTANCE_ID,
+                            "status": status,
+                            "document-name": EVIDENCE_DOCUMENT_NAME,
+                            "comment": f"cstar-evidence:{occurrence['occurrence_id']}",
+                        },
+                    }
+                    results.append(self.process_ssm_event(return_event))
+                    continue
+                except Exception:
+                    results.append(
+                        ObservationResult(
+                            occurrence_id=str(occurrence["occurrence_id"]),
+                            command_state=command_state,
+                            runtime_state=runtime_state,
+                            closure_state=closure_state,
+                            evidence_requested=False,
+                            reason="evidence_status_read_failed",
+                        )
+                    )
+                    continue
+            command_id = occurrence.get("command_id")
             if (
                 command_state in {"PENDING", "IN_PROGRESS"}
                 and isinstance(command_id, str)
@@ -352,6 +445,11 @@ class CStarObserver:
             release_id=str(occurrence["release_id"]),
             offset=offset,
             length=length,
+        )
+        command_id = _bounded_text(command_id, 128)
+        self.ledger.record_evidence_command(
+            occurrence_id=str(occurrence["occurrence_id"]),
+            command_id=command_id,
         )
         return command_id
 
@@ -544,6 +642,16 @@ class InMemoryObserverLedger:
             None,
         )
 
+    def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None:
+        command_id = _bounded_text(command_id, 128)
+        item = self.occurrences[occurrence_id]
+        if item.get("closure_state") != "EVIDENCE_PENDING":
+            raise ObserverError("evidence occurrence not pending")
+        existing = item.get("evidence_command_id")
+        if existing is not None and existing != command_id:
+            raise ObserverError("evidence command mismatch")
+        item["evidence_command_id"] = command_id
+
     def advance(self, *, occurrence_id, command_state, runtime_state, closure_state=None):
         item = self.occurrences[occurrence_id]
         validate_state_transition(
@@ -598,6 +706,22 @@ class DynamoCStarObserverLedger:
             if isinstance(item, Mapping) and item.get("SK") == "META":
                 return dict(item)
         return None
+
+    def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None:
+        command_id = _bounded_text(command_id, 128)
+        self.table.update_item(
+            Key={"PK": f"OCC#{occurrence_id}", "SK": "META"},
+            UpdateExpression="SET evidence_command_id = :command_id",
+            ConditionExpression=(
+                "closure_state = :pending AND "
+                "(attribute_not_exists(evidence_command_id) "
+                "OR evidence_command_id = :command_id)"
+            ),
+            ExpressionAttributeValues={
+                ":command_id": command_id,
+                ":pending": "EVIDENCE_PENDING",
+            },
+        )
 
     def advance(
         self,
