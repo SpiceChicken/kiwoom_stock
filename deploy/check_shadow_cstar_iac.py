@@ -43,6 +43,15 @@ def check(root: Path) -> str:
     }.items():
         if resources.get(name, {}).get("Condition") != condition:
             raise IacError(f"condition:{name}")
+    observer_alert_alarm = resources.get("ObserverAlertAlarm", {}).get("Properties", {})
+    if (
+        observer_alert_alarm.get("Namespace") != "Kiwoom/ShadowCStar"
+        or observer_alert_alarm.get("MetricName") != "cstar_observer_alerted"
+        or observer_alert_alarm.get("Threshold") != 1
+        or observer_alert_alarm.get("TreatMissingData") != "notBreaching"
+        or "AlarmActions" in observer_alert_alarm
+    ):
+        raise IacError("observer-alert-alarm")
     bucket = resources.get("EvidenceBucket", {})
     props = bucket.get("Properties", {})
     retention = props.get("ObjectLockConfiguration", {}).get("Rule", {}).get("DefaultRetention")

@@ -262,6 +262,12 @@ valid terminal cleanup, evidence closure, and all side-effect flags remaining
 false. Missing event delivery is handled by reconciliation; no component
 automatically dispatches a replacement activation.
 
+When the observer confirms a terminal activation or evidence failure, it first
+persists the occurrence as `ALERTED` and then emits the
+`Kiwoom/ShadowCStar:cstar_observer_alerted` metric. The corresponding
+metrics-only CloudWatch alarm provides a bounded detection signal without
+retrying activation or enabling broker capabilities.
+
 The former GitHub missing-run classifier remains available for historical
 diagnostics and does not own the current C* occurrence ledger. Its fixture tests
 are network-free and it has no dispatch, rerun, SSM, EC2, broker, account, or

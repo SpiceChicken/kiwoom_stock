@@ -160,6 +160,10 @@ observer/reconciliation closure evidence를 별도 확인한다.
 - 오늘 실패 command를 새 SSM 명령 없이 reconciliation 경로로 검증했고,
   occurrence 원장을 `FAILED/FAILED/ALERTED`로 확정했다. 이후 같은 항목은 due
   대상에서 제거된다.
+- Observer가 활성화 또는 evidence SSM command의 terminal failure를 확인하면
+  원장을 먼저 `ALERTED`로 저장한 뒤 `Kiwoom/ShadowCStar:cstar_observer_alerted`
+  metric을 발행한다. 이 metric에는 metrics-only CloudWatch alarm이 연결되어
+  알림 전송 실패가 상태 저장을 되돌리거나 재실행을 유발하지 않는다.
 
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
