@@ -52,8 +52,9 @@ def test_cloud_init_hardens_and_starts_ssh():
         "AllowUsers ubuntu",
     ):
         assert setting in text
-    assert "install -d -m 0755 /run/sshd" in text
-    assert "sshd -t" in text
+    run_sshd_dir = text.index("install -d -m 0755 /run/sshd")
+    validate_sshd = text.index("sshd -t")
+    assert run_sshd_dir < validate_sshd
     assert "systemctl enable ssh.service" in text
     assert "systemctl restart ssh.service" in text
 
