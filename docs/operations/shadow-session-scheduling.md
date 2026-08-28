@@ -193,6 +193,22 @@ closed; do not repair this by selecting a different artifact or dispatching a
 replacement run without a separate confirmed recovery decision. Missing,
 stale, or mismatched values fail before OIDC/SSM execution or during audit.
 
+### Release correction and rotation
+
+The initial ledger bootstrap is not a release correction mechanism. If an
+immutable release contains a wrong artifact hash, preserve that release and use
+`deploy/rotate_shadow_cstar_release.py` to add a new exact release intent and
+conditionally move `CONTROL#CSTAR/RELEASE` to it. The tool never edits or deletes
+an existing `RELEASE#<release_id>/META` item.
+
+Run `--check` first. Use `--apply` only after the current market-day start/stop
+occurrences have reached terminal closure (`CLOSED` or `ALERTED`) and no worker
+is running. The apply path also refuses to run before 16:00 KST on a weekday,
+temporarily disables both C* schedules, performs the conditional DynamoDB
+transaction, reads the pointer back, and re-enables both schedules only after
+the read-back succeeds. If any mutation fails, schedules remain disabled for
+manual recovery.
+
 The current registered tuple is recorded in [`current-state.md`](current-state.md).
 Do not copy a historical tuple from the production-check guide.
 
