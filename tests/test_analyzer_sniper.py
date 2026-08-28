@@ -72,6 +72,45 @@ class TestSniperProtocol:
         assert observation.observed_at.tzinfo is not None
         assert analyzer.supply_cache[code].forces == {"magnetic": 1.2}
 
+    def test_volume_ratio_comes_from_5m_volume_not_price_change(self, analyzer):
+        code = "005930"
+        analyzer.supply_cache[code] = SupplyData(stock_code=code)
+        analyzer.collector.fetch_stock_basic.return_value = {
+            "trde_pre": "-80.52",
+            "trde_qty": "5000",
+            "cur_prc": "80500",
+            "mac": "1000",
+        }
+        analyzer.collector.fetch_minute_chart.return_value = [
+            {
+                "cur_prc": "80000",
+                "open_pric": "80000",
+                "high_pric": "80000",
+                "low_pric": "80000",
+                "trde_qty": str(volume),
+            }
+            for volume in ([10] * 14 + [50])
+        ]
+        analyzer.collector.fetch_tick_strength.return_value = [
+            {"cntr_str": "100"}
+        ] * 5
+        analyzer.collector.fetch_order_book.return_value = {
+            "tot_sel_req": 1,
+            "tot_buy_req": 1,
+        }
+        analyzer.state_tracker.process_observations.return_value = {
+            code: {
+                "forces": {"current_velocity": 0.0},
+                "continuity": _continuity(),
+            }
+        }
+
+        analyzer.update_priority_supply([code])
+
+        observation = analyzer.state_tracker.process_observations.call_args.args[0][0]
+        assert observation.vol_ratio == 5.0
+        assert analyzer.supply_cache[code].vol_ratio == 5.0
+
     def test_fixed_cadence_row_four_is_canonical_observation_baseline(self, analyzer):
         code = "005930"
         observed_at = datetime(2026, 8, 8, 10, 0, tzinfo=ZoneInfo("Asia/Seoul"))

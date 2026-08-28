@@ -108,7 +108,7 @@ class MarketAnalyzer:
                 data = SupplyData(stock_code=stock_code)
                 chart_5m = self.collector.fetch_indicator_chart(stock_code, tic="5")
 
-                self._update_basic_data(data, stock_code)
+                self._update_basic_data(data, stock_code, chart_5m)
                 self._update_strength_data(data, stock_code)
                 self._update_vwap_data(data, chart_5m)
                 self._update_volatility_data(data, chart_5m) 
@@ -239,14 +239,30 @@ class MarketAnalyzer:
         closes = [abs(float(d['cur_prc'])) for d in chart_5m]
         data.trend_rsi = round(ind.calculate_rsi(closes, period=INDICATOR_PERIOD), 2)
 
-    def _update_basic_data(self, data: SupplyData, code: str):
+    def _update_basic_data(
+        self,
+        data: SupplyData,
+        code: str,
+        chart_5m: Sequence[Mapping[str, object]],
+    ):
         basic = self.collector.fetch_stock_basic(code)
         if not basic:
             raise MarketDataCollectionError(
                 MarketDataFailureKind.EMPTY,
                 "stock_basic",
             )
-        data.vol_ratio = float(basic["trde_pre"])
+        # ``trde_pre`` is the provider's price-change field, not a volume
+        # multiple.  Derive the physics input from the same validated 5m
+        # volume series used by the rest of this snapshot.
+        current_volume = float(chart_5m[-1]["trde_qty"])
+        previous_volumes = [
+            float(row["trde_qty"])
+            for row in chart_5m[:-1]
+        ]
+        data.vol_ratio = ind.calculate_volume_ratio(
+            current_volume,
+            previous_volumes,
+        )
         data.trde_qty = int(basic["trde_qty"])
         data.cur_prc = abs(float(basic["cur_prc"]))
         data.mac = float(basic["mac"])
