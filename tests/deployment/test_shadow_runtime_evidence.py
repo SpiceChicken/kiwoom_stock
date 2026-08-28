@@ -281,6 +281,34 @@ def test_full_continuous_cycle_sequence_validates_every_cycle_and_hash():
     assert result.returncode != 0
 
 
+def test_cycle_timing_accepts_six_decimal_serialization_rounding():
+    first = {**_cycle(), "telemetry_row_sha256": "4" * 64}
+    second = {
+        **first,
+        "cycle_index": 2,
+        "cycle_start_elapsed_seconds": 60.000001,
+        "observed_interval_seconds": 60.0,
+        "db_reopened": True,
+        "db_reopens": 1,
+        "telemetry_row_sha256": "5" * 64,
+    }
+    result = _run(
+        json.dumps(first) + "\n" + json.dumps(second),
+        mode="shadow-continuous", event="cycle-sequence",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_terminal_timing_accepts_six_decimal_serialization_rounding():
+    terminal = _terminal()
+    terminal.update({
+        "second_cycle_start_elapsed_seconds": 60.000001,
+        "second_cycle_interval_seconds": 60.0,
+    })
+    result = _run(terminal, mode="shadow-continuous", event="terminal")
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     ("value", "mode", "event"),
     [(_oneshot(), "shadow-once", "oneshot"),
