@@ -254,9 +254,9 @@ class MarketAnalyzer:
         # ``trde_pre`` is the provider's price-change field, not a volume
         # multiple.  Derive the physics input from the same validated 5m
         # volume series used by the rest of this snapshot.
-        current_volume = float(chart_5m[-1]["trde_qty"])
+        current_volume = float(str(chart_5m[-1]["trde_qty"]))
         previous_volumes = [
-            float(row["trde_qty"])
+            float(str(row["trde_qty"]))
             for row in chart_5m[:-1]
         ]
         data.vol_ratio = ind.calculate_volume_ratio(
