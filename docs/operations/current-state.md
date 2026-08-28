@@ -340,6 +340,12 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   schedule read-back만 허용하며 worker activation, SendCommand, parameter,
   log, IAM 변경 권한은 없다. 저장소 템플릿은
   `cstar-document-deployer-*.json.example`이다;
+- `kiwoom-cstar-release-rotator` 역할·trust·inline policy를 추가하고,
+  `kiwoom-local-user`의 AssumeRole 대상에 exact 역할을 추가했다. 이 역할은
+  C* 원장 table의 `GetItem`·`TransactWriteItems`와 start/stop schedule의
+  `GetSchedule`·`UpdateSchedule`만 허용한다. 기존 release item은 수정·삭제하지
+  않고 새 release item과 조건부 active pointer 전환만 수행한다. 저장소 템플릿은
+  `cstar-release-rotator-*.json.example`이다;
 - 새 실제 Kiwoom 인증/시세 검증은 별도 명시적 read-only window 없이는 수행하지
   않는다. 과거 read-only evidence가 live worker·계좌·주문 capability를 승인하는
   근거가 되지는 않는다.

@@ -17,7 +17,7 @@ kiwoom-local-user (IAM console user)
   ├─ console password + MFA
   ├─ access key 없음
   ├─ 서울 리전 same-device `aws login` OAuth 권한
-  └─ kiwoom-local-operator·kiwoom-local-provisioner·kiwoom-cstar-document-deployer만 AssumeRole
+  └─ kiwoom-local-operator·kiwoom-local-provisioner·kiwoom-cstar-document-deployer·kiwoom-cstar-release-rotator만 AssumeRole
 
 kiwoom-local-operator (IAM role)
   ├─ EC2/SSM 상태와 기존 command 결과 조회
@@ -34,6 +34,11 @@ kiwoom-cstar-document-deployer (IAM role, 문서 배포 전용)
   ├─ C* evidence SSM 문서 1개의 조회·버전 생성·default 전환
   ├─ C* start/stop/reconciliation schedule 3개의 조회
   └─ EC2, SendCommand, Parameter Store, Logs, IAM 변경 권한 없음
+
+kiwoom-cstar-release-rotator (IAM role, release pointer 교정 전용)
+  ├─ C* 원장 table의 GetItem·TransactWriteItems만 허용
+  ├─ C* start/stop schedule의 GetSchedule·UpdateSchedule만 허용
+  └─ SSM, EC2, Parameter Store, Logs, IAM 변경 권한 없음
 
 GitHub OIDC roles
   ├─ production-check·shadow rollout·shadow activation의 보호된 SSM command
@@ -89,6 +94,8 @@ rollout 실패를 로컬 `send-command`, 사람용 Session Manager 또는 장기
 - `deploy/iam/local-provisioner-policy.json.example`
 - `deploy/iam/cstar-document-deployer-trust-policy.json.example`
 - `deploy/iam/cstar-document-deployer-policy.json.example`
+- `deploy/iam/cstar-release-rotator-trust-policy.json.example`
+- `deploy/iam/cstar-release-rotator-policy.json.example`
 
 렌더링 파일은 Git 저장소 밖의 임시 디렉터리에 둔다. 아래 값만 치환한다.
 
@@ -262,6 +269,10 @@ SSH 연결은 실제 주문·외부 API 호출을 하지 않는 shell 연결만 
 `kiwoom-cstar-deployer`는 위 거부 목록의 예외로 evidence 문서 version update와
 default 전환만 허용하며, worker activation이나 evidence command 실행 권한은
 갖지 않는다.
+
+Immutable release hash 교정이 필요한 경우에는 `kiwoom-cstar-rotator` profile만
+사용한다. 이 profile은 C* 원장 pointer와 start/stop schedule 상태를 교정하는
+동안에만 사용하며, 기존 release item을 수정·삭제하지 않는다.
 
 Parameter Store 거부 검사에서 오류 메시지만 확인하고 응답이나 shell trace를
 artifact에 저장하지 않는다.
