@@ -142,8 +142,6 @@ def _prepare_rotation(
         set(new_release),
     ) != _selected(new_item, set(new_release)):
         raise RotationError("new release intent already exists with different content")
-    if new_release_id == old_release_id:
-        raise RotationError("new release is already active; use --check for verification")
     return RotationState(
         old_release_id=old_release_id,
         new_release_id=new_release_id,
@@ -230,6 +228,8 @@ def run(
             "new_release_exists": state.new_release_exists,
             "schedule_state": before,
         }
+    if state.new_release_id == state.old_release_id:
+        raise RotationError("new release is already active; use --check for verification")
     _assert_safe_rotation_time(now or datetime.now(tz=KST))
     scheduler.update_schedule(**_schedule_update_args(start, state="DISABLED"))
     scheduler.update_schedule(**_schedule_update_args(stop, state="DISABLED"))
