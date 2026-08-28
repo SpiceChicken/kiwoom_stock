@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
+from pathlib import Path
 import re
+import subprocess
 from typing import Any, Mapping
 
 try:
@@ -53,6 +56,60 @@ class BootstrapConfig:
     validator_sha256: str
     shadow_document_sha256: str
     rollout_attempt_id: str
+
+
+def _source_blob(repository_root: Path, source_sha: str, path: str) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{source_sha}:{path}"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise BootstrapError(f"source artifact unavailable: {path}") from error
+    return result.stdout
+
+
+def _canonical_document_hash(data: bytes) -> str:
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BootstrapError("shadow document is not valid JSON") from error
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def verify_source_artifacts(
+    config: BootstrapConfig,
+    repository_root: Path,
+) -> None:
+    """Verify tuple hashes against immutable Git blobs before AWS mutation."""
+
+    artifacts = (
+        ("compose_shadow_sha256", "compose.shadow.yaml", False),
+        ("worker_sha256", "deploy/ec2/shadow_worker_control.sh", False),
+        ("validator_sha256", "deploy/ec2/shadow_runtime_evidence.py", False),
+        (
+            "shadow_document_sha256",
+            "deploy/ssm/shadow-worker-document.yaml",
+            True,
+        ),
+    )
+    for field, path, canonical in artifacts:
+        data = _source_blob(repository_root, config.source_sha, path)
+        actual = (
+            _canonical_document_hash(data)
+            if canonical
+            else hashlib.sha256(data).hexdigest()
+        )
+        expected = getattr(config, field)
+        if actual != expected:
+            raise BootstrapError(
+                f"source artifact hash mismatch: {path} ({field})"
+            )
 
 
 def _required_hex(value: str, *, label: str) -> str:
@@ -343,10 +400,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validator-sha256", required=True)
     parser.add_argument("--shadow-document-sha256", required=True)
     parser.add_argument("--rollout-attempt-id", required=True)
+    parser.add_argument(
+        "--repository-root",
+        default=str(Path(__file__).resolve().parents[1]),
+    )
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = run(_config_from_args(args), region=args.region, check=args.check)
+        config = _config_from_args(args)
+        _validate_config(config)
+        verify_source_artifacts(config, Path(args.repository_root))
+        result = run(config, region=args.region, check=args.check)
     except (BootstrapError, BotoCoreError, OSError, ValueError) as error:
         print(f"shadow C* ledger bootstrap failed: {error}")
         return 1

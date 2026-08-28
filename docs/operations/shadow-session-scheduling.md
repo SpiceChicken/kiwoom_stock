@@ -115,6 +115,11 @@ unset AWS_PROFILE
 반복 실행이나 반쪽 release를 막는다. 이미 다른 generation/release가 존재하면
 덮어쓰지 않고 중단한다.
 
+Bootstrap and release rotation also read the Compose, worker, validator, and SSM
+document blobs directly from the supplied immutable `source_sha` Git revision
+before any AWS write. A supplied hash that was calculated from a dirty checkout
+or a different revision therefore fails locally as an artifact-tuple mismatch.
+
 Submitter가 admission을 거부하면 이제 `REJ#<occurrence_id>/META`에
 `REJECTED`, 거부 사유, schedule context와 `ssm_sent=false`를 저장하고
 `Kiwoom/ShadowCStar:cstar_activation_rejected` metric을 기록한다. 이 기록과
