@@ -13,6 +13,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, time
 import json
+from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -35,6 +36,7 @@ try:
         _selected,
         _validate_config,
         _validate_schedule,
+        verify_source_artifacts,
     )
     from deploy.shadow_cstar_contract import (
         RELEASE_INTENT_KEYS,
@@ -54,6 +56,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         _selected,
         _validate_config,
         _validate_schedule,
+        verify_source_artifacts,
     )
     from shadow_cstar_contract import (  # type: ignore[no-redef]
         RELEASE_INTENT_KEYS,
@@ -290,10 +293,17 @@ def main() -> int:
     parser.add_argument("--validator-sha256", required=True)
     parser.add_argument("--shadow-document-sha256", required=True)
     parser.add_argument("--rollout-attempt-id", required=True)
+    parser.add_argument(
+        "--repository-root",
+        default=str(Path(__file__).resolve().parents[1]),
+    )
     args = parser.parse_args()
     try:
+        config = _config_from_args(args)
+        _validate_config(config)
+        verify_source_artifacts(config, Path(args.repository_root))
         result = run(
-            _config_from_args(args),
+            config,
             region=args.region,
             check=args.check,
         )
