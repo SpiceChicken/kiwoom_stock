@@ -18,6 +18,10 @@ MAX_LINES = 4_096
 # A full KRX session emits one cycle per minute (up to 390 cycles) plus a
 # terminal record. Keep bounded input while allowing one complete session.
 MAX_RECORDS = 512
+# Timing values are serialized with six decimal places.  Comparing two
+# independently rounded elapsed values needs a two-microsecond absolute
+# tolerance to avoid rejecting an otherwise valid adjacent cycle.
+CYCLE_TIMING_TOLERANCE_SECONDS = 0.000002
 SOURCE_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_RE = re.compile(
     r"ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}"
@@ -516,7 +520,8 @@ def _validate_cycle(
             or not _finite_float(cycle_start, minimum=0.0)
             or previous_start is None
             or cycle_start - previous_start < 60.0
-            or abs((cycle_start - previous_start) - observed_interval) > 0.000001
+            or abs((cycle_start - previous_start) - observed_interval)
+            > CYCLE_TIMING_TOLERANCE_SECONDS
         ):
             raise EvidenceError("cycle_sequence_invalid")
 
@@ -628,7 +633,8 @@ def _validate_terminal_timing(
         interval_value = cast(float, interval)
         if (
             second_value - first_value < 60.0
-            or abs((second_value - first_value) - interval_value) > 0.000001
+            or abs((second_value - first_value) - interval_value)
+            > CYCLE_TIMING_TOLERANCE_SECONDS
         ):
             raise EvidenceError("terminal_multi_cycle_invalid")
 
