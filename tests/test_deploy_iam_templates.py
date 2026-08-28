@@ -222,6 +222,15 @@ def test_local_user_can_only_assume_exact_local_roles():
         ),
     }
     assert statements[3] == {
+        "Sid": "AssumeExactCStarReleaseRotatorRole",
+        "Effect": "Allow",
+        "Action": ["sts:AssumeRole"],
+        "Resource": (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/"
+            "kiwoom-cstar-release-rotator"
+        ),
+    }
+    assert statements[4] == {
         "Sid": "AuthorizeExactSameDeviceLocalLogin",
         "Effect": "Allow",
         "Action": [
@@ -279,6 +288,57 @@ def test_cstar_document_deployer_is_limited_to_evidence_document_and_schedules()
                 "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/"
                 "kiwoom-shadow-cstar/kiwoom-shadow-cstar-reconcile",
             ],
+        },
+    ]
+
+
+def test_cstar_release_rotator_trust_requires_exact_user_and_temporary_session():
+    statement = _statements(
+        _policy("cstar-release-rotator-trust-policy.json.example")
+    )[0]
+
+    assert statement["Principal"] == {
+        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
+    }
+    assert statement["Action"] == "sts:AssumeRole"
+    assert statement["Condition"] == {"Null": {"aws:TokenIssueTime": "false"}}
+
+
+def test_cstar_release_rotator_is_limited_to_ledger_transaction_and_schedule_state():
+    statements = _statements(
+        _policy("cstar-release-rotator-policy.json.example")
+    )
+
+    assert statements == [
+        {
+            "Sid": "ManageExactCStarReleaseLedger",
+            "Effect": "Allow",
+            "Action": ["dynamodb:GetItem", "dynamodb:TransactWriteItems"],
+            "Resource": (
+                "arn:aws:dynamodb:<AWS_REGION>:<AWS_ACCOUNT_ID>:table/"
+                "<CSTAR_TABLE_NAME>"
+            ),
+            "Condition": {
+                "StringEquals": {"aws:RequestedRegion": "<AWS_REGION>"}
+            },
+        },
+        {
+            "Sid": "ManageExactCStarSchedules",
+            "Effect": "Allow",
+            "Action": ["scheduler:GetSchedule", "scheduler:UpdateSchedule"],
+            "Resource": [
+                (
+                    "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/"
+                    "kiwoom-shadow-cstar/kiwoom-shadow-cstar-start"
+                ),
+                (
+                    "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/"
+                    "kiwoom-shadow-cstar/kiwoom-shadow-cstar-stop"
+                ),
+            ],
+            "Condition": {
+                "StringEquals": {"aws:RequestedRegion": "<AWS_REGION>"}
+            },
         },
     ]
 

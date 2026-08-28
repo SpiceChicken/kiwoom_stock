@@ -20,6 +20,12 @@
       "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-cstar-document-deployer"
     },
     {
+      "Sid": "AssumeExactCStarReleaseRotatorRole",
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole"],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-cstar-release-rotator"
+    },
+    {
       "Sid": "AuthorizeExactSameDeviceLocalLogin",
       "Effect": "Allow",
       "Action": [
