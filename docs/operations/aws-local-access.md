@@ -36,9 +36,10 @@ kiwoom-cstar-document-deployer (IAM role, 문서 배포 전용)
   └─ EC2, SendCommand, Parameter Store, Logs, IAM 변경 권한 없음
 
 kiwoom-cstar-release-rotator (IAM role, release pointer 교정 전용)
-  ├─ C* 원장 table의 GetItem·TransactWriteItems만 허용
+  ├─ C* 원장 table의 GetItem·PutItem·UpdateItem·TransactWriteItems만 허용
   ├─ C* start/stop schedule의 GetSchedule·UpdateSchedule만 허용
-  └─ SSM, EC2, Parameter Store, Logs, IAM 변경 권한 없음
+  ├─ Scheduler가 기존 실행 역할을 보존하도록 exact iam:PassRole만 허용
+  └─ SSM, EC2, Parameter Store, Logs, 그 밖의 IAM 변경 권한 없음
 
 GitHub OIDC roles
   ├─ production-check·shadow rollout·shadow activation의 보호된 SSM command
@@ -104,6 +105,8 @@ rollout 실패를 로컬 `send-command`, 사람용 Session Manager 또는 장기
 | `<AWS_ACCOUNT_ID>` | 12자리 AWS 계정 ID | root bootstrap 세션의 `aws sts get-caller-identity --query Account --output text` |
 | `<AWS_REGION>` | EC2 리전 | `ap-northeast-2` |
 | `<EC2_INSTANCE_ID>` | 허용할 EC2 한 대 | `aws ec2 describe-instances ...`로 확인 |
+| `<CSTAR_TABLE_NAME>` | C* release ledger table | CloudFormation C* stack output으로 확인 |
+| `<CSTAR_SCHEDULER_ROLE_NAME>` | 두 schedule이 사용하는 execution role 이름 | 두 schedule의 `Target.RoleArn`에서 확인 |
 
 템플릿에는 비밀값이 없다. 계정 ID와 instance ID도 credential은 아니지만, 실제
 렌더링 결과는 운영 환경별 산출물이므로 repository에 commit하지 않는다.
