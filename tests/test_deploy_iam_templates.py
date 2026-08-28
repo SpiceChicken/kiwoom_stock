@@ -313,7 +313,12 @@ def test_cstar_release_rotator_is_limited_to_ledger_transaction_and_schedule_sta
         {
             "Sid": "ManageExactCStarReleaseLedger",
             "Effect": "Allow",
-            "Action": ["dynamodb:GetItem", "dynamodb:TransactWriteItems"],
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:TransactWriteItems",
+            ],
             "Resource": (
                 "arn:aws:dynamodb:<AWS_REGION>:<AWS_ACCOUNT_ID>:table/"
                 "<CSTAR_TABLE_NAME>"
@@ -338,6 +343,20 @@ def test_cstar_release_rotator_is_limited_to_ledger_transaction_and_schedule_sta
             ],
             "Condition": {
                 "StringEquals": {"aws:RequestedRegion": "<AWS_REGION>"}
+            },
+        },
+        {
+            "Sid": "PassExactCStarSchedulerRole",
+            "Effect": "Allow",
+            "Action": ["iam:PassRole"],
+            "Resource": (
+                "arn:aws:iam::<AWS_ACCOUNT_ID>:role/"
+                "<CSTAR_SCHEDULER_ROLE_NAME>"
+            ),
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "scheduler.amazonaws.com"
+                }
             },
         },
     ]
