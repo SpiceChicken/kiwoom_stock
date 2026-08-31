@@ -208,8 +208,9 @@ an existing `RELEASE#<release_id>/META` item.
 
 Run `--check` first. Use `--apply` only after the current market-day start/stop
 occurrences have reached terminal closure (`CLOSED` or `ALERTED`) and no worker
-is running. The apply path also refuses to run before 16:00 KST on a weekday,
-temporarily disables both C* schedules, performs the conditional DynamoDB
+is running. The apply path also refuses to run during the 09:00-16:00 KST
+weekday market window, temporarily disables both C* schedules, performs the
+conditional DynamoDB
 transaction, reads the pointer back, and re-enables both schedules only after
 the read-back succeeds. If any mutation fails, schedules remain disabled for
 manual recovery.
