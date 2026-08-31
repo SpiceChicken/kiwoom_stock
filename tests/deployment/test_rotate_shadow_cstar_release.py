@@ -105,8 +105,14 @@ def test_prepare_rotation_allows_check_when_candidate_is_already_active(monkeypa
 
 
 def test_rotation_is_blocked_during_weekday_market_window():
-    with pytest.raises(RotationError, match="before 16:00 KST"):
+    with pytest.raises(RotationError, match="09:00-16:00 KST"):
         _assert_safe_rotation_time(datetime.fromisoformat("2026-08-28T09:00:00+09:00"))
+
+
+def test_rotation_is_allowed_before_next_weekday_market_open():
+    _assert_safe_rotation_time(
+        datetime.fromisoformat("2026-09-01T00:15:00+09:00")
+    )
 
 
 def test_rotation_is_allowed_after_weekday_market_window():

@@ -66,6 +66,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
 
 REGION = "ap-northeast-2"
 KST = ZoneInfo("Asia/Seoul")
+MARKET_OPEN_TIME = time(9, 0)
 ROTATION_SAFE_TIME = time(16, 0)
 
 
@@ -188,12 +189,21 @@ def _rotation_transactions(
 
 
 def _assert_safe_rotation_time(now: datetime) -> None:
-    """Avoid changing the active tuple during a weekday market session."""
+    """Avoid changing the active tuple during a weekday market session.
+
+    The release pointer may be rotated overnight, including before the next
+    market open.  Only the weekday market window itself is unsafe; blocking
+    every time before 16:00 would also prevent a safe rollover at midnight.
+    """
 
     local = now.astimezone(KST)
-    if local.weekday() < 5 and local.time() < ROTATION_SAFE_TIME:
+    if (
+        local.weekday() < 5
+        and MARKET_OPEN_TIME <= local.time() < ROTATION_SAFE_TIME
+    ):
         raise RotationError(
-            "release rotation is blocked before 16:00 KST on a weekday; "
+            "release rotation is blocked during the 09:00-16:00 KST "
+            "weekday market window; "
             "close and reconcile the current session first"
         )
 
