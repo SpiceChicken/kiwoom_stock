@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-08-27 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-09-01 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다. 이 문서는 공개
 저장소에 있으므로 live host의 주소·네트워크·리소스 식별자는 기록하지 않는다.
@@ -185,6 +185,31 @@ observer/reconciliation closure evidence를 별도 확인한다.
   metric을 발행한다. 이 metric에는 metrics-only CloudWatch alarm이 연결되어
   알림 전송 실패가 상태 저장을 되돌리거나 재실행을 유발하지 않는다.
 
+2026-08-31 KST start execution incident and 2026-09-01 remediation read-back:
+
+- EventBridge Scheduler delivery, Submitter Lambda, DynamoDB admission, SSM
+  command submission, host disk 상태는 정상으로 확인되었다. 호스트 컨테이너는
+  08:50 start 뒤 첫 safe tick 전에 종료했으며, SSM command는 timeout이 아니라
+  exit code 1로 끝났다.
+- 직접 원인은 runtime의 `MarketDataCollectionError`였다. 따라서 scheduler,
+  AWS session, Docker 용량, IAM 또는 host fence가 이번 실패의 직접 원인은
+  아니었다. 당시 배포된 sentinel이 예외 종류만 보존하고 operation/kind를
+  보존하지 않아, 하위 Kiwoom endpoint까지는 historical evidence만으로 확정할
+  수 없다.
+- PR #144에서 `MarketDataCollectionError`에 대해 allowlisted
+  `error_kind`(`empty`/`fetch`/`timeout`/`parse`/`malformed`)와
+  allowlisted `error_operation`만 redacted sentinel·terminal evidence·진단
+  artifact에 남기도록 보강했다. raw response, exception text, credential은
+  계속 기록하지 않는다.
+- merged `main`의 production-check와 protected shadow rollout을 다시 통과했고,
+  단일 운영 호스트의 worker/validator/binding read-back이 새 release와
+  일치했다. AWS C* active release pointer와 repository schedule tuple도 같은
+  release를 가리키며, start/stop/reconciliation은 각각 `ENABLED` 상태다.
+- 이번 배포는 개장 전 수행되어 worker activation을 발생시키지 않았다. 현재
+  EC2는 실행 상태이고 SSM Agent는 `Online`이며, 다음 평일 08:50 automatic
+  start → 09:00 이후 첫 safe tick → 15:35 stop/evidence가 최종 acceptance
+  gate다. 실거래 capability는 계속 비활성이다.
+
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
 `dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
@@ -209,7 +234,8 @@ schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→st
 
 실거래·계좌 조회·주문 capability는 계속 비활성이다. 다음 평일 start/stop에서
 실제 SSM submission, host fence effect, paper shadow terminal, observer evidence
-closure를 확인하는 acceptance만 남아 있다.
+closure를 확인하는 acceptance만 남아 있다. 이 acceptance 전에는 “자동 실행이
+검증 완료”라고 판정하지 않는다.
 
 AWS cutover read-back 기준:
 
@@ -259,8 +285,9 @@ AWS read-back은 새 target과 문서 기본 버전을 확인했다. 위의 초�
 - 종료된 기존 호스트에서 수행했던 shadow worker/validator/rollout artifact
   read-back 기록은 historical evidence로만 보존한다.
 - 현재 단일 운영 호스트에는 최신 tuple의 shadow worker/validator와 canonical
-  activation-document binding이 설치되어 있다. 첫 자동 session 뒤 worker는
-  `run-deadline`/exit code 0으로 종료했고 paper ledger는 보존되었다.
+  activation-document binding이 설치되어 있다. 과거 bounded session의 paper
+  ledger는 보존되어 있으며, 2026-09-01 release rollout 자체에서는 worker를
+  실행하지 않았다.
 
 ## 현재 immutable release tuple
 
@@ -309,8 +336,8 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
 
 ## 현재 남은 차단 항목
 
-- 다음 개장일 schedule에서 IAM 수정 후 자동 start/stop이 다시 수행되는지 확인할
-  운영 모니터링;
+- 다음 개장일 schedule에서 IAM 수정과 2026-08-31 runtime 진단 보강 후 자동
+  start/stop이 다시 수행되는지 확인할 운영 모니터링;
 - 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
