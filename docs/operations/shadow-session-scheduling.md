@@ -142,6 +142,22 @@ event가 누락되어도 기존 occurrence ID에 상태를 적용하며, command
 occurrence `META` 행이 함께 조회되는 경우에도 `META`만 사용한다. 오늘 실패 occurrence는
 새 activation command 없이 `FAILED/ALERTED`로 확정했다.
 
+2026-08-31 KST start failure는 위 control-plane 경계가 정상 동작한 뒤 host
+runtime의 첫 safe tick 전에 발생한 `MarketDataCollectionError`였다. Scheduler,
+Submitter, DynamoDB admission, SSM delivery, disk와 fence가 직접 원인이 아니며,
+기존 sentinel에 operation/kind가 없어 세부 endpoint는 확정할 수 없었다. PR #144의
+merged release는 allowlisted market-data failure kind/operation을 redacted
+sentinel과 terminal evidence에 추가했다. production-check, protected rollout,
+host read-back, C* release rotation과 schedule tuple read-back을 완료했으며,
+현재 start/stop/reconciliation은 `ENABLED`다. 개장 전 release 적용이므로 실제
+worker activation은 발생시키지 않았다.
+
+다음 평일 acceptance는 실제 자동 경로를 한 번만 검증한다. 08:50 start의
+`SESSION#`/`OCC#`/SSM command, 09:00 이후 첫 safe tick 또는 휴장일
+`CLOSED/calendar-closed`, 15:30 deadline, 15:35 stop와 observer evidence closure를
+같은 release lease로 확인한다. 실패 시 중복 activation을 발행하지 않고 occurrence,
+Lambda/SSM evidence, host terminal output과 DLQ/metric을 먼저 보존한다.
+
 2026-08-25 KST에는 이 rejection audit 자체가 Submitter role의 누락된
 `dynamodb:PutItem` 권한 때문에 실패했다. 그 결과 start/stop은 Lambda retry 후
 종료되었고 SSM은 호출되지 않았다. PR #122에서 `dynamodb:PutItem`을 C* table
