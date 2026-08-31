@@ -164,6 +164,17 @@ DIAGNOSTIC_KEYS = {
     "desired_state", "command_id", "ssm_status", "ssm_response_code",
     "stdout_bytes", "stderr_bytes", "failure_category", "terminal",
 }
+DIAGNOSTIC_OPTIONAL_KEYS = {"market_data_failure"}
+SAFE_MARKET_DATA_FAILURE_KINDS = {
+    "empty", "fetch", "timeout", "parse", "malformed",
+}
+SAFE_MARKET_DATA_FAILURE_OPERATIONS = {
+    "auth_preflight", "top_trading_value", "stock_basic",
+    "minute_chart_1m", "minute_chart_5m", "minute_chart_60m",
+    "tick_strength", "program_trade", "foreign_window_trade",
+    "order_book", "recent_ticks", "market_snapshot", "market_regime_60m",
+    "chart_true_range",
+}
 BASE_MEMBERS = {
     "shadow-worker-evidence.json": MAX_JSON_BYTES,
     "shadow-worker-diagnostic.json": MAX_JSON_BYTES,
@@ -554,6 +565,19 @@ def _valid_terminal_diagnostic(
     )
 
 
+def _valid_market_data_failure(value: object) -> bool:
+    if value is None:
+        return True
+    return (
+        type(value) is dict
+        and set(value) == {"kind", "operation"}
+        and isinstance(value.get("kind"), str)
+        and value.get("kind") in SAFE_MARKET_DATA_FAILURE_KINDS
+        and isinstance(value.get("operation"), str)
+        and value.get("operation") in SAFE_MARKET_DATA_FAILURE_OPERATIONS
+    )
+
+
 def _valid_terminal_timing(
     evidence: Mapping[str, object], *, cycles: int,
 ) -> bool:
@@ -588,7 +612,10 @@ def _valid_stop_success_diagnostic(
     stdout_bytes = diagnostic.get("stdout_bytes")
     stderr_bytes = diagnostic.get("stderr_bytes")
     return (
-        set(diagnostic) == DIAGNOSTIC_KEYS
+        set(diagnostic) in (
+            DIAGNOSTIC_KEYS,
+            DIAGNOSTIC_KEYS | DIAGNOSTIC_OPTIONAL_KEYS,
+        )
         and type(diagnostic.get("schema_version")) is int
         and diagnostic.get("schema_version") == 1
         and diagnostic.get("source_sha") == expected.source_sha
@@ -606,6 +633,7 @@ def _valid_stop_success_diagnostic(
         and diagnostic.get("failure_category")
         == "success_without_accepted_runtime_evidence"
         and diagnostic.get("terminal") is None
+        and _valid_market_data_failure(diagnostic.get("market_data_failure"))
     )
 
 

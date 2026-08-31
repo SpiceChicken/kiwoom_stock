@@ -452,6 +452,59 @@ def test_failed_terminal_is_diagnostic_only_and_never_activation_success():
     assert json.loads(diagnostic.stdout) == failed
 
 
+def test_market_data_failure_terminal_details_are_diagnostic_only_and_bounded():
+    failed = _terminal()
+    failed.update({
+        "status": "FAILED",
+        "reason": "failure",
+        "error_type": "MarketDataCollectionError",
+        "error_kind": "timeout",
+        "error_operation": "order_book",
+    })
+    operational = _run(failed, mode="shadow-continuous", event="terminal")
+    diagnostic = subprocess.run(
+        [
+            sys.executable, str(VALIDATOR),
+            "--mode", "shadow-continuous", "--event", "terminal",
+            "--source-sha", SOURCE_SHA, "--image-digest", IMAGE,
+            "--activation-id", ACTIVATION_ID, "--input-format", "json-lines",
+            "--output", "accepted-record", "--terminal-policy", "diagnostic",
+        ],
+        input=json.dumps(failed), text=True, capture_output=True, check=False,
+    )
+    assert operational.returncode == 1
+    assert diagnostic.returncode == 0, diagnostic.stderr
+    assert json.loads(diagnostic.stdout) == failed
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("error_kind", "not-a-kind"), ("error_operation", "secret-body")],
+)
+def test_market_data_failure_terminal_rejects_unknown_labels(field, value):
+    failed = _terminal()
+    failed.update({
+        "status": "FAILED", "reason": "failure",
+        "error_type": "MarketDataCollectionError",
+        "error_kind": "timeout", "error_operation": "order_book",
+    })
+    failed[field] = value
+    completed = subprocess.run(
+        [
+            sys.executable, str(VALIDATOR),
+            "--mode", "shadow-continuous", "--event", "terminal",
+            "--source-sha", SOURCE_SHA, "--image-digest", IMAGE,
+            "--activation-id", ACTIVATION_ID, "--input-format", "json-lines",
+            "--output", "accepted-record", "--terminal-policy", "diagnostic",
+        ],
+        input=json.dumps(failed), text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 1
+    assert completed.stderr == (
+        "shadow evidence invalid: terminal_market_data_diagnostic_invalid\n"
+    )
+
+
 def test_zero_cycle_failed_terminal_is_valid_only_for_diagnostics():
     failed = _terminal()
     failed.update({

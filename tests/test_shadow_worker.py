@@ -15,6 +15,10 @@ from kiwoom_stock.application.credentials import (
     KiwoomClientCredentials,
     SensitiveText,
 )
+from kiwoom_stock.application.ports import (
+    MarketDataCollectionError,
+    MarketDataFailureKind,
+)
 from kiwoom_stock.application.execution import (
     ActivationTuple,
     ExecutionMode,
@@ -369,6 +373,48 @@ def test_continuous_market_data_bootstrap_retry_budget_remains_bounded(tmp_path)
     assert result.error_type == "MarketDataCollectionError"
     assert len(constructions) == 4
     assert event.waits == [5.0, 15.0, 30.0]
+
+
+def test_market_data_bootstrap_failure_preserves_only_safe_diagnostic_labels(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now)
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=lambda *_args: (_ for _ in ()).throw(
+            ShadowExecutionFailure(
+                ShadowTerminalReason.FAILURE,
+                "MarketDataCollectionError",
+                (),
+                error_kind="timeout",
+                error_operation="order_book",
+            )
+        ),
+        emit=lambda _evidence: None,
+        lock_path=(tmp_path / "bootstrap-diagnostic.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    safe = result.to_safe_dict()
+    assert safe["error_type"] == "MarketDataCollectionError"
+    assert safe["error_kind"] == "timeout"
+    assert safe["error_operation"] == "order_book"
+    assert "secret" not in json.dumps(safe)
+
+
+def test_market_data_failure_details_reject_unbounded_values():
+    assert shadow_worker_module.market_data_failure_details(
+        MarketDataCollectionError(MarketDataFailureKind.TIMEOUT, "order_book")
+    ) == ("timeout", "order_book")
+    assert shadow_worker_module.market_data_failure_details(
+        MarketDataCollectionError(
+            MarketDataFailureKind.FETCH,
+            "provider-response-secret",
+        )
+    ) is None
 
 
 def test_continuous_fails_closed_when_the_database_identity_changes(tmp_path):

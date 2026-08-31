@@ -40,6 +40,7 @@ from kiwoom_stock.application.shadow_worker import (
     ShadowCycleTerminated,
     ShadowExecutionReceipt,
     ShadowTerminalReason,
+    market_data_failure_details,
 )
 from kiwoom_stock.application.shadow_lifecycle import (
     ShadowRunDeadlineExceeded,
@@ -286,6 +287,9 @@ class ShadowExecutionFailure(ShadowCycleTerminated):
         reason: ShadowTerminalReason,
         primary_type: str | None,
         cleanup_types: tuple[str, ...],
+        *,
+        error_kind: str | None = None,
+        error_operation: str | None = None,
     ):
         self.primary_type = primary_type
         self.cleanup_types = cleanup_types
@@ -293,6 +297,8 @@ class ShadowExecutionFailure(ShadowCycleTerminated):
             reason,
             resources_closed=not cleanup_types,
             error_type=primary_type or (cleanup_types[0] if cleanup_types else None),
+            error_kind=error_kind,
+            error_operation=error_operation,
         )
 
     @property
@@ -395,10 +401,17 @@ class ShadowRuntime:
                 primary,
                 self._deadline_remaining,
             )
+            market_data_details = market_data_failure_details(primary)
             raise ShadowExecutionFailure(
                 reason,
                 type(primary).__name__ if primary is not None else None,
                 cleanup_types,
+                error_kind=(
+                    market_data_details[0] if market_data_details is not None else None
+                ),
+                error_operation=(
+                    market_data_details[1] if market_data_details is not None else None
+                ),
             ) from None
         if self._db_path != self._policy.shadow_database_path:
             raise RuntimeError("shadow runtime database identity drifted")
@@ -715,10 +728,17 @@ def create_shadow_runtime(
         cleanup_types = _close_failed_shadow_resources(
             repository, ledger, client, session, swing_candidate_context_owner
         )
+        market_data_details = market_data_failure_details(error)
         raise ShadowExecutionFailure(
             _terminal_reason_after_cleanup(error, admission.deadline_remaining),
             type(error).__name__,
             cleanup_types,
+            error_kind=(
+                market_data_details[0] if market_data_details is not None else None
+            ),
+            error_operation=(
+                market_data_details[1] if market_data_details is not None else None
+            ),
         ) from None
     return ShadowRuntime(
         policy=policy,

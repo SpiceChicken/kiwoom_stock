@@ -40,12 +40,22 @@ fail() {
 
 emit_runtime_failure_sentinel() {
     local logs="$1"
-    local error_type
-    error_type="$(printf '%s\n' "${logs}" | python3 -c '
+    local failure_details error_type error_kind error_operation
+    failure_details="$(printf '%s\n' "${logs}" | python3 -c '
 import json
 import re
 import sys
 
+safe_kinds = {"empty", "fetch", "timeout", "parse", "malformed"}
+safe_operations = {
+    "auth_preflight", "top_trading_value", "stock_basic",
+    "minute_chart_1m", "minute_chart_5m", "minute_chart_60m",
+    "tick_strength", "program_trade", "foreign_window_trade",
+    "order_book", "recent_ticks", "market_snapshot", "market_regime_60m",
+    "chart_true_range",
+}
+fallback = None
+found = False
 for raw in sys.stdin:
     line = raw.split("|", 1)[-1].strip()
     if not line.startswith("{"):
@@ -60,10 +70,29 @@ for raw in sys.stdin:
         and isinstance(value, str)
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
     ):
-        print(value)
-        break
+        if (
+            value == "MarketDataCollectionError"
+            and isinstance(item.get("error_kind"), str)
+            and item.get("error_kind") in safe_kinds
+            and isinstance(item.get("error_operation"), str)
+            and item.get("error_operation") in safe_operations
+        ):
+            print("|".join((value, item["error_kind"], item["error_operation"])))
+            found = True
+            break
+        if fallback is None:
+            fallback = value
+if not found and fallback is not None:
+    print(fallback + "||")
 ')"
-    if [[ -n "${error_type}" ]]; then
+    if [[ -n "${failure_details}" ]]; then
+        IFS='|' read -r error_type error_kind error_operation <<< "${failure_details}"
+        if [[ "${error_type}" == "MarketDataCollectionError" \
+            && -n "${error_kind}" && -n "${error_operation}" ]]; then
+            printf 'shadow worker failed: error_type=%s error_kind=%s error_operation=%s\n' \
+                "${error_type}" "${error_kind}" "${error_operation}"
+            return 0
+        fi
         printf 'shadow worker failed: error_type=%s\n' "${error_type}"
     fi
 }

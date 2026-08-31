@@ -218,6 +218,74 @@ def test_validated_physical_state_terminal_uses_specific_category():
     )
 
 
+def test_validated_market_data_terminal_preserves_safe_operation_details():
+    completed = _run({
+        "Status": "Failed",
+        "ResponseCode": 1,
+        "StandardOutputContent": json.dumps(_terminal(
+            error_type="MarketDataCollectionError",
+            error_kind="timeout",
+            error_operation="order_book",
+        )),
+        "StandardErrorContent": "opaque failure",
+    })
+    assert completed.returncode == 0, completed.stderr
+    diagnostic = json.loads(completed.stdout)
+    assert diagnostic["failure_category"] == "market_data_collection_error"
+    assert diagnostic["market_data_failure"] == {
+        "kind": "timeout", "operation": "order_book",
+    }
+    assert diagnostic["terminal"]["error_type"] == (
+        "MarketDataCollectionError"
+    )
+    assert diagnostic["terminal"]["error_kind"] == "timeout"
+    assert diagnostic["terminal"]["error_operation"] == "order_book"
+
+
+def test_market_data_failure_sentinel_preserves_safe_operation_details():
+    invocation = {
+        "Status": "Failed",
+        "ResponseCode": 1,
+        "StandardOutputContent": (
+            "shadow worker failed: error_type=MarketDataCollectionError "
+            "error_kind=timeout error_operation=order_book\n"
+        ),
+        "StandardErrorContent": "opaque failure",
+    }
+    completed = _run(invocation)
+    assert completed.returncode == 0, completed.stderr
+    diagnostic = json.loads(completed.stdout)
+    assert diagnostic["failure_category"] == "market_data_collection_error"
+    assert diagnostic["market_data_failure"] == {
+        "kind": "timeout", "operation": "order_book",
+    }
+
+
+def test_worker_market_data_sentinel_is_bounded_and_redacted():
+    terminal = json.dumps({
+        "status": "FAILED",
+        "error_type": "MarketDataCollectionError",
+        "error_kind": "timeout",
+        "error_operation": "order_book",
+    })
+    completed = subprocess.run(
+        [
+            "bash", "-c",
+            'source "$1"; emit_runtime_failure_sentinel "$2"',
+            "test", str(WORKER_SCRIPT), terminal,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == (
+        "shadow worker failed: error_type=MarketDataCollectionError "
+        "error_kind=timeout error_operation=order_book\n"
+    )
+    assert completed.stderr == ""
+
+
 @pytest.mark.parametrize(
     "sentinel",
     [

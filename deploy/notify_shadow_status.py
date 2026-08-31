@@ -51,6 +51,17 @@ MAX_LEGACY_CONFIG_BYTES = 65_536
 MAX_RESPONSE_BYTES = 64
 PHYSICAL_STATE_CATEGORY = "physical_state_validation_error"
 STOP_TARGET_ABSENT_CATEGORY = "stop_target_absent"
+MARKET_DATA_CATEGORY = "market_data_collection_error"
+SAFE_MARKET_DATA_FAILURE_KINDS = {
+    "empty", "fetch", "timeout", "parse", "malformed",
+}
+SAFE_MARKET_DATA_FAILURE_OPERATIONS = {
+    "auth_preflight", "top_trading_value", "stock_basic",
+    "minute_chart_1m", "minute_chart_5m", "minute_chart_60m",
+    "tick_strength", "program_trade", "foreign_window_trade",
+    "order_book", "recent_ticks", "market_snapshot", "market_regime_60m",
+    "chart_true_range",
+}
 SAFE_FAILURE_CATEGORIES = {
     "image_pull_no_space",
     "image_pull_auth",
@@ -59,6 +70,7 @@ SAFE_FAILURE_CATEGORIES = {
     "image_pull_failed",
     PHYSICAL_STATE_CATEGORY,
     STOP_TARGET_ABSENT_CATEGORY,
+    MARKET_DATA_CATEGORY,
     "container_identity_mismatch",
     "graceful_stop_timeout",
     "runtime_terminal_nonoperational",
@@ -273,12 +285,13 @@ def _failure_message(
     value: Mapping[str, object], *, source_sha: str, image_digest: str,
     activation_id: str, desired_state: str,
 ) -> str | None:
+    required_keys = {
+        "schema_version", "source_sha", "image_digest", "activation_id",
+        "desired_state", "command_id", "ssm_status", "ssm_response_code",
+        "stdout_bytes", "stderr_bytes", "failure_category", "terminal",
+    }
     if (
-        set(value) != {
-            "schema_version", "source_sha", "image_digest", "activation_id",
-            "desired_state", "command_id", "ssm_status", "ssm_response_code",
-            "stdout_bytes", "stderr_bytes", "failure_category", "terminal",
-        }
+        set(value) not in (required_keys, required_keys | {"market_data_failure"})
         or type(value.get("schema_version")) is not int
         or value.get("schema_version") != 1
         or not _matching_tuple(
@@ -301,6 +314,7 @@ def _failure_message(
             or isinstance(value.get("terminal"), Mapping)
         )
         or value.get("failure_category") not in SAFE_FAILURE_CATEGORIES
+        or not _valid_market_data_failure(value.get("market_data_failure"))
     ):
         return None
     category = value["failure_category"]
@@ -318,6 +332,19 @@ def _failure_message(
         f"action={desired_state} | category={category} | "
         f"activation={activation_id} | source={source_sha[:12]} | "
         "account/order/revoke=disabled | live-trading=disabled"
+    )
+
+
+def _valid_market_data_failure(value: object) -> bool:
+    if value is None:
+        return True
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"kind", "operation"}
+        and isinstance(value.get("kind"), str)
+        and value.get("kind") in SAFE_MARKET_DATA_FAILURE_KINDS
+        and isinstance(value.get("operation"), str)
+        and value.get("operation") in SAFE_MARKET_DATA_FAILURE_OPERATIONS
     )
 
 

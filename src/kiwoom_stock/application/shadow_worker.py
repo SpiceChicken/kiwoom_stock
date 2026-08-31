@@ -18,6 +18,10 @@ from kiwoom_stock.application.execution import (
     ExecutionPolicy,
     SHADOW_PROCESS_LOCK_PATH,
 )
+from kiwoom_stock.application.ports import (
+    MarketDataCollectionError,
+    MarketDataFailureKind,
+)
 from kiwoom_stock.application.shadow_lifecycle import (
     ContinuousLifecycle,
     RunDeadline,
@@ -56,6 +60,60 @@ SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 4
 # session boundary. Retry only before the first successful cycle and keep the
 # complete retry budget well inside the bounded activation window.
 SHADOW_BOOTSTRAP_RETRY_DELAYS_SECONDS = (5.0, 15.0, 30.0)
+SAFE_MARKET_DATA_FAILURE_KINDS = frozenset(
+    failure_kind.value for failure_kind in MarketDataFailureKind
+)
+# Keep this list provider-neutral and bounded.  These are the operation names
+# emitted by the market gateway/collector; raw provider paths and messages are
+# deliberately not part of the terminal evidence contract.
+SAFE_MARKET_DATA_FAILURE_OPERATIONS = frozenset(
+    {
+        "auth_preflight",
+        "top_trading_value",
+        "stock_basic",
+        "minute_chart_1m",
+        "minute_chart_5m",
+        "minute_chart_60m",
+        "tick_strength",
+        "program_trade",
+        "foreign_window_trade",
+        "order_book",
+        "recent_ticks",
+        "market_snapshot",
+        "market_regime_60m",
+        "chart_true_range",
+    }
+)
+
+
+def _validated_market_data_details(
+    error_type: str | None,
+    error_kind: str | None,
+    error_operation: str | None,
+) -> tuple[str, str] | None:
+    if (
+        error_type != "MarketDataCollectionError"
+        or not isinstance(error_kind, str)
+        or error_kind not in SAFE_MARKET_DATA_FAILURE_KINDS
+        or not isinstance(error_operation, str)
+        or error_operation not in SAFE_MARKET_DATA_FAILURE_OPERATIONS
+    ):
+        return None
+    return error_kind, error_operation
+
+
+def market_data_failure_details(
+    error: BaseException | None,
+) -> tuple[str, str] | None:
+    """Return only bounded market-data labels safe for terminal evidence."""
+
+    if not isinstance(error, MarketDataCollectionError):
+        return None
+    kind = error.kind.value if isinstance(error.kind, MarketDataFailureKind) else None
+    operation = error.operation if isinstance(error.operation, str) else None
+    return _validated_market_data_details(
+        "MarketDataCollectionError", kind, operation
+    )
 
 
 class ShadowWorkerError(RuntimeError):
@@ -79,10 +137,14 @@ class ShadowCycleTerminated(ShadowWorkerError):
         *,
         resources_closed: bool,
         error_type: str | None = None,
+        error_kind: str | None = None,
+        error_operation: str | None = None,
     ) -> None:
         self.reason = reason
         self.resources_closed = resources_closed
         self.error_type = error_type
+        self.error_kind = error_kind
+        self.error_operation = error_operation
         super().__init__("shadow cycle terminated")
 
 
@@ -287,6 +349,8 @@ class ShadowContinuousResult:
     side_effects: Mapping[str, bool]
     reason: str
     error_type: str | None = None
+    error_kind: str | None = None
+    error_operation: str | None = None
 
     @property
     def exit_code(self) -> int:
@@ -314,6 +378,13 @@ class ShadowContinuousResult:
         }
         if self.error_type is not None:
             result["error_type"] = self.error_type
+        details = _validated_market_data_details(
+            self.error_type,
+            self.error_kind,
+            self.error_operation,
+        )
+        if details is not None:
+            result["error_kind"], result["error_operation"] = details
         return result
 
 
@@ -636,6 +707,8 @@ def run_shadow_continuous(
         status: str,
         reason: ShadowTerminalReason,
         error_type: str | None = None,
+        error_kind: str | None = None,
+        error_operation: str | None = None,
     ) -> ShadowContinuousResult:
         return ShadowContinuousResult(
             status=status,
@@ -654,6 +727,8 @@ def run_shadow_continuous(
             side_effects=_zero_external_side_effects(),
             reason=reason.value,
             error_type=error_type,
+            error_kind=error_kind,
+            error_operation=error_operation,
         )
 
     try:
@@ -713,6 +788,8 @@ def run_shadow_continuous(
                                 "FAILED",
                                 error.reason,
                                 error.error_type,
+                                error.error_kind,
+                                error.error_operation,
                             )
                         if error.reason is ShadowTerminalReason.STOP_REQUESTED:
                             return terminal("STOPPED", error.reason)
@@ -755,7 +832,13 @@ def run_shadow_continuous(
                                     ShadowTerminalReason.STOP_REQUESTED,
                                 )
                             continue
-                        return terminal("FAILED", error.reason, error.error_type)
+                        return terminal(
+                            "FAILED",
+                            error.reason,
+                            error.error_type,
+                            error.error_kind,
+                            error.error_operation,
+                        )
                     except BaseException as error:
                         last_closed = False
                         return terminal(

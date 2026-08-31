@@ -68,6 +68,19 @@ TERMINAL_KEYS = {
     "db_reopens", "resources_closed", "side_effects", "reason",
 }
 TERMINAL_OPTIONAL_KEYS = {"error_type"}
+TERMINAL_MARKET_DATA_OPTIONAL_KEYS = {
+    "error_type", "error_kind", "error_operation",
+}
+SAFE_MARKET_DATA_FAILURE_KINDS = {
+    "empty", "fetch", "timeout", "parse", "malformed",
+}
+SAFE_MARKET_DATA_FAILURE_OPERATIONS = {
+    "auth_preflight", "top_trading_value", "stock_basic",
+    "minute_chart_1m", "minute_chart_5m", "minute_chart_60m",
+    "tick_strength", "program_trade", "foreign_window_trade",
+    "order_book", "recent_ticks", "market_snapshot", "market_regime_60m",
+    "chart_true_range",
+}
 DECISION_TELEMETRY_KEYS = {
     "market_regime", "strategy_reason_code", "strategy_intent", "paper_action",
     "position_before", "trading_window", "session_phase", "net_force_band",
@@ -586,7 +599,11 @@ def validate_cycle_sequence(
 
 def _validate_terminal_shape(item: dict[str, object]) -> None:
     keys = set(item)
-    if keys not in (TERMINAL_KEYS, TERMINAL_KEYS | TERMINAL_OPTIONAL_KEYS):
+    if keys not in (
+        TERMINAL_KEYS,
+        TERMINAL_KEYS | TERMINAL_OPTIONAL_KEYS,
+        TERMINAL_KEYS | TERMINAL_MARKET_DATA_OPTIONAL_KEYS,
+    ):
         raise EvidenceError("terminal_keys_invalid")
     error_type = item.get("error_type")
     if "error_type" in item and (
@@ -594,6 +611,17 @@ def _validate_terminal_shape(item: dict[str, object]) -> None:
         or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", error_type) is None
     ):
         raise EvidenceError("terminal_error_type_invalid")
+    if "error_kind" in item or "error_operation" in item:
+        if (
+            keys != TERMINAL_KEYS | TERMINAL_MARKET_DATA_OPTIONAL_KEYS
+            or error_type != "MarketDataCollectionError"
+            or not isinstance(item.get("error_kind"), str)
+            or item.get("error_kind") not in SAFE_MARKET_DATA_FAILURE_KINDS
+            or not isinstance(item.get("error_operation"), str)
+            or item.get("error_operation")
+            not in SAFE_MARKET_DATA_FAILURE_OPERATIONS
+        ):
+            raise EvidenceError("terminal_market_data_diagnostic_invalid")
 
 
 def _validate_terminal_timing(
