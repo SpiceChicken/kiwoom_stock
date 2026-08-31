@@ -231,6 +231,61 @@ def test_activation_failure_survives_alert_sink_failure():
     assert ledger.occurrences[OCCURRENCE["occurrence_id"]]["closure_state"] == "ALERTED"
 
 
+def test_activation_failure_persists_only_safe_market_data_diagnostic():
+    class Sender:
+        def read_failure_output(self, **kwargs):
+            assert kwargs == {"command_id": "command-1"}
+            sentinel = (
+                "shadow worker failed: error_type=MarketDataCollectionError "
+                "error_kind=timeout error_operation=stock_basic"
+            )
+            return sentinel, "raw provider details must not be persisted"
+
+    class Sink:
+        def __init__(self):
+            self.notifications = []
+
+        def notify(self, **kwargs):
+            self.notifications.append(kwargs)
+
+    sink = Sink()
+    ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
+    result = CStarObserver(
+        ledger,
+        evidence_sender=Sender(),
+        sink=sink,
+    ).process_ssm_event(_event("Failed"))
+
+    assert result.closure_state == "ALERTED"
+    expected = {
+        "category": "market_data_collection_error",
+        "error_kind": "timeout",
+        "error_operation": "stock_basic",
+    }
+    assert ledger.occurrences[OCCURRENCE["occurrence_id"]]["failure_diagnostic"] == expected
+    assert sink.notifications == [{
+        "category": "observer_alert",
+        "message": '{"command_id":"command-1","document":"KiwoomStock-ShadowCStarActivation",'
+        '"failure_diagnostic":{"category":"market_data_collection_error",'
+        '"error_kind":"timeout","error_operation":"stock_basic"},"occurrence_id":"'
+        + "a" * 64 + '","status":"Failed"}',
+    }]
+
+
+def test_activation_failure_ignores_unallowlisted_market_data_diagnostic():
+    class Sender:
+        def read_failure_output(self, **kwargs):
+            return (
+                "shadow worker failed: error_type=MarketDataCollectionError "
+                "error_kind=timeout error_operation=secret_endpoint",
+                None,
+            )
+
+    ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
+    CStarObserver(ledger, evidence_sender=Sender()).process_ssm_event(_event("Failed"))
+    assert "failure_diagnostic" not in ledger.occurrences[OCCURRENCE["occurrence_id"]]
+
+
 def test_foreign_document_and_unknown_occurrence_are_rejected():
     ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
     with pytest.raises(ObserverError, match="foreign command"):
@@ -333,6 +388,32 @@ def test_dynamo_records_evidence_command_with_pending_condition():
     }
 
 
+def test_dynamo_records_bounded_failure_diagnostic_on_occurrence_meta():
+    class Table:
+        def __init__(self):
+            self.kwargs = None
+
+        def update_item(self, **kwargs):
+            self.kwargs = kwargs
+
+    diagnostic = {
+        "category": "market_data_collection_error",
+        "error_kind": "empty",
+        "error_operation": "recent_ticks",
+    }
+    table = Table()
+    DynamoCStarObserverLedger(table).record_failure_diagnostic(
+        occurrence_id="a" * 64,
+        diagnostic=diagnostic,
+    )
+    assert table.kwargs == {
+        "Key": {"PK": "OCC#" + "a" * 64, "SK": "META"},
+        "UpdateExpression": "SET failure_diagnostic = :diagnostic",
+        "ConditionExpression": "attribute_exists(PK) AND attribute_exists(SK)",
+        "ExpressionAttributeValues": {":diagnostic": diagnostic},
+    }
+
+
 def test_evidence_export_is_bounded_and_content_addressed():
     class Sink:
         def __init__(self):
@@ -388,6 +469,22 @@ def test_evidence_sender_reads_bounded_ssm_status():
 
     sender = Boto3EvidenceCommandSender(Client())
     assert sender.read_status(command_id="command-1") == "Failed"
+
+
+def test_evidence_sender_reads_bounded_activation_failure_output():
+    class Client:
+        def get_command_invocation(self, **kwargs):
+            return {
+                "Status": "Failed",
+                "ResponseCode": 1,
+                "StandardOutputContent": "safe stdout",
+                "StandardErrorContent": "safe stderr",
+            }
+
+    sender = Boto3EvidenceCommandSender(Client())
+    assert sender.read_failure_output(command_id="command-1") == (
+        "safe stdout", "safe stderr",
+    )
 
 
 def test_metrics_only_sink_does_not_read_or_send_slack_secret():

@@ -61,6 +61,14 @@ diagnostic terminal summary, only the exact allowlisted
 terminal `error_type` is reduced to `null` rather than copied into the durable
 artifact.
 
+For an automatic C* activation failure, the Observer may read the terminal SSM
+invocation output once and persist only the exact market-data diagnostic tuple
+`market_data_collection_error` plus its allowlisted `error_kind` and
+`error_operation` on the occurrence `META` item. Conflicting, oversized, or
+unknown values are discarded. This lets the next failure be diagnosed from the
+automatic control plane without storing raw provider output, exception text, or
+credentials.
+
 Only the worker's exact complete line
 `shadow worker failed: shadow container is absent; stop identity cannot be proven`
 is action-specific. For `stop`, it is emitted as `stop_target_absent` and the
