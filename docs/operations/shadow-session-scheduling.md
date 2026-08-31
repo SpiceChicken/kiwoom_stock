@@ -152,6 +152,12 @@ host read-back, C* release rotation과 schedule tuple read-back을 완료했으�
 현재 start/stop/reconciliation은 `ENABLED`다. 개장 전 release 적용이므로 실제
 worker activation은 발생시키지 않았다.
 
+Observer v7은 terminal activation failure를 자동으로 한 번 조회해
+allowlisted market-data `failure_diagnostic`만 occurrence `META`와 보호된
+failure notification에 기록한다. 이 보완은 raw output이나 credential을
+저장하지 않으며, Lambda alias와 CloudFormation package read-back까지
+완료했다.
+
 다음 평일 acceptance는 실제 자동 경로를 한 번만 검증한다. 08:50 start의
 `SESSION#`/`OCC#`/SSM command, 09:00 이후 첫 safe tick 또는 휴장일
 `CLOSED/calendar-closed`, 15:30 deadline, 15:35 stop와 observer evidence closure를

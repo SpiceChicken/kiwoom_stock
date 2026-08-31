@@ -101,7 +101,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
 | C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v2, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 6, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 7, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -118,8 +118,8 @@ observer/reconciliation closure evidence를 별도 확인한다.
   bootstrap은 schedule을 끄고 generation/release/pointer를 조건부 seed/read-back한
   뒤에만 다시 켠다.
 - `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
-  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias는 version 7,
-  observer alias는 version 6이다.
+  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias와 observer
+  alias는 모두 version 7이다.
 
 2026-08-27 KST DynamoDB transaction remediation read-back:
 
@@ -209,6 +209,12 @@ observer/reconciliation closure evidence를 별도 확인한다.
   EC2는 실행 상태이고 SSM Agent는 `Online`이며, 다음 평일 08:50 automatic
   start → 09:00 이후 첫 safe tick → 15:35 stop/evidence가 최종 acceptance
   gate다. 실거래 capability는 계속 비활성이다.
+- Observer v7은 terminal activation failure의 SSM stdout/stderr를 자동으로
+  조회하되, 정확히 allowlisted 된 market-data `category/kind/operation`만
+  `failure_diagnostic`으로 occurrence `META`에 저장·알림에 반영한다.
+  oversized·충돌·미등록 값과 raw provider output, exception text, credential은
+  폐기한다. CloudFormation `UPDATE_COMPLETE`, `live` alias version 7 및
+  package hash read-back을 완료했다.
 
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
