@@ -308,6 +308,69 @@ def test_continuous_failure_is_redacted_and_never_starts_next_cycle(tmp_path):
     assert "secret" not in json.dumps(result.to_safe_dict())
 
 
+def test_continuous_retries_bounded_market_data_bootstrap_failure(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now, stop_after_waits=4)
+    constructions = []
+
+    def factory(*_args):
+        constructions.append(now[0])
+        if len(constructions) <= 3:
+            raise ShadowExecutionFailure(
+                ShadowTerminalReason.FAILURE,
+                "MarketDataCollectionError",
+                (),
+            )
+        return FakeRuntime()
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: None,
+        lock_path=(tmp_path / "bootstrap-retry.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        calendar=lambda _target: CalendarDecision.OPEN,
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "STOPPED"
+    assert result.cycles == 1
+    assert len(constructions) == 4
+    assert event.waits == [5.0, 15.0, 30.0, 60.0]
+
+
+def test_continuous_market_data_bootstrap_retry_budget_remains_bounded(tmp_path):
+    now = [0.0]
+    event = AdvancingStopEvent(now)
+    constructions = []
+
+    def factory(*_args):
+        constructions.append(now[0])
+        raise ShadowExecutionFailure(
+            ShadowTerminalReason.FAILURE,
+            "MarketDataCollectionError",
+            (),
+        )
+
+    result = run_shadow_continuous(
+        _continuous_policy(),
+        runtime_factory=factory,
+        emit=lambda _evidence: None,
+        lock_path=(tmp_path / "bootstrap-budget.lock").resolve(),
+        clock=lambda: datetime(2026, 8, 3, 1, tzinfo=timezone.utc),
+        stop_event=event,
+        monotonic=lambda: now[0],
+        lock_factory=ShadowProcessLock,
+    )
+
+    assert result.status == "FAILED"
+    assert result.error_type == "MarketDataCollectionError"
+    assert len(constructions) == 4
+    assert event.waits == [5.0, 15.0, 30.0]
+
+
 def test_continuous_fails_closed_when_the_database_identity_changes(tmp_path):
     now = [0.0]
     event = AdvancingStopEvent(now, stop_after_waits=2)

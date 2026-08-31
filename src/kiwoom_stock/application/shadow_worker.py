@@ -6,6 +6,7 @@ import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
+import logging
 from pathlib import Path
 from threading import Event
 import time
@@ -46,10 +47,15 @@ from kiwoom_stock.utils.market_cal import (
 
 
 _SEOUL = ZoneInfo("Asia/Seoul")
+logger = logging.getLogger(__name__)
 SHADOW_EVIDENCE_SCHEMA_VERSION = 3
 # Continuous evidence adds timing and database-reopen attestations without
 # changing the established one-shot evidence contract.
 SHADOW_CONTINUOUS_EVIDENCE_SCHEMA_VERSION = 4
+# A market-data provider can transiently reject the first request at the
+# session boundary. Retry only before the first successful cycle and keep the
+# complete retry budget well inside the bounded activation window.
+SHADOW_BOOTSTRAP_RETRY_DELAYS_SECONDS = (5.0, 15.0, 30.0)
 
 
 class ShadowWorkerError(RuntimeError):
@@ -615,6 +621,7 @@ def run_shadow_continuous(
     previous_cycle_started: float | None = None
     previous_db_identity: str | None = None
     db_reopens = 0
+    bootstrap_market_data_retries = 0
 
     def bounded_remaining() -> float:
         remaining = lifecycle.remaining()
@@ -711,6 +718,43 @@ def run_shadow_continuous(
                             return terminal("STOPPED", error.reason)
                         if error.reason is ShadowTerminalReason.RUN_DEADLINE:
                             return terminal("DEADLINE", error.reason)
+                        if (
+                            cycles == 0
+                            and error.resources_closed is True
+                            and error.error_type == "MarketDataCollectionError"
+                            and bootstrap_market_data_retries
+                            < len(SHADOW_BOOTSTRAP_RETRY_DELAYS_SECONDS)
+                        ):
+                            delay = SHADOW_BOOTSTRAP_RETRY_DELAYS_SECONDS[
+                                bootstrap_market_data_retries
+                            ]
+                            bootstrap_market_data_retries += 1
+                            logger.warning(
+                                "Retrying shadow bootstrap after market-data "
+                                "collection failure: attempt=%d/%d delay=%.1fs",
+                                bootstrap_market_data_retries,
+                                len(SHADOW_BOOTSTRAP_RETRY_DELAYS_SECONDS),
+                                delay,
+                            )
+                            try:
+                                remaining = bounded_remaining()
+                            except ShadowRunDeadlineExceeded:
+                                return terminal(
+                                    "DEADLINE",
+                                    ShadowTerminalReason.RUN_DEADLINE,
+                                )
+                            except ShadowShutdownDeadlineExceeded:
+                                return terminal(
+                                    "FAILED",
+                                    ShadowTerminalReason.SHUTDOWN_DEADLINE,
+                                )
+                            if signal_latch.wait(min(delay, remaining)):
+                                lifecycle.stop_requested()
+                                return terminal(
+                                    "STOPPED",
+                                    ShadowTerminalReason.STOP_REQUESTED,
+                                )
+                            continue
                         return terminal("FAILED", error.reason, error.error_type)
                     except BaseException as error:
                         last_closed = False
