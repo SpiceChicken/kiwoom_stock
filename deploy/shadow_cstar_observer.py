@@ -45,6 +45,23 @@ TERMINAL_STATUS_MAP = {
     "Terminated": "TERMINATED",
 }
 OCCURRENCE_COMMENT_RE = re.compile(r"^cstar(?:-evidence)?:([0-9a-f]{64})$")
+MAX_FAILURE_OUTPUT_BYTES = 65_536
+SAFE_MARKET_DATA_FAILURE_KINDS = frozenset(
+    {"empty", "fetch", "timeout", "parse", "malformed"}
+)
+SAFE_MARKET_DATA_FAILURE_OPERATIONS = frozenset(
+    {
+        "auth_preflight", "top_trading_value", "stock_basic",
+        "minute_chart_1m", "minute_chart_5m", "minute_chart_60m",
+        "tick_strength", "program_trade", "foreign_window_trade",
+        "order_book", "recent_ticks", "market_snapshot", "market_regime_60m",
+        "chart_true_range",
+    }
+)
+MARKET_DATA_FAILURE_SENTINEL_RE = re.compile(
+    r"^shadow worker failed: error_type=MarketDataCollectionError "
+    r"error_kind=(?P<kind>[a-z]+) error_operation=(?P<operation>[a-z0-9_]+)$"
+)
 
 
 class ObserverError(ValueError):
@@ -63,6 +80,12 @@ class ObserverLedger(Protocol):
         runtime_state: str,
         closure_state: str | None = None,
     ) -> None: ...
+    def record_failure_diagnostic(
+        self,
+        *,
+        occurrence_id: str,
+        diagnostic: Mapping[str, str],
+    ) -> None: ...
     def due_occurrences(self) -> list[Mapping[str, object]]: ...
 
 
@@ -80,6 +103,12 @@ class EvidenceCommandSender(Protocol):
     ) -> str: ...
 
     def read_output(self, *, command_id: str) -> bytes: ...
+
+    def read_failure_output(
+        self,
+        *,
+        command_id: str,
+    ) -> tuple[str | None, str | None]: ...
 
 
 class EvidenceSink(Protocol):
@@ -105,6 +134,36 @@ def _bounded_text(value: object, maximum: int = 512) -> str:
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum:
         raise _invalid()
     return value
+
+
+def _market_data_failure_diagnostic(
+    streams: tuple[str | None, str | None],
+) -> dict[str, str] | None:
+    matches: set[tuple[str, str]] = set()
+    for stream in streams:
+        if not isinstance(stream, str):
+            continue
+        if len(stream.encode("utf-8")) > MAX_FAILURE_OUTPUT_BYTES:
+            continue
+        for line in stream.splitlines():
+            match = MARKET_DATA_FAILURE_SENTINEL_RE.fullmatch(line)
+            if match is None:
+                continue
+            kind = match.group("kind")
+            operation = match.group("operation")
+            if (
+                kind in SAFE_MARKET_DATA_FAILURE_KINDS
+                and operation in SAFE_MARKET_DATA_FAILURE_OPERATIONS
+            ):
+                matches.add((kind, operation))
+    if len(matches) != 1:
+        return None
+    kind, operation = next(iter(matches))
+    return {
+        "category": "market_data_collection_error",
+        "error_kind": kind,
+        "error_operation": operation,
+    }
 
 
 def _event_fields(event: Mapping[str, object]) -> tuple[str, str | None, str, str]:
@@ -158,26 +217,66 @@ class CStarObserver:
         command_id: str,
         document: str,
         status: str,
+        diagnostic: Mapping[str, str] | None = None,
     ) -> str | None:
         if self.sink is None:
             return None
         try:
+            message_payload: dict[str, object] = {
+                "occurrence_id": occurrence_id,
+                "command_id": command_id,
+                "document": document,
+                "status": status,
+            }
+            if diagnostic is not None:
+                message_payload["failure_diagnostic"] = dict(diagnostic)
             self.sink.notify(
                 category="observer_alert",
-                message=json.dumps(
-                    {
-                        "occurrence_id": occurrence_id,
-                        "command_id": command_id,
-                        "document": document,
-                        "status": status,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+                message=json.dumps(message_payload, sort_keys=True, separators=(",", ":")),
             )
         except Exception:
             return "observer_alert_failed"
         return None
+
+    def _read_failure_diagnostic(
+        self,
+        *,
+        command_id: str,
+    ) -> dict[str, str] | None:
+        if self.evidence_sender is None:
+            return None
+        reader = getattr(self.evidence_sender, "read_failure_output", None)
+        if not callable(reader):
+            return None
+        try:
+            streams = reader(command_id=command_id)
+        except Exception:
+            return None
+        if (
+            not isinstance(streams, tuple)
+            or len(streams) != 2
+            or not all(value is None or isinstance(value, str) for value in streams)
+        ):
+            return None
+        return _market_data_failure_diagnostic(streams)
+
+    def _record_failure_diagnostic(
+        self,
+        *,
+        occurrence_id: str,
+        diagnostic: Mapping[str, str] | None,
+    ) -> None:
+        if diagnostic is None:
+            return
+        recorder = getattr(self.ledger, "record_failure_diagnostic", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(occurrence_id=occurrence_id, diagnostic=diagnostic)
+        except Exception:
+            # Terminal command state is already durable. Diagnostic persistence
+            # is best-effort and must not turn a known failure into a retry.
+            return
 
     def process_ssm_event(self, event: Mapping[str, object]) -> ObservationResult:
         command_id, occurrence_id, status, document = _event_fields(event)
@@ -301,6 +400,15 @@ class CStarObserver:
         )
         evidence_requested = False
         reason: str | None = None
+        failure_diagnostic: dict[str, str] | None = None
+        if status in TERMINAL_STATUS_MAP and status != "Success":
+            failure_diagnostic = self._read_failure_diagnostic(
+                command_id=command_id,
+            )
+            self._record_failure_diagnostic(
+                occurrence_id=occurrence_id,
+                diagnostic=failure_diagnostic,
+            )
         if status in TERMINAL_STATUS_MAP and self.sink is not None:
             # The terminal state is durable already; notification failure must
             # not turn a known SSM failure into a retryable event.
@@ -309,6 +417,7 @@ class CStarObserver:
                 command_id=command_id,
                 document=document,
                 status=status,
+                diagnostic=failure_diagnostic,
             )
         if status == "Success" and occurrence.get("phase") == "stop":
             if self.evidence_sender is not None:
@@ -550,6 +659,30 @@ class Boto3EvidenceCommandSender:
             raise ObserverError("evidence output invalid")
         return output.encode("utf-8")
 
+    def read_failure_output(
+        self,
+        *,
+        command_id: str,
+    ) -> tuple[str | None, str | None]:
+        response = self.client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=self.instance_id,
+        )
+        if not isinstance(response, Mapping):
+            raise ObserverError("failure invocation invalid")
+        status = response.get("Status")
+        if not isinstance(status, str) or status not in TERMINAL_STATUS_MAP or status == "Success":
+            raise ObserverError("failure invocation is not terminal")
+        output = response.get("StandardOutputContent")
+        error = response.get("StandardErrorContent")
+        for value in (output, error):
+            if value is not None and (
+                not isinstance(value, str)
+                or len(value.encode("utf-8")) > MAX_FAILURE_OUTPUT_BYTES
+            ):
+                raise ObserverError("failure invocation output invalid")
+        return cast(str | None, output), cast(str | None, error)
+
 
 class Boto3EvidenceSink:
     """S3 evidence sink plus metrics-first optional Slack notification."""
@@ -652,6 +785,14 @@ class InMemoryObserverLedger:
             raise ObserverError("evidence command mismatch")
         item["evidence_command_id"] = command_id
 
+    def record_failure_diagnostic(
+        self,
+        *,
+        occurrence_id: str,
+        diagnostic: Mapping[str, str],
+    ) -> None:
+        self.occurrences[occurrence_id]["failure_diagnostic"] = dict(diagnostic)
+
     def advance(self, *, occurrence_id, command_state, runtime_state, closure_state=None):
         item = self.occurrences[occurrence_id]
         validate_state_transition(
@@ -721,6 +862,19 @@ class DynamoCStarObserverLedger:
                 ":command_id": command_id,
                 ":pending": "EVIDENCE_PENDING",
             },
+        )
+
+    def record_failure_diagnostic(
+        self,
+        *,
+        occurrence_id: str,
+        diagnostic: Mapping[str, str],
+    ) -> None:
+        self.table.update_item(
+            Key={"PK": f"OCC#{occurrence_id}", "SK": "META"},
+            UpdateExpression="SET failure_diagnostic = :diagnostic",
+            ConditionExpression="attribute_exists(PK) AND attribute_exists(SK)",
+            ExpressionAttributeValues={":diagnostic": dict(diagnostic)},
         )
 
     def advance(
