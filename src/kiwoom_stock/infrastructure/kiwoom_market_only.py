@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import math
 import threading
 import time
@@ -26,6 +27,9 @@ from kiwoom_stock.monitoring.collector import (
     MarketDataCollector,
 )
 from kiwoom_stock.settings import KiwoomEndpoint
+
+
+logger = logging.getLogger(__name__)
 
 
 MAX_HTTP_ATTEMPTS = 23
@@ -336,13 +340,32 @@ class KiwoomMarketDataGatewayAdapter:
             self._auth_preflight()
         except MarketDataCollectionError as error:
             kind = error.kind
+            logger.warning(
+                "Kiwoom market-data failure: operation=%s kind=%s",
+                "auth_preflight",
+                kind.value,
+            )
         except KiwoomAPIError as error:
             kind = _KIWOOM_FAILURE_KINDS.get(
                 error.category,
                 MarketDataFailureKind.FETCH,
             )
+            logger.warning(
+                "Kiwoom market-data failure: operation=%s kind=%s "
+                "category=%s status=%s",
+                "auth_preflight",
+                kind.value,
+                error.category,
+                error.status_code,
+            )
         except Exception:
             kind = MarketDataFailureKind.FETCH
+            logger.warning(
+                "Kiwoom market-data failure: operation=%s kind=%s "
+                "category=unexpected",
+                "auth_preflight",
+                kind.value,
+            )
         else:
             return
         raise MarketDataCollectionError(kind, "auth_preflight") from None
@@ -361,8 +384,23 @@ class KiwoomMarketDataGatewayAdapter:
                 error.category,
                 MarketDataFailureKind.FETCH,
             )
+            logger.warning(
+                "Kiwoom market-data failure: operation=%s kind=%s "
+                "category=%s status=%s",
+                operation,
+                kind.value,
+                error.category,
+                error.status_code,
+            )
             raise MarketDataCollectionError(kind, operation) from error
         except Exception as error:
+            logger.warning(
+                "Kiwoom market-data failure: operation=%s kind=%s "
+                "category=unexpected exception_type=%s",
+                operation,
+                MarketDataFailureKind.FETCH.value,
+                type(error).__name__,
+            )
             raise MarketDataCollectionError(
                 MarketDataFailureKind.FETCH,
                 operation,
