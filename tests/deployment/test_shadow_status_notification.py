@@ -433,6 +433,26 @@ def test_physical_state_category_is_allowlisted_without_error_reflection():
     assert "error_type" not in message
 
 
+def test_market_data_diagnostic_labels_are_accepted_without_message_reflection():
+    message = notification._failure_message(
+        {
+            **_diagnostic(),
+            "failure_category": "market_data_collection_error",
+            "market_data_failure": {
+                "kind": "timeout", "operation": "order_book",
+            },
+        },
+        source_sha=SOURCE_SHA,
+        image_digest=IMAGE,
+        activation_id=ACTIVATION_ID,
+        desired_state="continuous",
+    )
+    assert message is not None
+    assert "category=market_data_collection_error" in message
+    assert "order_book" not in message
+    assert "timeout" not in message
+
+
 def test_rejected_runtime_uses_only_allowlisted_diagnostic_category(tmp_path):
     evidence = tmp_path / "missing-evidence.json"
     diagnostic = tmp_path / "diagnostic.json"

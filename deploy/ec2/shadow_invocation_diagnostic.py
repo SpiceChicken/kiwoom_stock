@@ -15,6 +15,8 @@ from shadow_runtime_evidence import (
     MAX_INPUT_BYTES,
     MAX_LINE_BYTES,
     MAX_LINES,
+    SAFE_MARKET_DATA_FAILURE_KINDS,
+    SAFE_MARKET_DATA_FAILURE_OPERATIONS,
     SOURCE_RE,
     EvidenceError,
     _json_lines,
@@ -35,7 +37,17 @@ STOP_TARGET_ABSENT_SENTINEL = (
 )
 PHYSICAL_STATE_CATEGORY = "physical_state_validation_error"
 STOP_TARGET_ABSENT_CATEGORY = "stop_target_absent"
-SAFE_TERMINAL_ERROR_TYPES = {"PhysicalStateValidationError"}
+SAFE_TERMINAL_ERROR_TYPES = {
+    "PhysicalStateValidationError", "MarketDataCollectionError",
+}
+MARKET_DATA_TYPE_SENTINEL = (
+    "shadow worker failed: error_type=MarketDataCollectionError"
+)
+MARKET_DATA_SENTINEL_RE = re.compile(
+    r"^shadow worker failed: error_type=MarketDataCollectionError "
+    r"error_kind=(?P<kind>[a-z]+) "
+    r"error_operation=(?P<operation>[a-z0-9_]+)$"
+)
 SAFE_FAILURE_MARKERS = (
     ("shadow worker failed: image_pull_category=image_pull_no_space",
      "image_pull_no_space"),
@@ -85,6 +97,31 @@ def _bounded_lines(value: str | None) -> tuple[str, ...] | None:
     return tuple(lines)
 
 
+def _market_data_sentinel_details(
+    *streams: str | None,
+) -> tuple[str, str] | None:
+    matches: list[tuple[str, str]] = []
+    for stream in streams:
+        lines = _bounded_lines(stream)
+        if lines is None:
+            continue
+        for line in lines:
+            matched = MARKET_DATA_SENTINEL_RE.fullmatch(line)
+            if matched is None:
+                continue
+            kind = matched.group("kind")
+            operation = matched.group("operation")
+            if (
+                isinstance(kind, str)
+                and kind in SAFE_MARKET_DATA_FAILURE_KINDS
+                and isinstance(operation, str)
+                and operation in SAFE_MARKET_DATA_FAILURE_OPERATIONS
+            ):
+                matches.append((kind, operation))
+    unique = set(matches)
+    return next(iter(unique)) if len(unique) == 1 else None
+
+
 def _fallback_classification(
     status: object, terminal: Mapping[str, object] | None,
 ) -> str:
@@ -111,6 +148,10 @@ def _classification(
     for lines in (stdout_lines, stderr_lines):
         if lines is None:
             continue
+        if MARKET_DATA_TYPE_SENTINEL in lines:
+            categories.add("market_data_collection_error")
+        if _market_data_sentinel_details(stdout, stderr) is not None:
+            categories.add("market_data_collection_error")
         if PHYSICAL_STATE_SENTINEL in lines:
             categories.add(PHYSICAL_STATE_CATEGORY)
         if (
@@ -122,6 +163,10 @@ def _classification(
         terminal.get("error_type") == "PhysicalStateValidationError"
     ):
         categories.add(PHYSICAL_STATE_CATEGORY)
+    if terminal is not None and (
+        terminal.get("error_type") == "MarketDataCollectionError"
+    ):
+        categories.add("market_data_collection_error")
     if stderr is not None:
         for marker, category in SAFE_FAILURE_MARKERS:
             if marker in stderr:
@@ -203,7 +248,34 @@ def build_diagnostic(
             if terminal_error_type in SAFE_TERMINAL_ERROR_TYPES
             else None
         )
+        if terminal_error_type == "MarketDataCollectionError":
+            terminal_summary["error_kind"] = terminal.get("error_kind")
+            terminal_summary["error_operation"] = terminal.get("error_operation")
         result["terminal"] = terminal_summary
+    sentinel_details = _market_data_sentinel_details(stdout, stderr)
+    terminal_details = None
+    if terminal is not None and terminal.get("error_type") == "MarketDataCollectionError":
+        kind = terminal.get("error_kind")
+        operation = terminal.get("error_operation")
+        if (
+            isinstance(kind, str)
+            and kind in SAFE_MARKET_DATA_FAILURE_KINDS
+            and isinstance(operation, str)
+            and operation in SAFE_MARKET_DATA_FAILURE_OPERATIONS
+        ):
+            terminal_details = (kind, operation)
+    if (
+        sentinel_details is not None
+        and terminal_details is not None
+        and sentinel_details != terminal_details
+    ):
+        sentinel_details = None
+        terminal_details = None
+    details = terminal_details or sentinel_details
+    if details is not None:
+        result["market_data_failure"] = {
+            "kind": details[0], "operation": details[1],
+        }
     result["failure_category"] = _classification(
         status,
         stdout,
