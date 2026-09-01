@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-09-01 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-09-02 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다. 이 문서는 공개
 저장소에 있으므로 live host의 주소·네트워크·리소스 식별자는 기록하지 않는다.
@@ -100,8 +100,8 @@ observer/reconciliation closure evidence를 별도 확인한다.
 |---|---|
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
-| C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v2, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 8, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v4, both Active |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 11, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -238,6 +238,32 @@ observer/reconciliation closure evidence를 별도 확인한다.
   terminal evidence export와 Observer closure(`CLOSED` 또는 실제 failure 시
   `ALERTED`) 확인이 오늘 acceptance의 남은 단계다.
 
+2026-09-02 KST evidence export remediation과 보존 telemetry read-back:
+
+- 2026-09-01 stop occurrence의 SSM stop command는 `SUCCESS/STOPPED`였고,
+  named Docker volume 안의 telemetry는 `row_count=387`, `first_cycle=1`,
+  `last_cycle=387`로 보존되어 있었다. 실패는 스케줄·세션·DynamoDB transaction·
+  디스크가 아니라, evidence wrapper가 호스트 경로
+  `/var/lib/kiwoom/shadow-telemetry.db`를 직접 조회해 named volume을 찾지 못한
+  구조 결함이었다.
+- evidence wrapper는 이제 호스트 DB를 열지 않고 lock FD를 상속한 canonical
+  `kiwoom-shadow-worker telemetry-export-page`를 `network none`·`read-only`
+  로 실행한다. Observer는 occurrence의 immutable release intent를 검증해
+  image/source/worker/validator/document hash를 evidence command에 전달한다.
+- 첫 수정본은 12,288-byte page의 base64 JSON envelope가 SSM stdout 한도를
+  초과하는 별도 경계 결함을 드러냈다. evidence page를 최대 4,096 bytes로
+  제한한 문서 v4와 EC2 wrapper를 다시 배포했고, SSM `ResponseCode=0`으로
+  387-cycle telemetry read-back을 확인했다.
+- 이미 `ALERTED`였던 해당 occurrence는 activation을 재실행하지 않는 명시적
+  evidence-only recovery(최대 3회)로 재처리했다. Observer `live` alias v11이
+  evidence를 S3 content-addressed object로 저장하고 occurrence를 `CLOSED`로
+  전환한 것을 read-back했다. S3 object size는 6,604 bytes이며 실거래·주문·
+  계좌·외부 API side effect는 없었다.
+- EventBridge rule/target은 `ENABLED`와 `live` alias v11로 확인되었으나,
+  이번 recovery의 최종 closure는 status event를 Observer에 직접 전달해 검증했다.
+  따라서 다음 개장일에는 실제 SSM status event가 EventBridge를 통해 자동으로
+  Observer에 도달하는지까지 별도 acceptance gate로 확인한다.
+
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
 `dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
@@ -261,9 +287,9 @@ schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→st
 | Schedule state | start/stop `ENABLED`, `Asia/Seoul`, exact 08:50/15:35 KST |
 
 실거래·계좌 조회·주문 capability는 계속 비활성이다. 2026-09-01 start의 실제
-SSM submission, host fence effect, 첫 safe tick과 장중 지속 실행은 확인되었고,
-오늘 15:35 stop/evidence closure를 확인하는 acceptance만 남아 있다. 이 closure
-전에는 “일일 자동 실행이 검증 완료”라고 판정하지 않는다.
+SSM submission, host fence effect, 첫 safe tick, 장중 지속 실행과 stop/evidence
+payload 보존은 확인되었다. 다음 개장일에는 실제 status event의 EventBridge 자동
+전달을 포함한 전체 자동 closure를 다시 확인한다.
 
 AWS cutover read-back 기준:
 
@@ -364,8 +390,9 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
 
 ## 현재 남은 차단 항목
 
-- 2026-09-01 자동 start와 장중 지속 실행은 확인했다. 15:35 KST 자동 stop,
-  evidence export, 원장 closure까지 운영 모니터링;
+- 2026-09-01 자동 start와 장중 지속 실행, stop/evidence payload 및 원장 closure는
+  확인했다. 다음 개장일에 실제 SSM status event의 EventBridge 자동 전달까지
+  운영 모니터링;
 - 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
