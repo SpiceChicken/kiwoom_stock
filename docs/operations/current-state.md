@@ -284,7 +284,9 @@ observer/reconciliation closure evidence를 별도 확인한다.
 - 수정 후 실제 stop invocation이 EventBridge에서 Observer로 자동 전달되어
   해당 occurrence가 `PENDING`에서 `IN_PROGRESS`로 갱신된 것을 확인했다. 테스트
   start는 정상 장중 수명 전에 취소해 fail-closed로 정리했으며, 이 테스트의
-  stop은 terminal evidence가 없어 `FAILED/ALERTED`가 되었다. 컨테이너는 제거됐고
+  stop은 terminal evidence가 없어 `FAILED/ALERTED`가 되었다. host fence의 두
+  테스트 occurrence도 공식 `AMBIGUOUS` 상태로 기록되었고, 컨테이너는 제거됐다.
+  새 날짜의 occurrence identity와 격리되어 다음 start를 차단하지 않으며,
   Observer/Reconciliation DLQ는 0건이다.
 - 따라서 EventBridge 자동 전달 및 command-index 권한 문제는 해소되었다. 정상
   `Success → evidence export → CLOSED` 전체 자동 closure는 다음 실제 개장일의
