@@ -89,8 +89,7 @@ activation/reconciliation schedule을 먼저 `false`로 적용하고
 
 ```bash
 export AWS_DEFAULT_REGION=ap-northeast-2
-eval "$(aws --profile aws-admin configure export-credentials --format env)"
-unset AWS_PROFILE
+export AWS_PROFILE=kiwoom-cstar-release-rotator
 
 ./.venv/bin/python deploy/bootstrap_shadow_cstar_ledger.py \
   --region ap-northeast-2 \
@@ -108,6 +107,10 @@ unset AWS_PROFILE
 ```
 
 `--check`는 읽기 전용이다. 실제 적용은 동일한 인자로 `--check`만 제거한다.
+이 명령의 일상 profile은 `kiwoom-cstar-release-rotator`이며, root/Admin은 해당
+역할을 최초 bootstrap할 때만 사용한다. C* 실행 결과의 관측·증적 확인에는
+`kiwoom-cstar-observer`를 사용하고, 두 역할 모두 root/Admin 세션을 요구하지
+않는다.
 도구는 start/stop schedule의 ARN·timezone·expression·target generation을 먼저
 검증하고, 필요하면 두 schedule을 `DISABLED`로 만든다. 그 뒤 누락된 ledger item만
 조건부 transaction으로 추가하고 exact read-back을 통과한 경우에만 두 schedule을
@@ -314,6 +317,12 @@ success. Acceptance requires the same daily session lease for start and stop,
 valid terminal cleanup, evidence closure, and all side-effect flags remaining
 false. Missing event delivery is handled by reconciliation; no component
 automatically dispatches a replacement activation.
+
+Human read-back uses the non-admin `kiwoom-cstar-observer` profile. It is limited
+to the exact C* ledger, evidence prefix, schedules, SSM result APIs, EC2 health,
+CloudWatch alarms/metrics, and the three scheduler DLQs. Root/Admin is required
+only for the one-time IAM bootstrap that creates this role; it is not part of
+the scheduled execution or routine acceptance path.
 
 After a successful stop command, the observer durably records the evidence
 command ID on the occurrence. Reconciliation polls that evidence command while

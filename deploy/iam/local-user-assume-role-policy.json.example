@@ -26,6 +26,12 @@
       "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-cstar-release-rotator"
     },
     {
+      "Sid": "AssumeExactCStarObserverRole",
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole"],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-local-observer"
+    },
+    {
       "Sid": "AuthorizeExactSameDeviceLocalLogin",
       "Effect": "Allow",
       "Action": [

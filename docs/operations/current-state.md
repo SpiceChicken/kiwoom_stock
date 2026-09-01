@@ -383,7 +383,7 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   반환했다. EC2 inventory와 SSM managed-node health read는 허용되고 SSM Agent는
   Online이므로 GitHub/C* Run Command 자동화 의존성은 유지된다;
 - `kiwoom-local-provisioner` 역할·trust·inline policy와 관리자 1회 bootstrap을
-  적용했다. `aws-admin` root 세션에서 role과 `KiwoomLocalProvisioner`를
+  적용했다. 관리자 1회 bootstrap 세션에서 role과 `KiwoomLocalProvisioner`를
   생성하고, 기존 `KiwoomLocalAssumeOperatorRole`에 provisioner AssumeRole을
   추가했다. `SignInLocalDevelopmentAccess`는 `aws login`용 exact read-back 정책으로
   유지됐으며, 최종 role은 `kiwoom-local-provisioner`다. account/ARN은
@@ -403,6 +403,13 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   한정된 `iam:PassRole`만 허용한다. 기존 release item은 수정·삭제하지 않고
   새 release item과 조건부 active pointer 전환만 수행한다. 저장소 템플릿은
   `cstar-release-rotator-*.json.example`이다;
+- `kiwoom-local-observer` 역할·trust·inline policy를 추가하고,
+  `kiwoom-local-user`의 AssumeRole 대상에 exact 역할을 추가했다. 이 역할은
+  C* 원장·evidence prefix·start/stop/reconciliation schedule·SSM command 결과·
+  EC2 상태·CloudWatch alarm/metric·세 DLQ 속성만 읽는다. DynamoDB/S3 변경,
+  SSM 실행·shell, schedule 변경, Parameter Store/Secrets Manager, 주문·계좌,
+  IAM 변경 권한은 없다. 저장소 템플릿은
+  `local-observer-*.json.example`이며 일상 C* 검증은 이 역할을 사용한다;
 - 새 실제 Kiwoom 인증/시세 검증은 별도 명시적 read-only window 없이는 수행하지
   않는다. 과거 read-only evidence가 live worker·계좌·주문 capability를 승인하는
   근거가 되지는 않는다.

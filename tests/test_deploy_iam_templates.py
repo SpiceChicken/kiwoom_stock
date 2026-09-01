@@ -231,6 +231,15 @@ def test_local_user_can_only_assume_exact_local_roles():
         ),
     }
     assert statements[4] == {
+        "Sid": "AssumeExactCStarObserverRole",
+        "Effect": "Allow",
+        "Action": ["sts:AssumeRole"],
+        "Resource": (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/"
+            "kiwoom-local-observer"
+        ),
+    }
+    assert statements[5] == {
         "Sid": "AuthorizeExactSameDeviceLocalLogin",
         "Effect": "Allow",
         "Action": [
@@ -412,6 +421,81 @@ def test_local_operator_is_read_only_and_has_no_human_ssm_shell():
     }
     assert not {action for action in actions if action.startswith("iam:")}
     assert not {action for action in actions if action.startswith("kms:")}
+
+
+def test_local_observer_is_read_only_and_exactly_scoped_to_cstar_observation():
+    trust = _policy("local-observer-trust-policy.json.example")
+    trust_statement = _statements(trust)[0]
+    assert trust_statement["Principal"] == {
+        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
+    }
+    assert trust_statement["Action"] == "sts:AssumeRole"
+    assert trust_statement["Condition"] == {
+        "Null": {"aws:TokenIssueTime": "false"}
+    }
+
+    statements = _statements(_policy("local-observer-policy.json.example"))
+    actions = {
+        action for statement in statements for action in statement["Action"]
+    }
+    assert actions == {
+        "dynamodb:DescribeTable", "dynamodb:GetItem", "dynamodb:Query",
+        "dynamodb:Scan", "s3:ListBucket", "s3:GetObject",
+        "s3:GetObjectVersion", "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation", "ssm:GetConnectionStatus",
+        "ssm:ListCommandInvocations", "ssm:ListCommands",
+        "scheduler:GetSchedule", "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstances", "sqs:GetQueueAttributes", "sqs:GetQueueUrl",
+        "cloudwatch:DescribeAlarms", "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics", "cloudwatch:ListMetrics",
+    }
+    forbidden_prefixes = (
+        "iam:", "kms:", "secretsmanager:", "ssm:Send", "ssm:Start",
+        "ssmmessages:", "dynamodb:Put", "dynamodb:Update",
+        "dynamodb:Transact", "s3:Put", "s3:Delete", "sqs:Send",
+        "scheduler:Update", "cloudwatch:Put",
+    )
+    assert not any(
+        action.startswith(prefix)
+        for action in actions
+        for prefix in forbidden_prefixes
+    )
+
+    table = next(
+        statement for statement in statements
+        if statement["Sid"] == "ReadExactCStarLedgerTable"
+    )
+    assert table["Resource"] == (
+        "arn:aws:dynamodb:<AWS_REGION>:<AWS_ACCOUNT_ID>:table/"
+        "<CSTAR_TABLE_NAME>"
+    )
+    indexes = next(
+        statement for statement in statements
+        if statement["Sid"] == "ReadExactCStarLedgerIndexes"
+    )
+    assert all("/index/" in resource for resource in indexes["Resource"])
+    bucket_objects = next(
+        statement for statement in statements
+        if statement["Sid"] == "ReadExactEvidenceObjects"
+    )
+    assert bucket_objects["Resource"] == (
+        "arn:aws:s3:::<EVIDENCE_BUCKET_NAME>/sessions/*"
+    )
+    queue = next(
+        statement for statement in statements
+        if statement["Sid"] == "ReadExactSchedulerDlqAttributes"
+    )
+    assert len(queue["Resource"]) == 3
+
+    bootstrap = (ROOT / "deploy/bootstrap_local_observer.py").read_text(
+        encoding="utf-8"
+    )
+    assert "--apply" in bootstrap
+    assert "--check" in bootstrap
+    assert "iam delete-role" not in bootstrap
+    assert "iam delete-role-policy" not in bootstrap
+    assert "dynamodb writes" in bootstrap
+    assert "ssm StartSession/SendCommand" in bootstrap
 
 
 def test_local_provisioner_is_bounded_to_rebuild_and_passrole():

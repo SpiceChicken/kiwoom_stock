@@ -1,0 +1,132 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadExactCStarLedgerTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:<AWS_REGION>:<AWS_ACCOUNT_ID>:table/<CSTAR_TABLE_NAME>",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactCStarLedgerIndexes",
+      "Effect": "Allow",
+      "Action": ["dynamodb:Query"],
+      "Resource": [
+        "arn:aws:dynamodb:<AWS_REGION>:<AWS_ACCOUNT_ID>:table/<CSTAR_TABLE_NAME>/index/closure-due-index",
+        "arn:aws:dynamodb:<AWS_REGION>:<AWS_ACCOUNT_ID>:table/<CSTAR_TABLE_NAME>/index/command-index"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactEvidenceBucketListing",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::<EVIDENCE_BUCKET_NAME>",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["sessions/*"]
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactEvidenceObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::<EVIDENCE_BUCKET_NAME>/sessions/*"
+    },
+    {
+      "Sid": "ReadExistingSsmResultsAndHealth",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation",
+        "ssm:GetConnectionStatus",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactSchedules",
+      "Effect": "Allow",
+      "Action": ["scheduler:GetSchedule"],
+      "Resource": [
+        "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/kiwoom-shadow-cstar/kiwoom-shadow-cstar-start",
+        "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/kiwoom-shadow-cstar/kiwoom-shadow-cstar-stop",
+        "arn:aws:scheduler:<AWS_REGION>:<AWS_ACCOUNT_ID>:schedule/kiwoom-shadow-cstar/kiwoom-shadow-cstar-reconcile"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactEc2Inventory",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactSchedulerDlqAttributes",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": [
+        "arn:aws:sqs:<AWS_REGION>:<AWS_ACCOUNT_ID>:<SUBMITTER_DLQ_NAME>",
+        "arn:aws:sqs:<AWS_REGION>:<AWS_ACCOUNT_ID>:<OBSERVER_DLQ_NAME>",
+        "arn:aws:sqs:<AWS_REGION>:<AWS_ACCOUNT_ID>:<RECONCILIATION_DLQ_NAME>"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    },
+    {
+      "Sid": "ReadCStarAlarmsAndMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<AWS_REGION>"
+        }
+      }
+    }
+  ]
+}

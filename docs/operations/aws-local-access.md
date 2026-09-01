@@ -17,13 +17,19 @@ kiwoom-local-user (IAM console user)
   ├─ console password + MFA
   ├─ access key 없음
   ├─ 서울 리전 same-device `aws login` OAuth 권한
-  └─ kiwoom-local-operator·kiwoom-local-provisioner·kiwoom-cstar-document-deployer·kiwoom-cstar-release-rotator만 AssumeRole
+  └─ kiwoom-local-operator·kiwoom-local-observer·kiwoom-local-provisioner·kiwoom-cstar-document-deployer·kiwoom-cstar-release-rotator만 AssumeRole
 
 kiwoom-local-operator (IAM role)
   ├─ EC2/SSM 상태와 기존 command 결과 조회
   ├─ SSH bootstrap에 필요한 EC2 read-back
   ├─ 임시 credential에서만 AssumeRole 허용
   └─ IAM 변경, Parameter Store 값 조회, 임의 SendCommand 권한 없음
+
+kiwoom-local-observer (IAM role, 관측 전용)
+  ├─ C* 원장·증적 bucket·스케줄·SSM 결과·EC2 상태·알람·DLQ만 조회
+  ├─ exact C* table/index, evidence prefix, schedule와 DLQ에만 결속
+  ├─ 임시 credential에서만 AssumeRole 허용
+  └─ DynamoDB/S3 변경, SSM 실행·shell, Parameter Store/Secrets Manager, IAM 변경 권한 없음
 
 kiwoom-local-provisioner (IAM role, 관리자 1회 bootstrap 후 사용)
   ├─ reviewed EC2 clean-rebuild의 서울 리전 인프라 생성·구성·read-back
@@ -91,6 +97,8 @@ rollout 실패를 로컬 `send-command`, 사람용 Session Manager 또는 장기
 - `deploy/iam/local-user-assume-role-policy.json.example`
 - `deploy/iam/local-operator-trust-policy.json.example`
 - `deploy/iam/local-operator-policy.json.example`
+- `deploy/iam/local-observer-trust-policy.json.example`
+- `deploy/iam/local-observer-policy.json.example`
 - `deploy/iam/local-provisioner-trust-policy.json.example`
 - `deploy/iam/local-provisioner-policy.json.example`
 - `deploy/iam/cstar-document-deployer-trust-policy.json.example`
@@ -106,6 +114,8 @@ rollout 실패를 로컬 `send-command`, 사람용 Session Manager 또는 장기
 | `<AWS_REGION>` | EC2 리전 | `ap-northeast-2` |
 | `<EC2_INSTANCE_ID>` | 허용할 EC2 한 대 | `aws ec2 describe-instances ...`로 확인 |
 | `<CSTAR_TABLE_NAME>` | C* release ledger table | CloudFormation C* stack output으로 확인 |
+| `<EVIDENCE_BUCKET_NAME>` | C* evidence Object Lock bucket | CloudFormation C* stack output으로 확인 |
+| `<SUBMITTER_DLQ_NAME>` 등 3개 | C* Scheduler DLQ physical name | `aws sqs list-queues`로 prefix를 확인 |
 | `<CSTAR_SCHEDULER_ROLE_NAME>` | 두 schedule이 사용하는 execution role 이름 | 두 schedule의 `Target.RoleArn`에서 확인 |
 
 템플릿에는 비밀값이 없다. 계정 ID와 instance ID도 credential은 아니지만, 실제
@@ -143,6 +153,8 @@ root 로그인은 이 단계에서만 사용한다. IAM console에서 다음 순
 python3 -m json.tool rendered-local-user-policy.json
 python3 -m json.tool rendered-local-operator-trust-policy.json
 python3 -m json.tool rendered-local-operator-policy.json
+python3 -m json.tool rendered-local-observer-trust-policy.json
+python3 -m json.tool rendered-local-observer-policy.json
 
 aws accessanalyzer validate-policy \
   --policy-type IDENTITY_POLICY \
@@ -150,12 +162,40 @@ aws accessanalyzer validate-policy \
 aws accessanalyzer validate-policy \
   --policy-type IDENTITY_POLICY \
   --policy-document file://rendered-local-operator-policy.json
+aws accessanalyzer validate-policy \
+  --policy-type IDENTITY_POLICY \
+  --policy-document file://rendered-local-observer-policy.json
 ```
 
 Access Analyzer 호출은 정책 정적 검사이며 리소스를 생성하거나 과금을 발생시키지
 않는다. trust policy는 `python3 -m json.tool`과 IAM 적용 후 read-back으로 검증한다.
 
-## 3. 로컬 profile 사용
+## 3. 비관리자 C* observer 1회 bootstrap
+
+observer 역할 생성과 `kiwoom-local-user`의 AssumeRole statement 추가만 관리자
+세션에서 1회 수행한다. 이후 C* 실행 모니터링과 증적 확인에는 root/Admin을
+사용하지 않는다. 아래 명령은 역할·정책·사용자 inline policy의 exact read-back을
+수행하며, 기존 drift가 있으면 덮어쓰지 않고 중단한다.
+
+```bash
+./.venv/bin/python deploy/bootstrap_local_observer.py \
+  --profile <ADMIN_PROFILE> \
+  --account-id <AWS_ACCOUNT_ID> \
+  --table-name <CSTAR_TABLE_NAME> \
+  --evidence-bucket-name <EVIDENCE_BUCKET_NAME> \
+  --instance-id <EC2_INSTANCE_ID> \
+  --submitter-dlq-name <SUBMITTER_DLQ_NAME> \
+  --observer-dlq-name <OBSERVER_DLQ_NAME> \
+  --reconciliation-dlq-name <RECONCILIATION_DLQ_NAME> \
+  --check
+```
+
+read-only check가 통과한 동일 명령에 `--apply --update-reviewed-policy`를
+사용한다. 역할 이름은 `kiwoom-local-observer`, inline policy 이름은
+`KiwoomLocalObserver`다. 이 bootstrap 자체만 IAM role 생성·정책 연결을 위해
+관리자 권한을 사용할 수 있으며, observer 정책에는 IAM 권한을 넣지 않는다.
+
+## 4. 로컬 profile 사용
 
 WSL의 `~/.aws/config`는 다음 역할을 갖는다.
 
@@ -183,6 +223,14 @@ role_session_name = kiwoom-cstar-deployer
 duration_seconds = 3600
 region = ap-northeast-2
 output = json
+
+[profile kiwoom-cstar-observer]
+role_arn = arn:aws:iam::<AWS_ACCOUNT_ID>:role/kiwoom-local-observer
+source_profile = kiwoom-login
+role_session_name = kiwoom-cstar-observer
+duration_seconds = 3600
+region = ap-northeast-2
+output = json
 ```
 
 처음에는 `kiwoom-login`에 `login_session` 항목이 없다. 다음 명령으로 IAM 사용자
@@ -192,7 +240,8 @@ output = json
 kiwoom-aws-login
 ```
 
-그 후 모든 일상 명령은 `kiwoom-local` profile을 쓴다.
+그 후 EC2 inventory와 SSH 전제조건은 `kiwoom-local`, C* 원장·증적·스케줄·DLQ
+확인은 `kiwoom-cstar-observer` profile을 쓴다.
 
 ```bash
 aws sts get-caller-identity --profile kiwoom-local
@@ -231,6 +280,24 @@ aws ssm describe-document \
 arn:aws:sts::<AWS_ACCOUNT_ID>:assumed-role/kiwoom-cstar-document-deployer/kiwoom-cstar-deployer
 ```
 
+observer 확인:
+
+```bash
+aws sts get-caller-identity --profile kiwoom-cstar-observer
+aws dynamodb scan \
+  --table-name <CSTAR_TABLE_NAME> \
+  --filter-expression 'session_date_kst = :d' \
+  --expression-attribute-values '{":d":{"S":"YYYY-MM-DD"}}' \
+  --region ap-northeast-2 \
+  --profile kiwoom-cstar-observer
+```
+
+정상 observer ARN은 다음 형태다.
+
+```text
+arn:aws:sts::<AWS_ACCOUNT_ID>:assumed-role/kiwoom-local-observer/kiwoom-cstar-observer
+```
+
 `arn:aws:iam::<AWS_ACCOUNT_ID>:root`가 나오면 잘못된 profile이므로 즉시 중단한다.
 
 EC2 재생성까지 로컬에서 자동화해야 하면 관리자 세션에서
@@ -241,7 +308,7 @@ EC2 재생성까지 로컬에서 자동화해야 하면 관리자 세션에서
 `kiwoom-provisioner` profile을 사용하고, 일상 진단에는 기존 `kiwoom-local`을
 계속 사용한다.
 
-## 4. 허용·거부 검증
+## 5. 허용·거부 검증
 
 허용 검증:
 
@@ -269,6 +336,10 @@ SSH 연결은 실제 주문·외부 API 호출을 하지 않는 shell 연결만 
 - 사람용 `ssm start-session` 사용
 - `ssm send-command`
 
+observer profile에서도 위 거부 목록과 DynamoDB/S3/스케줄 변경 요청은 모두
+`AccessDenied`여야 한다. observer는 C* 검증을 위한 읽기 전용 역할이며, 기존
+`kiwoom-local` operator의 권한을 넓히지 않는다.
+
 `kiwoom-cstar-deployer`는 위 거부 목록의 예외로 evidence 문서 version update와
 default 전환만 허용하며, worker activation이나 evidence command 실행 권한은
 갖지 않는다.
@@ -280,10 +351,11 @@ Immutable release hash 교정이 필요한 경우에는 `kiwoom-cstar-rotator` p
 Parameter Store 거부 검사에서 오류 메시지만 확인하고 응답이나 shell trace를
 artifact에 저장하지 않는다.
 
-## 5. 일상 사용과 장애 대응
+## 6. 일상 사용과 장애 대응
 
 - 세션이 유효하면 AWS CLI가 cache된 임시 credential을 재사용한다.
-- 세션이 만료되면 `kiwoom-aws-login`을 한 번 실행한다.
+- 세션이 만료되면 root가 아닌 `kiwoom-local-user`로 `kiwoom-aws-login`을 한 번
+  실행한다.
 - 브라우저에는 root가 아니라 `kiwoom-local-user`로 로그인한다.
 - role assumption이 거부되면 IAM 사용자 MFA 로그인 여부, `kiwoom-login` caller
   identity, `aws login` 임시 session 여부를 확인한다.
@@ -293,7 +365,7 @@ artifact에 저장하지 않는다.
 - 디스크 부족 시 `docker system prune --volumes`를 실행하지 않는다. 먼저
   [운영 runbook](runbook.md)의 label-scoped 정리 절차를 따른다.
 
-## 6. 롤백
+## 7. 롤백
 
 로컬 이관 전 Windows-mounted `.aws` symlink는 timestamp가 붙은 이름으로 보존한다.
 롤백이 필요하면 새 Linux `~/.aws` 디렉터리를 별도 이름으로 이동하고, 보존한
@@ -302,8 +374,8 @@ symlink를 `~/.aws`로 되돌린다. 오래된 root login cache를 새 경계로
 AWS 쪽 롤백은 다음 순서다.
 
 1. `kiwoom-local-user`에서 AssumeRole inline policy를 제거한다.
-2. 활성 local operator session이 없는지 확인한다.
-3. role inline policy를 제거하고 role을 삭제한다.
+2. 활성 local operator/observer session이 없는지 확인한다.
+3. observer와 operator role inline policy를 제거하고 role을 삭제한다.
 4. IAM user의 MFA/login profile을 제거한 뒤 사용자를 삭제한다.
 
 GitHub OIDC role, EC2 instance role, VPC/EIP/EBS는 이 작업의 대상이 아니므로 변경하거나
