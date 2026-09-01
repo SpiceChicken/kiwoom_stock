@@ -272,6 +272,24 @@ observer/reconciliation closure evidence를 별도 확인한다.
   이번 재검증의 최종 closure는 이미 성공한 evidence-only recovery로 확인했으므로,
   다음 acceptance는 자동 전달 경로 자체의 확인이다.
 
+2026-09-02 KST 자동 전달 경로 권한 보완 및 비거래성 재현:
+
+- 수동 Shadow start 이후 실제 SSM invocation event가 EventBridge를 통해 Observer
+  Lambda v12까지 도달했지만, Observer role에 DynamoDB `command-index` Query
+  리소스가 빠져 command ID를 occurrence로 해석하는 단계에서 `AccessDenied`가
+  발생했다. 기존 권한에는 원장과 `closure-due-index`만 포함되어 있었다.
+- Observer role에 C* table의 `command-index` ARN만 추가하고 CloudFormation
+  `UPDATE_COMPLETE` 및 IAM policy read-back을 완료했다. 다른 문서 실행,
+  스케줄 변경, 계좌·브로커 capability는 추가하지 않았다.
+- 수정 후 실제 stop invocation이 EventBridge에서 Observer로 자동 전달되어
+  해당 occurrence가 `PENDING`에서 `IN_PROGRESS`로 갱신된 것을 확인했다. 테스트
+  start는 정상 장중 수명 전에 취소해 fail-closed로 정리했으며, 이 테스트의
+  stop은 terminal evidence가 없어 `FAILED/ALERTED`가 되었다. 컨테이너는 제거됐고
+  Observer/Reconciliation DLQ는 0건이다.
+- 따라서 EventBridge 자동 전달 및 command-index 권한 문제는 해소되었다. 정상
+  `Success → evidence export → CLOSED` 전체 자동 closure는 다음 실제 개장일의
+  정상 start/stop에서 최종 acceptance한다.
+
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
 `dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
@@ -398,9 +416,10 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
 
 ## 현재 남은 차단 항목
 
-- 2026-09-01 자동 start와 장중 지속 실행, stop/evidence payload 및 원장 closure는
-  확인했다. 다음 개장일에 실제 SSM status event의 EventBridge 자동 전달까지
-  운영 모니터링;
+- 2026-09-01 자동 start와 장중 지속 실행, stop/evidence payload 및 원장 closure를
+  확인했고, 2026-09-02 비거래성 재현으로 SSM status event의 EventBridge 자동
+  전달과 Observer command-index 조회도 확인했다. 다음 개장일에는 정상
+  `Success → evidence export → CLOSED` 전체 closure만 운영 acceptance한다;
 - 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,

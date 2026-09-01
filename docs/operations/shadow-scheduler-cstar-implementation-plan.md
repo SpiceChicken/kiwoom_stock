@@ -4,8 +4,10 @@
 
 Implemented and repaired — 2026-09-02. First post-repair market-day acceptance
 evidence is preserved; the EventBridge SSM invocation-event pattern was corrected
-and deployed. Automatic delivery on the next real SSM invocation remains the final
-operational acceptance gate.
+and deployed. The observer `command-index` Query permission was then repaired and
+deployed after a non-trading SSM invocation exposed the missing resource. Automatic
+success-to-evidence closure on a normal market-day run remains the final operational
+acceptance gate.
 
 이 문서는 구현 순서와 write set 및 실제 cutover read-back을 기록한다. AWS apply,
 EventBridge enable, GitHub schedule 제거, SSM/EC2 실행은 P8에서 완료되었고 첫
@@ -302,7 +304,7 @@ before cutover; it must not remain as an unfenced bypass.
 | P5 | observer/reconciler/evidence | event loss/order, SSM terminal, export, S3/Slack failure | rule/schedules disabled | no recovery wiring |
 | P6 | deterministic package and disabled IaC | ZIP hash, template defaults/IAM/forbidden capabilities | unapplied template | all triggers disabled |
 | P7 | architect/reviewer/verifier bundle | full targeted tests, checker, failure matrix, Docker where safe | phase commits | C3/C4 reachable RED documented |
-| P8 | AWS apply/validator/cutover | stack/IAM read-back, package/doc/host tuple, GitHub drain, corrected SSM invocation EventBridge pattern, EventBridge pair read-back | break-before-make runbook | stop/evidence payload PASS; automatic delivery on next real SSM invocation pending |
+| P8 | AWS apply/validator/cutover | stack/IAM read-back, package/doc/host tuple, GitHub drain, corrected SSM invocation EventBridge pattern, command-index permission, EventBridge pair read-back | break-before-make runbook | automatic delivery and non-trading observer update PASS; normal success-to-evidence closure acceptance pending |
 
 Do not mix structure, functionality, AWS apply and cutover in one commit or rollout.
 
