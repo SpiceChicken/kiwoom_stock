@@ -53,6 +53,7 @@ TERMINAL_STATUS_MAP = {
 }
 OCCURRENCE_COMMENT_RE = re.compile(r"^cstar(?:-evidence)?:([0-9a-f]{64})$")
 MAX_FAILURE_OUTPUT_BYTES = 65_536
+MAX_EVIDENCE_PAGE_LENGTH = 4_096
 SAFE_MARKET_DATA_FAILURE_KINDS = frozenset(
     {"empty", "fetch", "timeout", "parse", "malformed"}
 )
@@ -555,13 +556,13 @@ class CStarObserver:
         *,
         occurrence: Mapping[str, object],
         offset: int = 0,
-        length: int = 12288,
+        length: int = MAX_EVIDENCE_PAGE_LENGTH,
     ) -> str:
         if self.evidence_sender is None:
             raise ObserverError("evidence sender unavailable")
         if type(offset) is not int or offset < 0 or offset > 99_999_999:
             raise _invalid()
-        if type(length) is not int or length <= 0 or length > 12_288:
+        if type(length) is not int or length <= 0 or length > MAX_EVIDENCE_PAGE_LENGTH:
             raise _invalid()
         required = ("occurrence_id", "session_date_kst", "release_id")
         if any(not isinstance(occurrence.get(key), str) for key in required):

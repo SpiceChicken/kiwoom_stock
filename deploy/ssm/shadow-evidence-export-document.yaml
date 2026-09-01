@@ -11,7 +11,7 @@
     "ExpectedValidatorSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
     "ExpectedShadowDocumentSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
     "EvidenceOffset": {"type":"String","allowedPattern":"^[0-9]{1,8}$","interpolationType":"ENV_VAR"},
-    "EvidenceLength": {"type":"String","allowedPattern":"^[1-9][0-9]{0,4}$","interpolationType":"ENV_VAR"},
+    "EvidenceLength": {"type":"String","allowedPattern":"^(?:[1-9][0-9]{0,2}|[1-3][0-9]{3}|40(?:[0-8][0-9]|9[0-6]))$","interpolationType":"ENV_VAR"},
     "ExpectedInstanceId": {"type":"String","allowedPattern":"^i-0e42e09d6c087ba29$","interpolationType":"ENV_VAR"},
     "Region": {"type":"String","allowedPattern":"^ap-northeast-2$","interpolationType":"ENV_VAR"}
   },

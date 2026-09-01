@@ -13,6 +13,7 @@ import subprocess
 INSTANCE_ID = "i-0e42e09d6c087ba29"
 REGION = "ap-northeast-2"
 MAX_LENGTH = 12_288
+MAX_PAGE_LENGTH = 4_096
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -38,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         or HASH_RE.fullmatch(args.release_id) is None
         or args.offset < 0
         or args.length < 1
-        or args.length > MAX_LENGTH
+        or args.length > MAX_PAGE_LENGTH
         or args.expected_instance_id != INSTANCE_ID
         or args.region != REGION
         or re.fullmatch(

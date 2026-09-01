@@ -54,7 +54,7 @@ def test_named_volume_export_delegates_to_canonical_worker(monkeypatch, capsys):
             "--expected-worker-sha256", "e" * 64,
             "--expected-validator-sha256", "f" * 64,
             "--expected-shadow-document-sha256", "0" * 64,
-            "--offset", "0", "--length", "256",
+            "--offset", "0", "--length", "4096",
             "--expected-instance-id", "i-0e42e09d6c087ba29",
             "--region", "ap-northeast-2",
         ])
@@ -69,3 +69,27 @@ def test_named_volume_export_delegates_to_canonical_worker(monkeypatch, capsys):
     assert run.call_args.kwargs["pass_fds"] == (9,)
     output = json.loads(capsys.readouterr().out)
     assert output["payload"]["row_count"] == 1
+
+
+def test_evidence_page_rejects_a_page_that_cannot_fit_the_bounded_envelope():
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--session-date-kst", "2026-08-24",
+            "--occurrence-id", "a" * 64,
+            "--release-id", "b" * 64,
+            "--image", "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "c" * 64,
+            "--source-sha", "d" * 40,
+            "--expected-worker-sha256", "e" * 64,
+            "--expected-validator-sha256", "f" * 64,
+            "--expected-shadow-document-sha256", "0" * 64,
+            "--offset", "0", "--length", "4097",
+            "--expected-instance-id", "i-0e42e09d6c087ba29",
+            "--region", "ap-northeast-2",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
