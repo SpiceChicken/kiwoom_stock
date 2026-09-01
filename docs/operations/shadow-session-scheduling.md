@@ -158,11 +158,19 @@ failure notification에 기록한다. 이 보완은 raw output이나 credential�
 저장하지 않으며, Lambda alias와 CloudFormation package read-back까지
 완료했다.
 
-다음 평일 acceptance는 실제 자동 경로를 한 번만 검증한다. 08:50 start의
-`SESSION#`/`OCC#`/SSM command, 09:00 이후 첫 safe tick 또는 휴장일
-`CLOSED/calendar-closed`, 15:30 deadline, 15:35 stop와 observer evidence closure를
-같은 release lease로 확인한다. 실패 시 중복 activation을 발행하지 않고 occurrence,
-Lambda/SSM evidence, host terminal output과 DLQ/metric을 먼저 보존한다.
+2026-09-01 KST automatic start acceptance에서는 08:50 start의
+`SESSION#`/`OCC#`/SSM command, 09:00 이후 첫 safe tick, host fence effect와
+장중 `healthy` continuous runtime을 확인했다. 현재 start occurrence는
+`SUCCESS/ACCEPTED/OPEN`이며, 15:35 stop와 observer evidence closure를 같은
+release lease로 확인하는 단계가 남아 있다. 실패 시 중복 activation을 발행하지
+않고 occurrence, Lambda/SSM evidence, host terminal output과 DLQ/metric을 먼저
+보존한다.
+
+정상 activation `Success`가 observer alert metric을 발생시키던 false positive는
+PR #148에서 수정했다. Observer v8은 `Failed`/`TimedOut` 등 terminal failure와
+evidence failure만 `cstar_observer_alerted` 대상으로 처리하며, 정상 Success는
+원장을 수용 상태로만 진행한다. 정상 Success가 경보를 만들지 않는 회귀 테스트,
+전체 CI와 CloudFormation `UPDATE_COMPLETE`, alias `live` version 8을 확인했다.
 
 2026-08-25 KST에는 이 rejection audit 자체가 Submitter role의 누락된
 `dynamodb:PutItem` 권한 때문에 실패했다. 그 결과 start/stop은 Lambda retry 후
@@ -314,7 +322,7 @@ leave the session permanently unverified. Non-terminal evidence statuses remain
 pending; terminal evidence failures become `ALERTED` and emit the same bounded
 observer alert metric without retrying activation.
 
-When the observer confirms a terminal activation or evidence failure, it first
+When the observer confirms a terminal activation failure or evidence failure, it first
 persists the occurrence as `ALERTED` and then emits the
 `Kiwoom/ShadowCStar:cstar_observer_alerted` metric. The corresponding
 metrics-only CloudWatch alarm provides a bounded detection signal without
