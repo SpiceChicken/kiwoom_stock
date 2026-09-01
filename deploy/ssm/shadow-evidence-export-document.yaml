@@ -5,6 +5,11 @@
     "SessionDateKst": {"type":"String","allowedPattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}$","interpolationType":"ENV_VAR"},
     "OccurrenceId": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
     "ReleaseId": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "ImageDigest": {"type":"String","allowedPattern":"^ghcr\\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "SourceSha": {"type":"String","allowedPattern":"^[0-9a-f]{40}$","interpolationType":"ENV_VAR"},
+    "ExpectedWorkerSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "ExpectedValidatorSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
+    "ExpectedShadowDocumentSha256": {"type":"String","allowedPattern":"^[0-9a-f]{64}$","interpolationType":"ENV_VAR"},
     "EvidenceOffset": {"type":"String","allowedPattern":"^[0-9]{1,8}$","interpolationType":"ENV_VAR"},
     "EvidenceLength": {"type":"String","allowedPattern":"^[1-9][0-9]{0,4}$","interpolationType":"ENV_VAR"},
     "ExpectedInstanceId": {"type":"String","allowedPattern":"^i-0e42e09d6c087ba29$","interpolationType":"ENV_VAR"},
@@ -20,7 +25,7 @@
         "set -eu",
         "exec 9>/run/lock/kiwoom-stock-shadow.lock",
         "flock -x -w 30 9 || exit 75",
-        "exec /usr/local/libexec/kiwoom-shadow-evidence-export.py --session-date-kst \"$SSM_SessionDateKst\" --occurrence-id \"$SSM_OccurrenceId\" --release-id \"$SSM_ReleaseId\" --offset \"$SSM_EvidenceOffset\" --length \"$SSM_EvidenceLength\" --expected-instance-id \"$SSM_ExpectedInstanceId\" --region \"$SSM_Region\""
+        "exec /usr/local/libexec/kiwoom-shadow-evidence-export.py --session-date-kst \"$SSM_SessionDateKst\" --occurrence-id \"$SSM_OccurrenceId\" --release-id \"$SSM_ReleaseId\" --image \"$SSM_ImageDigest\" --source-sha \"$SSM_SourceSha\" --expected-worker-sha256 \"$SSM_ExpectedWorkerSha256\" --expected-validator-sha256 \"$SSM_ExpectedValidatorSha256\" --expected-shadow-document-sha256 \"$SSM_ExpectedShadowDocumentSha256\" --offset \"$SSM_EvidenceOffset\" --length \"$SSM_EvidenceLength\" --expected-instance-id \"$SSM_ExpectedInstanceId\" --region \"$SSM_Region\""
       ]
     }
   }]

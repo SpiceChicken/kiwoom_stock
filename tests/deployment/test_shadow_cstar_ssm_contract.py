@@ -21,7 +21,7 @@ def run_checker(root: Path = ROOT) -> subprocess.CompletedProcess[str]:
 def test_cstar_ssm_documents_pass_static_contract():
     result = run_checker()
     assert result.returncode == 0
-    assert result.stdout == "PASS documents=2 activation_parameters=17 evidence_parameters=7\n"
+    assert result.stdout == "PASS documents=2 activation_parameters=17 evidence_parameters=12\n"
     assert result.stderr == ""
 
 

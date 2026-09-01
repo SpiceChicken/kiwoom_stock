@@ -4,6 +4,7 @@ import hashlib
 
 import pytest
 
+from deploy.shadow_cstar_contract import release_id_for
 from deploy.shadow_cstar_observer import (
     Boto3EvidenceCommandSender,
     Boto3EvidenceSink,
@@ -15,11 +16,23 @@ from deploy.shadow_cstar_observer import (
 )
 
 
+RELEASE = {
+    "image_digest": "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "c" * 64,
+    "source_sha": "d" * 40,
+    "compose_shadow_sha256": "e" * 64,
+    "worker_sha256": "f" * 64,
+    "validator_sha256": "0" * 64,
+    "shadow_document_sha256": "1" * 64,
+    "rollout_attempt_id": "rollout-1",
+}
+RELEASE_ID = release_id_for(RELEASE)
+
+
 OCCURRENCE = {
     "occurrence_id": "a" * 64,
     "phase": "start",
     "session_date_kst": "2026-08-24",
-    "release_id": "b" * 64,
+    "release_id": RELEASE_ID,
     "command_id": "command-1",
     "command_state": "PENDING",
     "runtime_state": "UNKNOWN",
@@ -79,7 +92,10 @@ def test_success_start_does_not_emit_observer_alert():
 
 def test_success_stop_enters_evidence_pending():
     occurrence = {**OCCURRENCE, "phase": "stop"}
-    ledger = InMemoryObserverLedger({occurrence["occurrence_id"]: occurrence})
+    ledger = InMemoryObserverLedger(
+        {occurrence["occurrence_id"]: occurrence},
+        {RELEASE_ID: RELEASE},
+    )
     result = CStarObserver(ledger).process_ssm_event(_event())
     assert result.runtime_state == "STOPPED"
     assert result.closure_state == "EVIDENCE_PENDING"
@@ -95,11 +111,16 @@ def test_success_stop_requests_exact_evidence_document_when_sender_is_available(
             return "evidence-1"
 
     occurrence = {**OCCURRENCE, "phase": "stop"}
-    ledger = InMemoryObserverLedger({occurrence["occurrence_id"]: occurrence})
+    ledger = InMemoryObserverLedger(
+        {occurrence["occurrence_id"]: occurrence},
+        {RELEASE_ID: RELEASE},
+    )
     sender = Sender()
     result = CStarObserver(ledger, evidence_sender=sender).process_ssm_event(_event())
     assert result.evidence_requested is True
     assert sender.calls[0]["occurrence_id"] == occurrence["occurrence_id"]
+    assert sender.calls[0]["image_digest"] == RELEASE["image_digest"]
+    assert sender.calls[0]["source_sha"] == RELEASE["source_sha"]
     assert ledger.occurrences[occurrence["occurrence_id"]]["evidence_command_id"] == "evidence-1"
 
 
@@ -465,12 +486,19 @@ def test_evidence_sender_uses_exact_document_and_no_activation_fields():
     command_id = Boto3EvidenceCommandSender(client).send_evidence(
         session_date_kst="2026-08-24",
         occurrence_id="a" * 64,
-        release_id="b" * 64,
+        release_id=RELEASE_ID,
+        image_digest=RELEASE["image_digest"],
+        source_sha=RELEASE["source_sha"],
+        worker_sha256=RELEASE["worker_sha256"],
+        validator_sha256=RELEASE["validator_sha256"],
+        shadow_document_sha256=RELEASE["shadow_document_sha256"],
         offset=0,
         length=256,
     )
     assert command_id == "evidence-1"
     assert client.kwargs["DocumentName"] == EVIDENCE_DOCUMENT_NAME
+    assert client.kwargs["Parameters"]["ImageDigest"] == [RELEASE["image_digest"]]
+    assert client.kwargs["Parameters"]["ExpectedWorkerSha256"] == [RELEASE["worker_sha256"]]
     assert "DesiredState" not in client.kwargs["Parameters"]
 
 

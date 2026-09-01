@@ -14,16 +14,22 @@ import urllib.request
 try:
     from deploy.shadow_cstar_contract import (
         ContractError,
+        RELEASE_INTENT_KEYS,
         diagnostic_category,
+        make_release_intent,
         metric_name,
+        release_id_for,
         validate_state_transition,
     )
     from deploy.shadow_cstar_submitter import INSTANCE_ID, REGION
 except ModuleNotFoundError:  # flat Lambda ZIP package
     from shadow_cstar_contract import (  # type: ignore[no-redef]
         ContractError,
+        RELEASE_INTENT_KEYS,
         diagnostic_category,
+        make_release_intent,
         metric_name,
+        release_id_for,
         validate_state_transition,
     )
     from shadow_cstar_submitter import INSTANCE_ID, REGION  # type: ignore[no-redef]
@@ -71,6 +77,7 @@ class ObserverError(ValueError):
 class ObserverLedger(Protocol):
     def get_occurrence(self, occurrence_id: str) -> Mapping[str, object] | None: ...
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None: ...
+    def get_release_intent(self, release_id: str) -> Mapping[str, object] | None: ...
     def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None: ...
     def advance(
         self,
@@ -98,6 +105,11 @@ class EvidenceCommandSender(Protocol):
         session_date_kst: str,
         occurrence_id: str,
         release_id: str,
+        image_digest: str,
+        source_sha: str,
+        worker_sha256: str,
+        validator_sha256: str,
+        shadow_document_sha256: str,
         offset: int,
         length: int,
     ) -> str: ...
@@ -552,10 +564,26 @@ class CStarObserver:
         required = ("occurrence_id", "session_date_kst", "release_id")
         if any(not isinstance(occurrence.get(key), str) for key in required):
             raise _invalid()
+        release_id = str(occurrence["release_id"])
+        lookup = getattr(self.ledger, "get_release_intent", None)
+        release = lookup(release_id) if callable(lookup) else None
+        if not isinstance(release, Mapping):
+            raise ObserverError("release intent unavailable")
+        try:
+            canonical_release = make_release_intent(release)
+        except ContractError:
+            raise ObserverError("release intent invalid") from None
+        if release_id_for(canonical_release) != release_id:
+            raise ObserverError("release intent mismatch")
         command_id = self.evidence_sender.send_evidence(
             session_date_kst=str(occurrence["session_date_kst"]),
             occurrence_id=str(occurrence["occurrence_id"]),
-            release_id=str(occurrence["release_id"]),
+            release_id=release_id,
+            image_digest=canonical_release["image_digest"],
+            source_sha=canonical_release["source_sha"],
+            worker_sha256=canonical_release["worker_sha256"],
+            validator_sha256=canonical_release["validator_sha256"],
+            shadow_document_sha256=canonical_release["shadow_document_sha256"],
             offset=offset,
             length=length,
         )
@@ -615,7 +643,20 @@ class Boto3EvidenceCommandSender:
         self.client = client
         self.instance_id = instance_id
 
-    def send_evidence(self, *, session_date_kst, occurrence_id, release_id, offset, length) -> str:
+    def send_evidence(
+        self,
+        *,
+        session_date_kst,
+        occurrence_id,
+        release_id,
+        image_digest,
+        source_sha,
+        worker_sha256,
+        validator_sha256,
+        shadow_document_sha256,
+        offset,
+        length,
+    ) -> str:
         response = self.client.send_command(
             DocumentName=EVIDENCE_DOCUMENT_NAME,
             InstanceIds=[self.instance_id],
@@ -623,6 +664,11 @@ class Boto3EvidenceCommandSender:
                 "SessionDateKst": [session_date_kst],
                 "OccurrenceId": [occurrence_id],
                 "ReleaseId": [release_id],
+                "ImageDigest": [image_digest],
+                "SourceSha": [source_sha],
+                "ExpectedWorkerSha256": [worker_sha256],
+                "ExpectedValidatorSha256": [validator_sha256],
+                "ExpectedShadowDocumentSha256": [shadow_document_sha256],
                 "EvidenceOffset": [str(offset)],
                 "EvidenceLength": [str(length)],
                 "ExpectedInstanceId": [self.instance_id],
@@ -764,8 +810,15 @@ class Boto3EvidenceSink:
 
 
 class InMemoryObserverLedger:
-    def __init__(self, occurrences: Mapping[str, Mapping[str, object]]) -> None:
+    def __init__(
+        self,
+        occurrences: Mapping[str, Mapping[str, object]],
+        releases: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         self.occurrences = {key: dict(value) for key, value in occurrences.items()}
+        self.releases = {
+            key: dict(value) for key, value in (releases or {}).items()
+        }
 
     def get_occurrence(self, occurrence_id: str) -> Mapping[str, object] | None:
         return self.occurrences.get(occurrence_id)
@@ -778,6 +831,9 @@ class InMemoryObserverLedger:
             ),
             None,
         )
+
+    def get_release_intent(self, release_id: str) -> Mapping[str, object] | None:
+        return self.releases.get(release_id)
 
     def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None:
         command_id = _bounded_text(command_id, 128)
@@ -837,6 +893,16 @@ class DynamoCStarObserverLedger:
         )
         item = response.get("Item") if isinstance(response, Mapping) else None
         return dict(item) if isinstance(item, Mapping) else None
+
+    def get_release_intent(self, release_id: str) -> Mapping[str, object] | None:
+        response = self.table.get_item(
+            Key={"PK": f"RELEASE#{release_id}", "SK": "META"},
+            ConsistentRead=True,
+        )
+        item = response.get("Item") if isinstance(response, Mapping) else None
+        if not isinstance(item, Mapping):
+            return None
+        return {key: item[key] for key in RELEASE_INTENT_KEYS if key in item}
 
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None:
         from boto3.dynamodb.conditions import Key
