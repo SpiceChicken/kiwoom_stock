@@ -61,6 +61,22 @@ def test_success_start_advances_runtime_without_closing_session():
     assert ledger.occurrences[OCCURRENCE["occurrence_id"]]["closure_state"] == "OPEN"
 
 
+def test_success_start_does_not_emit_observer_alert():
+    class Sink:
+        def __init__(self):
+            self.notifications = []
+
+        def notify(self, **kwargs):
+            self.notifications.append(kwargs)
+
+    ledger = InMemoryObserverLedger({OCCURRENCE["occurrence_id"]: OCCURRENCE})
+    sink = Sink()
+    result = CStarObserver(ledger, sink=sink).process_ssm_event(_event())
+    assert result.runtime_state == "ACCEPTED"
+    assert result.closure_state is None
+    assert sink.notifications == []
+
+
 def test_success_stop_enters_evidence_pending():
     occurrence = {**OCCURRENCE, "phase": "stop"}
     ledger = InMemoryObserverLedger({occurrence["occurrence_id"]: occurrence})

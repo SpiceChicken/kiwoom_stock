@@ -409,7 +409,11 @@ class CStarObserver:
                 occurrence_id=occurrence_id,
                 diagnostic=failure_diagnostic,
             )
-        if status in TERMINAL_STATUS_MAP and self.sink is not None:
+        if (
+            status in TERMINAL_STATUS_MAP
+            and status != "Success"
+            and self.sink is not None
+        ):
             # The terminal state is durable already; notification failure must
             # not turn a known SSM failure into a retryable event.
             reason = self._notify_failure(
