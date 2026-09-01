@@ -42,7 +42,7 @@ OCCURRENCE = {
 
 def _event(status="Success", occurrence_id="a" * 64):
     return {
-        "detail-type": "EC2 Command Status-change Notification",
+        "detail-type": "EC2 Command Invocation Status-change Notification",
         "detail": {
             "command-id": "command-1",
             "instance-id": "i-0e42e09d6c087ba29",
@@ -55,7 +55,7 @@ def _event(status="Success", occurrence_id="a" * 64):
 
 def _evidence_event(status="Success", occurrence_id="a" * 64, command_id="evidence-1"):
     return {
-        "detail-type": "EC2 Command Status-change Notification",
+        "detail-type": "EC2 Command Invocation Status-change Notification",
         "detail": {
             "command-id": command_id,
             "instance-id": "i-0e42e09d6c087ba29",

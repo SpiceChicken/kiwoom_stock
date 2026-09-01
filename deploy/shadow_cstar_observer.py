@@ -36,7 +36,7 @@ except ModuleNotFoundError:  # flat Lambda ZIP package
 
 
 EVIDENCE_DOCUMENT_NAME = "KiwoomStock-ShadowEvidenceExport"
-EVENT_TYPE = "EC2 Command Status-change Notification"
+EVENT_TYPE = "EC2 Command Invocation Status-change Notification"
 COMMAND_STATUSES = {
     "Pending", "InProgress", "Delayed", "Success", "Failed",
     "TimedOut", "Cancelled", "Undeliverable", "Terminated",

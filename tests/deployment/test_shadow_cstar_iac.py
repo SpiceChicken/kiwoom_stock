@@ -126,3 +126,11 @@ def test_lambda_versions_change_when_immutable_package_key_changes():
     resources = load()["Resources"]
     assert resources["SubmitterVersion"]["Properties"]["Description"] == {"Ref": "SubmitterPackageKey"}
     assert resources["ObserverVersion"]["Properties"]["Description"] == {"Ref": "ObserverPackageKey"}
+
+
+def test_observer_rule_uses_per_instance_ssm_invocation_events():
+    pattern = load()["Resources"]["ObserverRule"]["Properties"]["EventPattern"]
+    assert pattern["detail-type"] == [
+        "EC2 Command Invocation Status-change Notification"
+    ]
+    assert pattern["detail"]["instance-id"] == [{"Ref": "InstanceId"}]

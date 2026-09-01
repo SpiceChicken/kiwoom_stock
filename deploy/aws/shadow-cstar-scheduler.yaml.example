@@ -125,7 +125,7 @@
     },
     "ObserverRule": {
       "Condition":"ObserverEnabled","Type":"AWS::Events::Rule",
-      "Properties":{"EventPattern":{"source":["aws.ssm"],"detail-type":["EC2 Command Status-change Notification"],"detail":{"instance-id":[{"Ref":"InstanceId"}],"document-name":["KiwoomStock-ShadowCStarActivation","KiwoomStock-ShadowEvidenceExport"]}},"Targets":[{"Arn":{"Ref":"ObserverAlias"},"Id":"cstar-observer","DeadLetterConfig":{"Arn":{"Fn::GetAtt":["ObserverDlq","Arn"]}}}]}
+      "Properties":{"EventPattern":{"source":["aws.ssm"],"detail-type":["EC2 Command Invocation Status-change Notification"],"detail":{"instance-id":[{"Ref":"InstanceId"}],"document-name":["KiwoomStock-ShadowCStarActivation","KiwoomStock-ShadowEvidenceExport"]}},"Targets":[{"Arn":{"Ref":"ObserverAlias"},"Id":"cstar-observer","DeadLetterConfig":{"Arn":{"Fn::GetAtt":["ObserverDlq","Arn"]}}}]}
     },
     "ObserverInvokePermission": {"Condition":"ObserverEnabled","Type":"AWS::Lambda::Permission","Properties":{"Action":"lambda:InvokeFunction","FunctionName":{"Ref":"ObserverAlias"},"Principal":"events.amazonaws.com","SourceArn":{"Fn::GetAtt":["ObserverRule","Arn"]}}},
     "ReconcileSchedule": {
