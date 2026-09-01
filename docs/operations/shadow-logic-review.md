@@ -54,7 +54,7 @@ immutable source/image/activation tuple:
    `db_reopens == cycles - 1`.
 5. Every decision telemetry object passes both categorical and cross-field
    validation.
-6. A protected stop produces `STOPPED/stop-requested` or the fixed 15-minute cap
+6. A protected stop produces `STOPPED/stop-requested` or the fixed 7-hour cap
    produces `DEADLINE/run-deadline`, followed by exact container removal.
 
 Review at least these session phases separately:

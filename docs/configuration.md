@@ -166,12 +166,12 @@ The bounded `shadow-once` and `shadow-continuous` workers use the fixed isolated
 per-request path override. The mounted data directory must already exist and be writable by the runtime UID.
 
 `shadow-continuous` is not an unbounded service. It creates and closes a fresh one-shot runtime for each cycle,
-waits at least 60 seconds after a completed cycle using the signal event, and exits at a fixed 15-minute monotonic
+waits at least 60 seconds after a completed cycle using the signal event, and exits at a fixed 7-hour monotonic
 deadline. `SIGTERM`/`SIGINT` only request stop; the main thread owns closure within the 30-second container grace.
 The signal handler records a monotonic timestamp and sets the Event without acquiring an application lock; a consumer
 materializes the distinct 30-second shutdown deadline from the earliest timestamp. Repeated signals and delayed
 consumers cannot extend it. Runtime, HTTP and database-close consumers see the minimum of the remaining
-15-minute run cap and this shutdown budget. A clean
+7-hour run cap, the absolute 15:30 KST session close, and this shutdown budget. A clean
 `STOPPED` result requires typed stop ownership and complete resource closure. Cleanup failure or shutdown-budget
 expiry is `FAILED` with a nonzero process exit.
 The interval, deadline, target/proxy, database, capability set, process count, and restart behavior have no user
