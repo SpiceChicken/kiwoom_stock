@@ -124,6 +124,38 @@ def test_success_stop_requests_exact_evidence_document_when_sender_is_available(
     assert ledger.occurrences[occurrence["occurrence_id"]]["evidence_command_id"] == "evidence-1"
 
 
+def test_alerted_evidence_can_be_retried_once_without_reopening_activation():
+    class Sender:
+        def __init__(self):
+            self.calls = []
+
+        def send_evidence(self, **kwargs):
+            self.calls.append(kwargs)
+            return "evidence-retry-1"
+
+    occurrence = {
+        **OCCURRENCE,
+        "phase": "stop",
+        "command_state": "SUCCESS",
+        "runtime_state": "STOPPED",
+        "closure_state": "ALERTED",
+        "evidence_command_id": "evidence-failed-1",
+    }
+    ledger = InMemoryObserverLedger(
+        {occurrence["occurrence_id"]: occurrence},
+        {RELEASE_ID: RELEASE},
+    )
+    sender = Sender()
+    command_id = CStarObserver(ledger, evidence_sender=sender).retry_evidence(
+        occurrence_id=occurrence["occurrence_id"],
+    )
+    assert command_id == "evidence-retry-1"
+    assert ledger.occurrences[occurrence["occurrence_id"]]["closure_state"] == "EVIDENCE_PENDING"
+    assert ledger.occurrences[occurrence["occurrence_id"]]["evidence_retry_count"] == 1
+    assert ledger.occurrences[occurrence["occurrence_id"]]["command_state"] == "SUCCESS"
+    assert ledger.occurrences[occurrence["occurrence_id"]]["runtime_state"] == "STOPPED"
+
+
 def test_evidence_nonterminal_status_remains_pending():
     occurrence = {
         **OCCURRENCE,

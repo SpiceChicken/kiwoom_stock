@@ -41,6 +41,7 @@ COMMAND_STATUSES = {
     "Pending", "InProgress", "Delayed", "Success", "Failed",
     "TimedOut", "Cancelled", "Undeliverable", "Terminated",
 }
+MAX_EVIDENCE_RETRIES = 3
 NON_TERMINAL_STATUSES = {"Pending", "InProgress", "Delayed"}
 TERMINAL_STATUS_MAP = {
     "Success": "SUCCESS",
@@ -78,6 +79,7 @@ class ObserverLedger(Protocol):
     def get_occurrence(self, occurrence_id: str) -> Mapping[str, object] | None: ...
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None: ...
     def get_release_intent(self, release_id: str) -> Mapping[str, object] | None: ...
+    def prepare_evidence_retry(self, *, occurrence_id: str) -> None: ...
     def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None: ...
     def advance(
         self,
@@ -594,6 +596,36 @@ class CStarObserver:
         )
         return command_id
 
+    def retry_evidence(self, *, occurrence_id: str) -> str:
+        occurrence_id = _bounded_text(occurrence_id, 64)
+        occurrence = self.ledger.get_occurrence(occurrence_id)
+        if occurrence is None:
+            raise ObserverError("unknown occurrence")
+        if (
+            occurrence.get("phase") != "stop"
+            or occurrence.get("command_state") != "SUCCESS"
+            or occurrence.get("runtime_state") != "STOPPED"
+            or occurrence.get("closure_state") != "ALERTED"
+        ):
+            raise ObserverError("evidence retry precondition failed")
+        prepare = getattr(self.ledger, "prepare_evidence_retry", None)
+        if not callable(prepare):
+            raise ObserverError("evidence retry unavailable")
+        prepare(occurrence_id=occurrence_id)
+        prepared = self.ledger.get_occurrence(occurrence_id)
+        if prepared is None:
+            raise ObserverError("evidence retry occurrence missing")
+        try:
+            return self.request_evidence(occurrence=prepared)
+        except Exception:
+            self.ledger.advance(
+                occurrence_id=occurrence_id,
+                command_state="SUCCESS",
+                runtime_state="STOPPED",
+                closure_state="ALERTED",
+            )
+            raise
+
     def archive_evidence(
         self,
         *,
@@ -835,6 +867,25 @@ class InMemoryObserverLedger:
     def get_release_intent(self, release_id: str) -> Mapping[str, object] | None:
         return self.releases.get(release_id)
 
+    def prepare_evidence_retry(self, *, occurrence_id: str) -> None:
+        import time
+
+        item = self.occurrences[occurrence_id]
+        if (
+            item.get("phase") != "stop"
+            or item.get("command_state") != "SUCCESS"
+            or item.get("runtime_state") != "STOPPED"
+            or item.get("closure_state") != "ALERTED"
+        ):
+            raise ObserverError("evidence retry precondition failed")
+        retries = item.get("evidence_retry_count", 0)
+        if type(retries) is not int or retries >= MAX_EVIDENCE_RETRIES:
+            raise ObserverError("evidence retry limit reached")
+        item["closure_state"] = "EVIDENCE_PENDING"
+        item["next_action_at"] = int(time.time()) + 300
+        item["evidence_retry_count"] = retries + 1
+        item.pop("evidence_command_id", None)
+
     def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None:
         command_id = _bounded_text(command_id, 128)
         item = self.occurrences[occurrence_id]
@@ -903,6 +954,34 @@ class DynamoCStarObserverLedger:
         if not isinstance(item, Mapping):
             return None
         return {key: item[key] for key in RELEASE_INTENT_KEYS if key in item}
+
+    def prepare_evidence_retry(self, *, occurrence_id: str) -> None:
+        import time
+
+        self.table.update_item(
+            Key={"PK": f"OCC#{occurrence_id}", "SK": "META"},
+            UpdateExpression=(
+                "SET closure_state = :pending, next_action_at = :next_action, "
+                "evidence_retry_count = if_not_exists(evidence_retry_count, :zero) + :one "
+                "REMOVE expires_at, evidence_command_id"
+            ),
+            ConditionExpression=(
+                "command_state = :success AND runtime_state = :stopped AND "
+                "closure_state = :alerted AND "
+                "(attribute_not_exists(evidence_retry_count) OR "
+                "evidence_retry_count < :max_retries)"
+            ),
+            ExpressionAttributeValues={
+                ":pending": "EVIDENCE_PENDING",
+                ":next_action": int(time.time()) + 300,
+                ":zero": 0,
+                ":one": 1,
+                ":max_retries": MAX_EVIDENCE_RETRIES,
+                ":success": "SUCCESS",
+                ":stopped": "STOPPED",
+                ":alerted": "ALERTED",
+            },
+        )
 
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None:
         from boto3.dynamodb.conditions import Key
@@ -1048,5 +1127,16 @@ def lambda_handler(event: Mapping[str, object], _context: object) -> dict[str, o
             "schema_version": 1,
             "kind": "reconcile",
             "results": [asdict(result) for result in observer.reconcile()],
+        }
+    if event.get("kind") == "retry_evidence":
+        occurrence_id = event.get("occurrence_id")
+        if not isinstance(occurrence_id, str):
+            raise ObserverError("retry occurrence id missing")
+        command_id = observer.retry_evidence(occurrence_id=occurrence_id)
+        return {
+            "schema_version": 1,
+            "kind": "retry_evidence",
+            "occurrence_id": occurrence_id,
+            "command_id": command_id,
         }
     return {"schema_version": 1, "kind": "event", **asdict(observer.process_ssm_event(event))}
