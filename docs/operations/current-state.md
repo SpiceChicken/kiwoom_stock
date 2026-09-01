@@ -101,7 +101,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
 | C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v2, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 7, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 8, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -118,8 +118,8 @@ observer/reconciliation closure evidence를 별도 확인한다.
   bootstrap은 schedule을 끄고 generation/release/pointer를 조건부 seed/read-back한
   뒤에만 다시 켠다.
 - `AWS::Lambda::Version`은 immutable package key를 Description에 결속해 package가
-  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias와 observer
-  alias는 모두 version 7이다.
+  바뀌면 `live` alias가 새 version으로 이동한다. 현재 submitter alias는 version 7,
+  observer alias는 version 8이다.
 
 2026-08-27 KST DynamoDB transaction remediation read-back:
 
@@ -216,6 +216,28 @@ observer/reconciliation closure evidence를 별도 확인한다.
   폐기한다. CloudFormation `UPDATE_COMPLETE`, `live` alias version 7 및
   package hash read-back을 완료했다.
 
+2026-09-01 KST automatic start acceptance와 Observer v8 remediation:
+
+- 08:50 KST EventBridge Scheduler가 자동 start를 호출했고, Submitter admission과
+  SSM command가 성공했다. 09:00 이후 첫 safe tick은 `PASS`, `calendar=OPEN`,
+  `mode=shadow-continuous`로 확인되었으며, 이후 컨테이너가 `healthy` 상태로
+  연속 실행 중이다.
+- 현재 전략 판단은 `HOLD/NO_ENTRY_SIGNAL/THRUST_LOW`, position은 `FLAT`이며,
+  `paper_buy=0`, `paper_sell=0`, runtime error=0이다. account/broker order/
+  report/S3/Slack 등 모든 side effect flag는 `false`로 유지된다. 가상매매가
+  발생하지 않은 것은 신호 부재이며 자동 실행 실패가 아니다.
+- Observer v7은 정상 activation `Success`도 `TERMINAL_STATUS_MAP` 전체에 포함해
+  `cstar_observer_alerted` metric을 발행하는 false positive가 있었다. 그 결과
+  정상 start 직후 Observer alarm이 일시적으로 ALARM이 될 수 있었다. PR #148은
+  `Success`를 observer alert 대상에서 제외하고 실패·evidence failure만 경보하도록
+  수정했으며, 정상 Success 회귀 테스트를 추가했다.
+- PR #148은 main에 merge되었고, CloudFormation `UPDATE_COMPLETE`와 Observer
+  alias `live` version 8, 새 package `CodeSha256` 일치를 read-back했다. start/stop/
+  reconciliation schedule, active release pointer, EC2 worker는 변경하지 않았다.
+- 현재 start occurrence는 `SUCCESS/ACCEPTED/OPEN`이다. 15:35 KST 자동 stop,
+  terminal evidence export와 Observer closure(`CLOSED` 또는 실제 failure 시
+  `ALERTED`) 확인이 오늘 acceptance의 남은 단계다.
+
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
 `dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
@@ -238,10 +260,10 @@ schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→st
 | Active release | DynamoDB `CONTROL#CSTAR/RELEASE` pointer와 참조 `RELEASE#<release_id>/META` |
 | Schedule state | start/stop `ENABLED`, `Asia/Seoul`, exact 08:50/15:35 KST |
 
-실거래·계좌 조회·주문 capability는 계속 비활성이다. 다음 평일 start/stop에서
-실제 SSM submission, host fence effect, paper shadow terminal, observer evidence
-closure를 확인하는 acceptance만 남아 있다. 이 acceptance 전에는 “자동 실행이
-검증 완료”라고 판정하지 않는다.
+실거래·계좌 조회·주문 capability는 계속 비활성이다. 2026-09-01 start의 실제
+SSM submission, host fence effect, 첫 safe tick과 장중 지속 실행은 확인되었고,
+오늘 15:35 stop/evidence closure를 확인하는 acceptance만 남아 있다. 이 closure
+전에는 “일일 자동 실행이 검증 완료”라고 판정하지 않는다.
 
 AWS cutover read-back 기준:
 
@@ -342,8 +364,8 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
 
 ## 현재 남은 차단 항목
 
-- 다음 개장일 schedule에서 IAM 수정과 2026-08-31 runtime 진단 보강 후 자동
-  start/stop이 다시 수행되는지 확인할 운영 모니터링;
+- 2026-09-01 자동 start와 장중 지속 실행은 확인했다. 15:35 KST 자동 stop,
+  evidence export, 원장 closure까지 운영 모니터링;
 - 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
