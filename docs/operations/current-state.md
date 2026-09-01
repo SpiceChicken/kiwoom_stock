@@ -101,7 +101,7 @@ observer/reconciliation closure evidence를 별도 확인한다.
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
 | C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v4, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 11, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 12, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -259,10 +259,18 @@ observer/reconciliation closure evidence를 별도 확인한다.
   evidence를 S3 content-addressed object로 저장하고 occurrence를 `CLOSED`로
   전환한 것을 read-back했다. S3 object size는 6,604 bytes이며 실거래·주문·
   계좌·외부 API side effect는 없었다.
-- EventBridge rule/target은 `ENABLED`와 `live` alias v11로 확인되었으나,
-  이번 recovery의 최종 closure는 status event를 Observer에 직접 전달해 검증했다.
-  따라서 다음 개장일에는 실제 SSM status event가 EventBridge를 통해 자동으로
-  Observer에 도달하는지까지 별도 acceptance gate로 확인한다.
+- 기존 EventBridge rule은 `EC2 Command Status-change Notification` 이벤트에
+  `detail.instance-id`를 함께 요구하고 있어, 전체 명령 상태 이벤트와 per-instance
+  invocation 이벤트 계약이 불일치했다. 이 조합은 실제 SSM invocation 이벤트와
+  매칭되지 않아 Observer 자동 전달이 발생할 수 없는 근본 원인이었다.
+- EventBridge pattern을 `EC2 Command Invocation Status-change Notification`으로
+  교정하고, SSM activation/evidence 문서와 단일 EC2 instance 조건을 유지한 채
+  CloudFormation `UPDATE_COMPLETE`, rule `ENABLED`, Observer alias `live` v12를
+  read-back했다. Lambda package key는 immutable SHA 기반으로 고정되어 있다.
+- 다음 실제 SSM activation/evidence invocation에서 EventBridge가 Observer를
+  자동 호출하고 occurrence가 정상 closure되는지 운영 acceptance를 수행한다.
+  이번 재검증의 최종 closure는 이미 성공한 evidence-only recovery로 확인했으므로,
+  다음 acceptance는 자동 전달 경로 자체의 확인이다.
 
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
@@ -288,8 +296,8 @@ schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→st
 
 실거래·계좌 조회·주문 capability는 계속 비활성이다. 2026-09-01 start의 실제
 SSM submission, host fence effect, 첫 safe tick, 장중 지속 실행과 stop/evidence
-payload 보존은 확인되었다. 다음 개장일에는 실제 status event의 EventBridge 자동
-전달을 포함한 전체 자동 closure를 다시 확인한다.
+payload 보존은 확인되었다. EventBridge 자동 전달 pattern 교정과 배포는 완료했고,
+다음 개장일에는 실제 status event를 통한 전체 자동 closure를 다시 확인한다.
 
 AWS cutover read-back 기준:
 
