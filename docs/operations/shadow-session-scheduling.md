@@ -20,6 +20,14 @@ retry를 사용하고 stop은 15:35 KST, 15:50:59 KST cutoff과 900초/2회 retr
 사용한다. stop은 active release pointer를 재조회하지 않고 start가 만든 daily
 session lease의 release를 사용한다.
 
+운영 슬롯을 수동 테스트에 재사용하지 않는다. 동일한 production schedule ARN,
+phase와 `scheduled_time`은 `execution_id`나 retry attempt가 달라도 같은
+occurrence ID를 만들기 때문에, 해당 슬롯의 수동 Lambda 호출은 실제 Scheduler
+delivery를 중복 실행하는 대신 idempotency 경로에서 차단될 수 있다. 수동 재현은
+별도 test schedule/generation과 격리된 날짜를 사용하고, 이미 사용된 운영 슬롯은
+DynamoDB 원장이나 호스트 fence에서 삭제·덮어쓰지 않고 audit evidence로 보존한 뒤
+다음 미사용 개장일 슬롯에서 자동 acceptance를 수행한다.
+
 현재 C* stack, SSM documents, EC2 fence 설치/arm, GitHub schedule 제거와
 EventBridge cutover가 완료되었다. generation은 `cstar-g000001`이며 실제
 activation clock owner는 EventBridge Scheduler다. 첫 개장일의 submission→host
