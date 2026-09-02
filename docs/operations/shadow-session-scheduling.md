@@ -63,8 +63,11 @@ cron은 평일 calendar time을 예약할 뿐 한국 거래소 휴장일을 자�
 
 개장 전 자동 수행 경계는 다음과 같다.
 
-1. EventBridge Scheduler는 repository-level `KIWOOM_SHADOW_SCHEDULE_*` tuple을 사용해
-   승인 없이 exact source/image/build를 검증한다.
+1. C* Submitter는 DynamoDB `CONTROL#CSTAR/RELEASE` pointer와 참조
+   `RELEASE#<release_id>/META`의 exact release intent를 검증한다. C* runtime은
+   repository-level `KIWOOM_SHADOW_SCHEDULE_*` 변수를 읽지 않는다. 해당 변수는
+   아래의 비활성화된 구형 GitHub activation workflow와 historical audit에만
+   보존된다.
 2. 직접 SSH는 사후 read-back과 복구에만 사용한다. 사람용 shell에는
    `aws ssm start-session`을 사용하지 않는다.
 3. 08:50 KST admission 후 worker가 첫 safe tick을 09:00 KST 이후에만
@@ -209,26 +212,23 @@ One regular session can emit at most 390 one-minute cycles. The standalone
 evidence validator accepts up to 512 bounded records so the cycle evidence
 and terminal record remain within one finite input budget.
 
-## Schedule tuple registration
+## Legacy GitHub activation tuple (disabled)
 
-Before enabling the schedule, register these repository-level Actions
-variables from the exact release that passed production-check and shadow
-rollout:
+The following repository-level Actions variables belong only to the disabled
+legacy GitHub activation workflow and its historical audit:
 
 - `KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA`
 - `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST`
 - `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID`
 
-The source SHA must be the immutable released commit used by the current runtime
-image and host rollout. The image digest must carry that same source revision,
-and the build run ID must be the successful `cd-production-check.yml` candidate
-run for that tuple. The worker, validator, SSM document, and
-`compose.shadow.yaml` hashes are calculated from that exact source by the
-workflow; the host rollout binding must already contain the same worker/document
-artifact set. Runtime, deployment-template, or package changes require a new
-production check, exact rollout, and tuple update before the next market-day
-schedule. Documentation-only commits do not change the runtime tuple and are
-not copied into the C* ledger.
+They are not a C* schedule input and changing them cannot start, stop, or alter a
+C* occurrence. If the legacy workflow is ever reintroduced, its source SHA must
+be the immutable released commit used by its runtime image and host rollout, the
+image digest must carry that same source revision, and the build run ID must be
+the successful `cd-production-check.yml` candidate for that tuple. Runtime,
+deployment-template, or package changes still require a new production check,
+exact rollout, and C* release rotation before the next market-day schedule.
+Documentation-only commits do not change the C* runtime release.
 
 Keep the tuple unchanged from the 08:50 start through the 15:35 stop and the
 observer's post-completion evidence closure. Update it only after both the start
@@ -256,10 +256,12 @@ transaction, reads the pointer back, and re-enables both schedules only after
 the read-back succeeds. If any mutation fails, schedules remain disabled for
 manual recovery.
 
-The current registered tuple is recorded in [`current-state.md`](current-state.md).
-Do not copy a historical tuple from the production-check guide.
+The current C* release is recorded by the DynamoDB `ACTIVE` pointer and its
+release metadata; exact values are read through the observer boundary. Do not
+copy a historical GitHub tuple from the production-check guide into the C*
+ledger.
 
-현재 자동 schedule tuple:
+현재 비활성 legacy GitHub schedule tuple:
 
 | 항목 | 값 |
 |---|---|
@@ -267,9 +269,10 @@ Do not copy a historical tuple from the production-check guide.
 | Image digest | repository variable `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST` |
 | Build run | repository variable `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID` |
 
-위 세 값과 EC2 rollout binding 및 activation image가 동일한지 workflow가
-매번 exact 검증한다. 새 release를 운영 대상으로 전환할 때는 production check와
-exact rollout이 성공한 뒤 세 schedule 변수를 함께 갱신한다.
+위 세 값은 disabled legacy workflow가 사용하는 값이다. C* release를 운영
+대상으로 전환할 때는 production check와 exact rollout을 성공시킨 뒤
+`rotate_shadow_cstar_release.py`로 새로운 exact release intent를 추가하고
+`CONTROL#CSTAR/RELEASE` pointer를 조건부 전환한다.
 
 휴장일 admission은 continuous worker가 `CLOSED/calendar-closed` zero-cycle
 terminal을 남기고 종료하며, 호스트 제어 스크립트는 해당 컨테이너를 제거한 뒤

@@ -307,14 +307,16 @@ schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→st
 다음 개장일 acceptance에서 확인한다.
 
 현재 자동 실행 경계는 다음 SSOT로 정렬되어 있다. 정확한 release 값은 공개
-문서에 복제하지 않고 repository Actions 변수와 AWS C* ledger에서 read-back한다.
+문서에 복제하지 않고 AWS C* ledger에서 read-back한다. repository
+`KIWOOM_SHADOW_SCHEDULE_*` 변수는 비활성화된 구형 GitHub activation workflow와
+historical audit에만 남아 있으며 C* runtime 입력이 아니다.
 
 | 항목 | 현재 read-back |
 |---|---|
-| Source SHA | repository variable `KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA`와 AWS `ACTIVE` release |
-| Production check | repository variable `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID` |
+| Source SHA | DynamoDB `RELEASE#<release_id>/META`와 `CONTROL#CSTAR/RELEASE`의 `ACTIVE` release |
+| Production check | `ACTIVE` release metadata의 immutable provenance/build record |
 | Shadow rollout | AWS `ACTIVE` release의 `rollout_attempt_id` |
-| Image | repository variable `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST`와 AWS `ACTIVE` release |
+| Image | `ACTIVE` release metadata의 image digest |
 | Active release | DynamoDB `CONTROL#CSTAR/RELEASE` pointer와 참조 `RELEASE#<release_id>/META` |
 | Schedule state | start/stop `ENABLED`, `Asia/Seoul`, exact 08:50/15:35 KST |
 
@@ -377,16 +379,18 @@ AWS read-back은 새 target과 문서 기본 버전을 확인했다. 위의 초�
 
 ## 현재 immutable release tuple
 
-실행 시점의 source/image/build tuple은 아래 repository-level Actions variable의
-값이 SSOT다. 문서에 release SHA를 고정하지 않아 문서 commit 자체가 다음
-schedule release를 stale하게 만들지 않도록 한다. 세 값은 rollout 성공 후
-함께 read-back한다.
+실행 시점의 source/image/build tuple은 DynamoDB
+`CONTROL#CSTAR/RELEASE` pointer가 가리키는 `RELEASE#<release_id>/META`가
+SSOT다. 문서에 release SHA를 고정하지 않아 문서 commit 자체가 다음 C*
+release를 stale하게 만들지 않도록 한다. 정확한 값은 observer 경계에서
+read-back한다. repository-level Actions 변수는 비활성화된 legacy GitHub
+workflow용 historical tuple일 뿐이다.
 
 | 항목 | 값 |
 |---|---|
-| Source SHA | `KIWOOM_SHADOW_SCHEDULE_SOURCE_SHA` |
-| Image | `KIWOOM_SHADOW_SCHEDULE_IMAGE_DIGEST` |
-| Build run | `KIWOOM_SHADOW_SCHEDULE_BUILD_RUN_ID` |
+| Source SHA | C* `ACTIVE` release metadata |
+| Image | C* `ACTIVE` release metadata |
+| Build run | C* `ACTIVE` release metadata |
 | Compose / production Compose SHA | latest release manifest for that tuple |
 | Worker / validator / shadow document SHA | latest exact shadow rollout evidence |
 | Production check / rollout / activation | latest successful evidence artifacts |
