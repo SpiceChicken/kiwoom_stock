@@ -45,6 +45,32 @@ def test_all_activation_paths_are_disabled_by_default():
     assert template["Resources"]["ReconcileSchedule"]["Condition"] == "ReconciliationEnabled"
 
 
+def test_runtime_execution_path_uses_service_roles_not_local_sessions():
+    template = load()
+    resources = template["Resources"]
+
+    assert not any(
+        resource.get("Type") == "AWS::IAM::User"
+        for resource in resources.values()
+    )
+    for role_name, service in {
+        "SubmitterRole": "lambda.amazonaws.com",
+        "ObserverRole": "lambda.amazonaws.com",
+        "SchedulerRole": "scheduler.amazonaws.com",
+    }.items():
+        trust = resources[role_name]["Properties"]["AssumeRolePolicyDocument"]
+        principals = [
+            statement["Principal"]
+            for statement in trust["Statement"]
+            if statement.get("Effect") == "Allow"
+        ]
+        assert {"Service": service} in principals
+
+    for schedule_name in ("StartSchedule", "StopSchedule", "ReconcileSchedule"):
+        target = resources[schedule_name]["Properties"]["Target"]
+        assert target["RoleArn"] == {"Fn::GetAtt": ["SchedulerRole", "Arn"]}
+
+
 def test_evidence_bucket_is_versioned_and_governance_locked_for_400_days():
     bucket = load()["Resources"]["EvidenceBucket"]
     props = bucket["Properties"]

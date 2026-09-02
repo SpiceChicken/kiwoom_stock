@@ -44,6 +44,18 @@ reconcile schedule ─┴-> observer Lambda
                        -> metrics/alarms/Slack receipt
 ```
 
+### Local session independence
+
+The automatic execution path has no dependency on a developer PC, an IAM user
+session, Session Manager, or SSH. EventBridge Scheduler assumes its service
+execution role, the submitter and observer use their Lambda execution roles, and
+SSM reaches the single EC2 host through the instance profile and SSM Agent. A
+local `aws login` session is permitted only for one-time provisioning,
+deployment, or optional human read-back; its expiry must not stop, restart, or
+alter a scheduled occurrence. If no human session is available, the durable
+ledger, host fence, evidence bucket, CloudWatch metrics/alarms, and the approved
+notification path remain the system-owned sources of truth.
+
 ### Schedule ownership
 
 - start와 stop은 같은 versioned Schedule Group의 schedule pair다.
