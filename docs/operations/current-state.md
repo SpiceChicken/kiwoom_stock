@@ -13,6 +13,10 @@
   전용 검증과 redacted evidence뿐이다.
 - 사람의 EC2 관리 접속은 직접 SSH를 사용한다. 사람용 Session Manager
   `start-session`은 사용하지 않는다.
+- C* 자동 start/stop, SSM 전달, Observer reconciliation과 evidence closure는
+  로컬 PC의 `aws login`, IAM 사용자 세션 또는 SSH에 종속되지 않는다. 세션 만료는
+  사람의 선택적 read-back만 중단해야 하며, scheduled occurrence를 수동 재실행하는
+  사유가 아니다.
 - GitHub Actions의 보호된 production-check, shadow rollout, shadow activation
   자동화는 기존 SSM Command document 경계를 유지한다. 이것은 사람의 SSH
   접속을 SSM으로 되돌린다는 뜻이 아니다.
