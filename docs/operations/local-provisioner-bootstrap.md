@@ -62,16 +62,22 @@ statement를 포함한 exact 정책으로 갱신한다. 그 외 drift는 관리�
 
 [`local-user-assume-role-policy.json.example`](../../deploy/iam/local-user-assume-role-policy.json.example)
 
-허용 대상은 정확히 다음 세 역할이다.
+허용 대상은 정확히 다음 다섯 역할이다.
 
 - `kiwoom-local-operator`
+- `kiwoom-local-observer`
 - `kiwoom-local-provisioner`
 - `kiwoom-cstar-document-deployer`
+- `kiwoom-cstar-release-rotator`
 
-적용 후 bootstrap이 `get-user-policy` read-back에서 exact 세 role ARN과
+적용 후 bootstrap이 `get-user-policy` read-back에서 exact 다섯 role ARN과
 same-device login action만 남는지 확인한다. C* 문서 배포 역할은 별도
 `cstar-document-deployer-*.json.example`의 trust/policy를 사용하며, EC2 재생성
 권한과 섞지 않는다. 실패하면 기존 권한을 임의로 삭제하거나 덮어쓰지 않는다.
+
+관측 역할은 별도 [C* observer bootstrap](aws-local-access.md#3-비관리자-c-observer-1회-bootstrap)으로
+생성한다. provisioner는 observer 정책을 대신 생성하지 않으며, observer에는
+IAM·EC2 write·SSM 실행 권한을 추가하지 않는다.
 
 ## 로컬 profile
 

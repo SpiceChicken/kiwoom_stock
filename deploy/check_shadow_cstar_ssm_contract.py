@@ -20,7 +20,8 @@ ACTIVATION_PARAMETERS = {
 }
 EVIDENCE_PARAMETERS = {
     "SessionDateKst", "OccurrenceId", "ReleaseId", "EvidenceOffset",
-    "EvidenceLength", "ExpectedInstanceId", "Region",
+    "EvidenceLength", "ExpectedInstanceId", "Region", "ImageDigest", "SourceSha",
+    "ExpectedWorkerSha256", "ExpectedValidatorSha256", "ExpectedShadowDocumentSha256",
 }
 FORBIDDEN_ACTIVATION = ("telemetry-export-page", "aws ", "github")
 FORBIDDEN_EVIDENCE = ("--desired-state", "kiwoom-shadow-worker", "shadow-schedule-fence.py")
@@ -97,7 +98,7 @@ def check(root: Path) -> tuple[int, str]:
         raise ContractError("evidence forbidden capability")
     if "exec 9>/run/lock/kiwoom-stock-shadow.lock" not in evidence_script:
         raise ContractError("evidence incumbent lock")
-    return 0, "PASS documents=2 activation_parameters=17 evidence_parameters=7"
+    return 0, "PASS documents=2 activation_parameters=17 evidence_parameters=12"
 
 
 def main(argv: list[str] | None = None) -> int:

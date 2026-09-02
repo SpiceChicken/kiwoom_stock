@@ -21,7 +21,7 @@ def run_checker(root: Path = ROOT) -> subprocess.CompletedProcess[str]:
 def test_cstar_ssm_documents_pass_static_contract():
     result = run_checker()
     assert result.returncode == 0
-    assert result.stdout == "PASS documents=2 activation_parameters=17 evidence_parameters=7\n"
+    assert result.stdout == "PASS documents=2 activation_parameters=17 evidence_parameters=12\n"
     assert result.stderr == ""
 
 
@@ -51,3 +51,8 @@ def test_evidence_document_uses_posix_shell_options_for_ssm_run_shell_script():
     assert '"set -eu"' in text
     assert "pipefail" not in text
     assert '"set -E' not in text
+
+
+def test_evidence_document_bounds_page_for_the_final_base64_envelope():
+    text = (ROOT / "deploy/ssm/shadow-evidence-export-document.yaml").read_text()
+    assert '"EvidenceLength": {"type":"String","allowedPattern":"^(?:[1-9][0-9]{0,2}|[1-3][0-9]{3}|40(?:[0-8][0-9]|9[0-6]))$"' in text

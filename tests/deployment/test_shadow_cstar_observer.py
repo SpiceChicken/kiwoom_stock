@@ -4,6 +4,7 @@ import hashlib
 
 import pytest
 
+from deploy.shadow_cstar_contract import release_id_for
 from deploy.shadow_cstar_observer import (
     Boto3EvidenceCommandSender,
     Boto3EvidenceSink,
@@ -15,11 +16,23 @@ from deploy.shadow_cstar_observer import (
 )
 
 
+RELEASE = {
+    "image_digest": "ghcr.io/spicechicken/kiwoom_stock@sha256:" + "c" * 64,
+    "source_sha": "d" * 40,
+    "compose_shadow_sha256": "e" * 64,
+    "worker_sha256": "f" * 64,
+    "validator_sha256": "0" * 64,
+    "shadow_document_sha256": "1" * 64,
+    "rollout_attempt_id": "rollout-1",
+}
+RELEASE_ID = release_id_for(RELEASE)
+
+
 OCCURRENCE = {
     "occurrence_id": "a" * 64,
     "phase": "start",
     "session_date_kst": "2026-08-24",
-    "release_id": "b" * 64,
+    "release_id": RELEASE_ID,
     "command_id": "command-1",
     "command_state": "PENDING",
     "runtime_state": "UNKNOWN",
@@ -29,7 +42,7 @@ OCCURRENCE = {
 
 def _event(status="Success", occurrence_id="a" * 64):
     return {
-        "detail-type": "EC2 Command Status-change Notification",
+        "detail-type": "EC2 Command Invocation Status-change Notification",
         "detail": {
             "command-id": "command-1",
             "instance-id": "i-0e42e09d6c087ba29",
@@ -42,7 +55,7 @@ def _event(status="Success", occurrence_id="a" * 64):
 
 def _evidence_event(status="Success", occurrence_id="a" * 64, command_id="evidence-1"):
     return {
-        "detail-type": "EC2 Command Status-change Notification",
+        "detail-type": "EC2 Command Invocation Status-change Notification",
         "detail": {
             "command-id": command_id,
             "instance-id": "i-0e42e09d6c087ba29",
@@ -79,7 +92,10 @@ def test_success_start_does_not_emit_observer_alert():
 
 def test_success_stop_enters_evidence_pending():
     occurrence = {**OCCURRENCE, "phase": "stop"}
-    ledger = InMemoryObserverLedger({occurrence["occurrence_id"]: occurrence})
+    ledger = InMemoryObserverLedger(
+        {occurrence["occurrence_id"]: occurrence},
+        {RELEASE_ID: RELEASE},
+    )
     result = CStarObserver(ledger).process_ssm_event(_event())
     assert result.runtime_state == "STOPPED"
     assert result.closure_state == "EVIDENCE_PENDING"
@@ -95,12 +111,49 @@ def test_success_stop_requests_exact_evidence_document_when_sender_is_available(
             return "evidence-1"
 
     occurrence = {**OCCURRENCE, "phase": "stop"}
-    ledger = InMemoryObserverLedger({occurrence["occurrence_id"]: occurrence})
+    ledger = InMemoryObserverLedger(
+        {occurrence["occurrence_id"]: occurrence},
+        {RELEASE_ID: RELEASE},
+    )
     sender = Sender()
     result = CStarObserver(ledger, evidence_sender=sender).process_ssm_event(_event())
     assert result.evidence_requested is True
     assert sender.calls[0]["occurrence_id"] == occurrence["occurrence_id"]
+    assert sender.calls[0]["image_digest"] == RELEASE["image_digest"]
+    assert sender.calls[0]["source_sha"] == RELEASE["source_sha"]
     assert ledger.occurrences[occurrence["occurrence_id"]]["evidence_command_id"] == "evidence-1"
+
+
+def test_alerted_evidence_can_be_retried_once_without_reopening_activation():
+    class Sender:
+        def __init__(self):
+            self.calls = []
+
+        def send_evidence(self, **kwargs):
+            self.calls.append(kwargs)
+            return "evidence-retry-1"
+
+    occurrence = {
+        **OCCURRENCE,
+        "phase": "stop",
+        "command_state": "SUCCESS",
+        "runtime_state": "STOPPED",
+        "closure_state": "ALERTED",
+        "evidence_command_id": "evidence-failed-1",
+    }
+    ledger = InMemoryObserverLedger(
+        {occurrence["occurrence_id"]: occurrence},
+        {RELEASE_ID: RELEASE},
+    )
+    sender = Sender()
+    command_id = CStarObserver(ledger, evidence_sender=sender).retry_evidence(
+        occurrence_id=occurrence["occurrence_id"],
+    )
+    assert command_id == "evidence-retry-1"
+    assert ledger.occurrences[occurrence["occurrence_id"]]["closure_state"] == "EVIDENCE_PENDING"
+    assert ledger.occurrences[occurrence["occurrence_id"]]["evidence_retry_count"] == 1
+    assert ledger.occurrences[occurrence["occurrence_id"]]["command_state"] == "SUCCESS"
+    assert ledger.occurrences[occurrence["occurrence_id"]]["runtime_state"] == "STOPPED"
 
 
 def test_evidence_nonterminal_status_remains_pending():
@@ -465,12 +518,19 @@ def test_evidence_sender_uses_exact_document_and_no_activation_fields():
     command_id = Boto3EvidenceCommandSender(client).send_evidence(
         session_date_kst="2026-08-24",
         occurrence_id="a" * 64,
-        release_id="b" * 64,
+        release_id=RELEASE_ID,
+        image_digest=RELEASE["image_digest"],
+        source_sha=RELEASE["source_sha"],
+        worker_sha256=RELEASE["worker_sha256"],
+        validator_sha256=RELEASE["validator_sha256"],
+        shadow_document_sha256=RELEASE["shadow_document_sha256"],
         offset=0,
         length=256,
     )
     assert command_id == "evidence-1"
     assert client.kwargs["DocumentName"] == EVIDENCE_DOCUMENT_NAME
+    assert client.kwargs["Parameters"]["ImageDigest"] == [RELEASE["image_digest"]]
+    assert client.kwargs["Parameters"]["ExpectedWorkerSha256"] == [RELEASE["worker_sha256"]]
     assert "DesiredState" not in client.kwargs["Parameters"]
 
 

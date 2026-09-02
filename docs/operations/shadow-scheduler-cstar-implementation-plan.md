@@ -2,8 +2,12 @@
 
 ## Status
 
-Implemented and repaired — 2026-08-24. First post-repair market-day acceptance
-evidence is pending.
+Implemented and repaired — 2026-09-02. First post-repair market-day acceptance
+evidence is preserved; the EventBridge SSM invocation-event pattern was corrected
+and deployed. The observer `command-index` Query permission was then repaired and
+deployed after a non-trading SSM invocation exposed the missing resource. Automatic
+success-to-evidence closure on a normal market-day run remains the final operational
+acceptance gate.
 
 이 문서는 구현 순서와 write set 및 실제 cutover read-back을 기록한다. AWS apply,
 EventBridge enable, GitHub schedule 제거, SSM/EC2 실행은 P8에서 완료되었고 첫
@@ -208,6 +212,15 @@ AMBIGUOUS; Scheduler retry may submit another command, but the host fence permit
 - archives content-addressed evidence and emits fixed metrics/Slack messages;
 - never starts/stops/replays/replaces a session.
 
+Evidence export resolves the occurrence's immutable release intent before sending the
+exact evidence document. The host wrapper delegates to the canonical named-volume
+`telemetry-export-page` path with the incumbent lock FD, `network none`, and
+`read-only` mounts; the evidence page is capped at 4,096 bytes so its base64 JSON
+envelope remains within the 12,288-byte SSM output bound. A separate, explicit
+evidence-only recovery can move `ALERTED` to `EVIDENCE_PENDING` up to three times
+when the activation is already `SUCCESS/STOPPED`; it cannot reopen activation or
+issue a worker command.
+
 Reconcile schedules are bounded presence/closure checks rather than an unbounded recovery loop.
 
 ## Disabled-by-default IaC
@@ -291,7 +304,7 @@ before cutover; it must not remain as an unfenced bypass.
 | P5 | observer/reconciler/evidence | event loss/order, SSM terminal, export, S3/Slack failure | rule/schedules disabled | no recovery wiring |
 | P6 | deterministic package and disabled IaC | ZIP hash, template defaults/IAM/forbidden capabilities | unapplied template | all triggers disabled |
 | P7 | architect/reviewer/verifier bundle | full targeted tests, checker, failure matrix, Docker where safe | phase commits | C3/C4 reachable RED documented |
-| P8 | AWS apply/validator/cutover | stack/IAM read-back, package/doc/host tuple, GitHub drain, EventBridge pair read-back | break-before-make runbook | cutover PASS; market-day C3/C4 evidence pending |
+| P8 | AWS apply/validator/cutover | stack/IAM read-back, package/doc/host tuple, GitHub drain, corrected SSM invocation EventBridge pattern, command-index permission, EventBridge pair read-back | break-before-make runbook | automatic delivery and non-trading observer update PASS; normal success-to-evidence closure acceptance pending |
 
 Do not mix structure, functionality, AWS apply and cutover in one commit or rollout.
 
@@ -308,7 +321,7 @@ Do not mix structure, functionality, AWS apply and cutover in one commit or roll
 | reboot at CLAIMED | one pre-cutoff retry only |
 | reboot at APPLYING | exact adoption or manual AMBIGUOUS; no blind replay |
 | SSM Agent offline/failure | submission success not promoted to runtime success |
-| status event lost/duplicate/out of order | reconciler closes once; terminal never reopens |
+| status event lost/duplicate/out of order | reconciler closes once; normal terminal never reopens; bounded evidence-only recovery is explicit |
 | holiday | exact zero-cycle CLOSED; stop closes same lease without false absent failure |
 | late start/stop or missing stop lease | no SSM; durable rejection and alert |
 | S3/Slack failure | runtime result retained; closure ALERTED |

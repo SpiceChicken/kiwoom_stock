@@ -410,7 +410,10 @@ _TRANSITIONS: Final = {
         "OPEN": frozenset({"OPEN", "EVIDENCE_PENDING", "ALERTED"}),
         "EVIDENCE_PENDING": frozenset({"EVIDENCE_PENDING", "CLOSED", "ALERTED"}),
         "CLOSED": frozenset({"CLOSED"}),
-        "ALERTED": frozenset({"ALERTED"}),
+        # An evidence-only recovery may reopen an alerted closure. The
+        # observer guards this transition with SUCCESS/STOPPED and a bounded
+        # retry counter; activation state is never reopened.
+        "ALERTED": frozenset({"ALERTED", "EVIDENCE_PENDING"}),
     },
 }
 

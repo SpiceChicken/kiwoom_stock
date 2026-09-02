@@ -71,7 +71,7 @@
       "Properties":{
         "AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]},
         "Policies":[{"PolicyName":"cstar-observer-minimal","PolicyDocument":{"Version":"2012-10-17","Statement":[
-          {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:Query","dynamodb:UpdateItem"],"Resource":[{"Fn::GetAtt":["CStarTable","Arn"]},{"Fn::Join":["", [{"Fn::GetAtt":["CStarTable","Arn"]},"/index/closure-due-index"]]}]},
+          {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:Query","dynamodb:UpdateItem"],"Resource":[{"Fn::GetAtt":["CStarTable","Arn"]},{"Fn::Join":["", [{"Fn::GetAtt":["CStarTable","Arn"]},"/index/closure-due-index"]]},{"Fn::Join":["", [{"Fn::GetAtt":["CStarTable","Arn"]},"/index/command-index"]]}]},
           {"Effect":"Allow","Action":["ssm:GetCommandInvocation","ssm:ListCommandInvocations"],"Resource":"*"},
           {"Effect":"Allow","Action":"ssm:SendCommand","Resource":[{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":ssm:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":document/KiwoomStock-ShadowEvidenceExport"]]},{"Fn::Join":["",["arn:",{"Ref":"AWS::Partition"},":ec2:",{"Ref":"AWS::Region"},":",{"Ref":"AWS::AccountId"},":instance/",{"Ref":"InstanceId"}]]}]},
           {"Effect":"Allow","Action":["s3:PutObject","s3:AbortMultipartUpload"],"Resource":{"Fn::Join":["", [{"Fn::GetAtt":["EvidenceBucket","Arn"]},"/sessions/*"]]}},
@@ -125,7 +125,7 @@
     },
     "ObserverRule": {
       "Condition":"ObserverEnabled","Type":"AWS::Events::Rule",
-      "Properties":{"EventPattern":{"source":["aws.ssm"],"detail-type":["EC2 Command Status-change Notification"],"detail":{"instance-id":[{"Ref":"InstanceId"}],"document-name":["KiwoomStock-ShadowCStarActivation","KiwoomStock-ShadowEvidenceExport"]}},"Targets":[{"Arn":{"Ref":"ObserverAlias"},"Id":"cstar-observer","DeadLetterConfig":{"Arn":{"Fn::GetAtt":["ObserverDlq","Arn"]}}}]}
+      "Properties":{"EventPattern":{"source":["aws.ssm"],"detail-type":["EC2 Command Invocation Status-change Notification"],"detail":{"instance-id":[{"Ref":"InstanceId"}],"document-name":["KiwoomStock-ShadowCStarActivation","KiwoomStock-ShadowEvidenceExport"]}},"Targets":[{"Arn":{"Ref":"ObserverAlias"},"Id":"cstar-observer","DeadLetterConfig":{"Arn":{"Fn::GetAtt":["ObserverDlq","Arn"]}}}]}
     },
     "ObserverInvokePermission": {"Condition":"ObserverEnabled","Type":"AWS::Lambda::Permission","Properties":{"Action":"lambda:InvokeFunction","FunctionName":{"Ref":"ObserverAlias"},"Principal":"events.amazonaws.com","SourceArn":{"Fn::GetAtt":["ObserverRule","Arn"]}}},
     "ReconcileSchedule": {

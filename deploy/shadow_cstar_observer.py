@@ -14,27 +14,34 @@ import urllib.request
 try:
     from deploy.shadow_cstar_contract import (
         ContractError,
+        RELEASE_INTENT_KEYS,
         diagnostic_category,
+        make_release_intent,
         metric_name,
+        release_id_for,
         validate_state_transition,
     )
     from deploy.shadow_cstar_submitter import INSTANCE_ID, REGION
 except ModuleNotFoundError:  # flat Lambda ZIP package
     from shadow_cstar_contract import (  # type: ignore[no-redef]
         ContractError,
+        RELEASE_INTENT_KEYS,
         diagnostic_category,
+        make_release_intent,
         metric_name,
+        release_id_for,
         validate_state_transition,
     )
     from shadow_cstar_submitter import INSTANCE_ID, REGION  # type: ignore[no-redef]
 
 
 EVIDENCE_DOCUMENT_NAME = "KiwoomStock-ShadowEvidenceExport"
-EVENT_TYPE = "EC2 Command Status-change Notification"
+EVENT_TYPE = "EC2 Command Invocation Status-change Notification"
 COMMAND_STATUSES = {
     "Pending", "InProgress", "Delayed", "Success", "Failed",
     "TimedOut", "Cancelled", "Undeliverable", "Terminated",
 }
+MAX_EVIDENCE_RETRIES = 3
 NON_TERMINAL_STATUSES = {"Pending", "InProgress", "Delayed"}
 TERMINAL_STATUS_MAP = {
     "Success": "SUCCESS",
@@ -46,6 +53,7 @@ TERMINAL_STATUS_MAP = {
 }
 OCCURRENCE_COMMENT_RE = re.compile(r"^cstar(?:-evidence)?:([0-9a-f]{64})$")
 MAX_FAILURE_OUTPUT_BYTES = 65_536
+MAX_EVIDENCE_PAGE_LENGTH = 4_096
 SAFE_MARKET_DATA_FAILURE_KINDS = frozenset(
     {"empty", "fetch", "timeout", "parse", "malformed"}
 )
@@ -71,6 +79,8 @@ class ObserverError(ValueError):
 class ObserverLedger(Protocol):
     def get_occurrence(self, occurrence_id: str) -> Mapping[str, object] | None: ...
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None: ...
+    def get_release_intent(self, release_id: str) -> Mapping[str, object] | None: ...
+    def prepare_evidence_retry(self, *, occurrence_id: str) -> None: ...
     def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None: ...
     def advance(
         self,
@@ -98,6 +108,11 @@ class EvidenceCommandSender(Protocol):
         session_date_kst: str,
         occurrence_id: str,
         release_id: str,
+        image_digest: str,
+        source_sha: str,
+        worker_sha256: str,
+        validator_sha256: str,
+        shadow_document_sha256: str,
         offset: int,
         length: int,
     ) -> str: ...
@@ -541,21 +556,37 @@ class CStarObserver:
         *,
         occurrence: Mapping[str, object],
         offset: int = 0,
-        length: int = 12288,
+        length: int = MAX_EVIDENCE_PAGE_LENGTH,
     ) -> str:
         if self.evidence_sender is None:
             raise ObserverError("evidence sender unavailable")
         if type(offset) is not int or offset < 0 or offset > 99_999_999:
             raise _invalid()
-        if type(length) is not int or length <= 0 or length > 12_288:
+        if type(length) is not int or length <= 0 or length > MAX_EVIDENCE_PAGE_LENGTH:
             raise _invalid()
         required = ("occurrence_id", "session_date_kst", "release_id")
         if any(not isinstance(occurrence.get(key), str) for key in required):
             raise _invalid()
+        release_id = str(occurrence["release_id"])
+        lookup = getattr(self.ledger, "get_release_intent", None)
+        release = lookup(release_id) if callable(lookup) else None
+        if not isinstance(release, Mapping):
+            raise ObserverError("release intent unavailable")
+        try:
+            canonical_release = make_release_intent(release)
+        except ContractError:
+            raise ObserverError("release intent invalid") from None
+        if release_id_for(canonical_release) != release_id:
+            raise ObserverError("release intent mismatch")
         command_id = self.evidence_sender.send_evidence(
             session_date_kst=str(occurrence["session_date_kst"]),
             occurrence_id=str(occurrence["occurrence_id"]),
-            release_id=str(occurrence["release_id"]),
+            release_id=release_id,
+            image_digest=canonical_release["image_digest"],
+            source_sha=canonical_release["source_sha"],
+            worker_sha256=canonical_release["worker_sha256"],
+            validator_sha256=canonical_release["validator_sha256"],
+            shadow_document_sha256=canonical_release["shadow_document_sha256"],
             offset=offset,
             length=length,
         )
@@ -565,6 +596,36 @@ class CStarObserver:
             command_id=command_id,
         )
         return command_id
+
+    def retry_evidence(self, *, occurrence_id: str) -> str:
+        occurrence_id = _bounded_text(occurrence_id, 64)
+        occurrence = self.ledger.get_occurrence(occurrence_id)
+        if occurrence is None:
+            raise ObserverError("unknown occurrence")
+        if (
+            occurrence.get("phase") != "stop"
+            or occurrence.get("command_state") != "SUCCESS"
+            or occurrence.get("runtime_state") != "STOPPED"
+            or occurrence.get("closure_state") != "ALERTED"
+        ):
+            raise ObserverError("evidence retry precondition failed")
+        prepare = getattr(self.ledger, "prepare_evidence_retry", None)
+        if not callable(prepare):
+            raise ObserverError("evidence retry unavailable")
+        prepare(occurrence_id=occurrence_id)
+        prepared = self.ledger.get_occurrence(occurrence_id)
+        if prepared is None:
+            raise ObserverError("evidence retry occurrence missing")
+        try:
+            return self.request_evidence(occurrence=prepared)
+        except Exception:
+            self.ledger.advance(
+                occurrence_id=occurrence_id,
+                command_state="SUCCESS",
+                runtime_state="STOPPED",
+                closure_state="ALERTED",
+            )
+            raise
 
     def archive_evidence(
         self,
@@ -615,7 +676,20 @@ class Boto3EvidenceCommandSender:
         self.client = client
         self.instance_id = instance_id
 
-    def send_evidence(self, *, session_date_kst, occurrence_id, release_id, offset, length) -> str:
+    def send_evidence(
+        self,
+        *,
+        session_date_kst,
+        occurrence_id,
+        release_id,
+        image_digest,
+        source_sha,
+        worker_sha256,
+        validator_sha256,
+        shadow_document_sha256,
+        offset,
+        length,
+    ) -> str:
         response = self.client.send_command(
             DocumentName=EVIDENCE_DOCUMENT_NAME,
             InstanceIds=[self.instance_id],
@@ -623,6 +697,11 @@ class Boto3EvidenceCommandSender:
                 "SessionDateKst": [session_date_kst],
                 "OccurrenceId": [occurrence_id],
                 "ReleaseId": [release_id],
+                "ImageDigest": [image_digest],
+                "SourceSha": [source_sha],
+                "ExpectedWorkerSha256": [worker_sha256],
+                "ExpectedValidatorSha256": [validator_sha256],
+                "ExpectedShadowDocumentSha256": [shadow_document_sha256],
                 "EvidenceOffset": [str(offset)],
                 "EvidenceLength": [str(length)],
                 "ExpectedInstanceId": [self.instance_id],
@@ -764,8 +843,15 @@ class Boto3EvidenceSink:
 
 
 class InMemoryObserverLedger:
-    def __init__(self, occurrences: Mapping[str, Mapping[str, object]]) -> None:
+    def __init__(
+        self,
+        occurrences: Mapping[str, Mapping[str, object]],
+        releases: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         self.occurrences = {key: dict(value) for key, value in occurrences.items()}
+        self.releases = {
+            key: dict(value) for key, value in (releases or {}).items()
+        }
 
     def get_occurrence(self, occurrence_id: str) -> Mapping[str, object] | None:
         return self.occurrences.get(occurrence_id)
@@ -778,6 +864,28 @@ class InMemoryObserverLedger:
             ),
             None,
         )
+
+    def get_release_intent(self, release_id: str) -> Mapping[str, object] | None:
+        return self.releases.get(release_id)
+
+    def prepare_evidence_retry(self, *, occurrence_id: str) -> None:
+        import time
+
+        item = self.occurrences[occurrence_id]
+        if (
+            item.get("phase") != "stop"
+            or item.get("command_state") != "SUCCESS"
+            or item.get("runtime_state") != "STOPPED"
+            or item.get("closure_state") != "ALERTED"
+        ):
+            raise ObserverError("evidence retry precondition failed")
+        retries = item.get("evidence_retry_count", 0)
+        if type(retries) is not int or retries >= MAX_EVIDENCE_RETRIES:
+            raise ObserverError("evidence retry limit reached")
+        item["closure_state"] = "EVIDENCE_PENDING"
+        item["next_action_at"] = int(time.time()) + 300
+        item["evidence_retry_count"] = retries + 1
+        item.pop("evidence_command_id", None)
 
     def record_evidence_command(self, *, occurrence_id: str, command_id: str) -> None:
         command_id = _bounded_text(command_id, 128)
@@ -837,6 +945,44 @@ class DynamoCStarObserverLedger:
         )
         item = response.get("Item") if isinstance(response, Mapping) else None
         return dict(item) if isinstance(item, Mapping) else None
+
+    def get_release_intent(self, release_id: str) -> Mapping[str, object] | None:
+        response = self.table.get_item(
+            Key={"PK": f"RELEASE#{release_id}", "SK": "META"},
+            ConsistentRead=True,
+        )
+        item = response.get("Item") if isinstance(response, Mapping) else None
+        if not isinstance(item, Mapping):
+            return None
+        return {key: item[key] for key in RELEASE_INTENT_KEYS if key in item}
+
+    def prepare_evidence_retry(self, *, occurrence_id: str) -> None:
+        import time
+
+        self.table.update_item(
+            Key={"PK": f"OCC#{occurrence_id}", "SK": "META"},
+            UpdateExpression=(
+                "SET closure_state = :pending, next_action_at = :next_action, "
+                "evidence_retry_count = if_not_exists(evidence_retry_count, :zero) + :one "
+                "REMOVE expires_at, evidence_command_id"
+            ),
+            ConditionExpression=(
+                "command_state = :success AND runtime_state = :stopped AND "
+                "closure_state = :alerted AND "
+                "(attribute_not_exists(evidence_retry_count) OR "
+                "evidence_retry_count < :max_retries)"
+            ),
+            ExpressionAttributeValues={
+                ":pending": "EVIDENCE_PENDING",
+                ":next_action": int(time.time()) + 300,
+                ":zero": 0,
+                ":one": 1,
+                ":max_retries": MAX_EVIDENCE_RETRIES,
+                ":success": "SUCCESS",
+                ":stopped": "STOPPED",
+                ":alerted": "ALERTED",
+            },
+        )
 
     def get_occurrence_by_command(self, command_id: str) -> Mapping[str, object] | None:
         from boto3.dynamodb.conditions import Key
@@ -982,5 +1128,16 @@ def lambda_handler(event: Mapping[str, object], _context: object) -> dict[str, o
             "schema_version": 1,
             "kind": "reconcile",
             "results": [asdict(result) for result in observer.reconcile()],
+        }
+    if event.get("kind") == "retry_evidence":
+        occurrence_id = event.get("occurrence_id")
+        if not isinstance(occurrence_id, str):
+            raise ObserverError("retry occurrence id missing")
+        command_id = observer.retry_evidence(occurrence_id=occurrence_id)
+        return {
+            "schema_version": 1,
+            "kind": "retry_evidence",
+            "occurrence_id": occurrence_id,
+            "command_id": command_id,
         }
     return {"schema_version": 1, "kind": "event", **asdict(observer.process_ssm_event(event))}

@@ -1,6 +1,6 @@
 # 현재 운영 기준선
 
-이 문서는 2026-09-01 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
+이 문서는 2026-09-02 (KST) 기준으로 실제 호스트와 저장소에 반영된 운영
 상태를 기록하는 기준 문서다. 과거 bootstrap 기록이나 재생성 예시와 현재
 호스트 상태가 다를 때는 이 문서와 AWS read-back을 우선한다. 이 문서는 공개
 저장소에 있으므로 live host의 주소·네트워크·리소스 식별자는 기록하지 않는다.
@@ -100,8 +100,8 @@ observer/reconciliation closure evidence를 별도 확인한다.
 |---|---|
 | C* stack / EventBridge schedules | `kiwoom-shadow-cstar`, start/stop/reconciliation ENABLED, generation `cstar-g000001` |
 | C* host fence | `/var/lib/kiwoom-stock/shadow-schedule/fence.json` 설치·root-owned·armed |
-| C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v2, both Active |
-| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 8, observer EventBridge rule ENABLED, reconciliation 5분 |
+| C* SSM documents | `KiwoomStock-ShadowCStarActivation` default/latest v2, `KiwoomStock-ShadowEvidenceExport` default/latest v4, both Active |
+| C* submitter/observer | submitter Lambda alias `live` version 7, observer alias `live` version 12, observer EventBridge rule ENABLED, reconciliation 5분 |
 | 실제 schedule owner | EventBridge Scheduler; legacy GitHub activation job은 disabled |
 
 2026-08-24 KST schedule incident와 remediation read-back:
@@ -238,6 +238,60 @@ observer/reconciliation closure evidence를 별도 확인한다.
   terminal evidence export와 Observer closure(`CLOSED` 또는 실제 failure 시
   `ALERTED`) 확인이 오늘 acceptance의 남은 단계다.
 
+2026-09-02 KST evidence export remediation과 보존 telemetry read-back:
+
+- 2026-09-01 stop occurrence의 SSM stop command는 `SUCCESS/STOPPED`였고,
+  named Docker volume 안의 telemetry는 `row_count=387`, `first_cycle=1`,
+  `last_cycle=387`로 보존되어 있었다. 실패는 스케줄·세션·DynamoDB transaction·
+  디스크가 아니라, evidence wrapper가 호스트 경로
+  `/var/lib/kiwoom/shadow-telemetry.db`를 직접 조회해 named volume을 찾지 못한
+  구조 결함이었다.
+- evidence wrapper는 이제 호스트 DB를 열지 않고 lock FD를 상속한 canonical
+  `kiwoom-shadow-worker telemetry-export-page`를 `network none`·`read-only`
+  로 실행한다. Observer는 occurrence의 immutable release intent를 검증해
+  image/source/worker/validator/document hash를 evidence command에 전달한다.
+- 첫 수정본은 12,288-byte page의 base64 JSON envelope가 SSM stdout 한도를
+  초과하는 별도 경계 결함을 드러냈다. evidence page를 최대 4,096 bytes로
+  제한한 문서 v4와 EC2 wrapper를 다시 배포했고, SSM `ResponseCode=0`으로
+  387-cycle telemetry read-back을 확인했다.
+- 이미 `ALERTED`였던 해당 occurrence는 activation을 재실행하지 않는 명시적
+  evidence-only recovery(최대 3회)로 재처리했다. Observer `live` alias v11이
+  evidence를 S3 content-addressed object로 저장하고 occurrence를 `CLOSED`로
+  전환한 것을 read-back했다. S3 object size는 6,604 bytes이며 실거래·주문·
+  계좌·외부 API side effect는 없었다.
+- 기존 EventBridge rule은 `EC2 Command Status-change Notification` 이벤트에
+  `detail.instance-id`를 함께 요구하고 있어, 전체 명령 상태 이벤트와 per-instance
+  invocation 이벤트 계약이 불일치했다. 이 조합은 실제 SSM invocation 이벤트와
+  매칭되지 않아 Observer 자동 전달이 발생할 수 없는 근본 원인이었다.
+- EventBridge pattern을 `EC2 Command Invocation Status-change Notification`으로
+  교정하고, SSM activation/evidence 문서와 단일 EC2 instance 조건을 유지한 채
+  CloudFormation `UPDATE_COMPLETE`, rule `ENABLED`, Observer alias `live` v12를
+  read-back했다. Lambda package key는 immutable SHA 기반으로 고정되어 있다.
+- 다음 실제 SSM activation/evidence invocation에서 EventBridge가 Observer를
+  자동 호출하고 occurrence가 정상 closure되는지 운영 acceptance를 수행한다.
+  이번 재검증의 최종 closure는 이미 성공한 evidence-only recovery로 확인했으므로,
+  다음 acceptance는 자동 전달 경로 자체의 확인이다.
+
+2026-09-02 KST 자동 전달 경로 권한 보완 및 비거래성 재현:
+
+- 수동 Shadow start 이후 실제 SSM invocation event가 EventBridge를 통해 Observer
+  Lambda v12까지 도달했지만, Observer role에 DynamoDB `command-index` Query
+  리소스가 빠져 command ID를 occurrence로 해석하는 단계에서 `AccessDenied`가
+  발생했다. 기존 권한에는 원장과 `closure-due-index`만 포함되어 있었다.
+- Observer role에 C* table의 `command-index` ARN만 추가하고 CloudFormation
+  `UPDATE_COMPLETE` 및 IAM policy read-back을 완료했다. 다른 문서 실행,
+  스케줄 변경, 계좌·브로커 capability는 추가하지 않았다.
+- 수정 후 실제 stop invocation이 EventBridge에서 Observer로 자동 전달되어
+  해당 occurrence가 `PENDING`에서 `IN_PROGRESS`로 갱신된 것을 확인했다. 테스트
+  start는 정상 장중 수명 전에 취소해 fail-closed로 정리했으며, 이 테스트의
+  stop은 terminal evidence가 없어 `FAILED/ALERTED`가 되었다. host fence의 두
+  테스트 occurrence도 공식 `AMBIGUOUS` 상태로 기록되었고, 컨테이너는 제거됐다.
+  새 날짜의 occurrence identity와 격리되어 다음 start를 차단하지 않으며,
+  Observer/Reconciliation DLQ는 0건이다.
+- 따라서 EventBridge 자동 전달 및 command-index 권한 문제는 해소되었다. 정상
+  `Success → evidence export → CLOSED` 전체 자동 closure는 다음 실제 개장일의
+  정상 start/stop에서 최종 acceptance한다.
+
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
 `dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
@@ -261,9 +315,9 @@ schedule은 기존대로 `ENABLED`이며, 실제 자동 start→host effect→st
 | Schedule state | start/stop `ENABLED`, `Asia/Seoul`, exact 08:50/15:35 KST |
 
 실거래·계좌 조회·주문 capability는 계속 비활성이다. 2026-09-01 start의 실제
-SSM submission, host fence effect, 첫 safe tick과 장중 지속 실행은 확인되었고,
-오늘 15:35 stop/evidence closure를 확인하는 acceptance만 남아 있다. 이 closure
-전에는 “일일 자동 실행이 검증 완료”라고 판정하지 않는다.
+SSM submission, host fence effect, 첫 safe tick, 장중 지속 실행과 stop/evidence
+payload 보존은 확인되었다. EventBridge 자동 전달 pattern 교정과 배포는 완료했고,
+다음 개장일에는 실제 status event를 통한 전체 자동 closure를 다시 확인한다.
 
 AWS cutover read-back 기준:
 
@@ -364,8 +418,10 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
 
 ## 현재 남은 차단 항목
 
-- 2026-09-01 자동 start와 장중 지속 실행은 확인했다. 15:35 KST 자동 stop,
-  evidence export, 원장 closure까지 운영 모니터링;
+- 2026-09-01 자동 start와 장중 지속 실행, stop/evidence payload 및 원장 closure를
+  확인했고, 2026-09-02 비거래성 재현으로 SSM status event의 EventBridge 자동
+  전달과 Observer command-index 조회도 확인했다. 다음 개장일에는 정상
+  `Success → evidence export → CLOSED` 전체 closure만 운영 acceptance한다;
 - 애플리케이션 runtime Slack과 별개인 보호 상태 알림의 기존 운영 채널 end-to-end
   확인;
 - `apply_clean_rebuild.sh`와 두 JSON intent는 SSH key pair, TCP 22 관리 `/32`,
@@ -383,7 +439,7 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   반환했다. EC2 inventory와 SSM managed-node health read는 허용되고 SSM Agent는
   Online이므로 GitHub/C* Run Command 자동화 의존성은 유지된다;
 - `kiwoom-local-provisioner` 역할·trust·inline policy와 관리자 1회 bootstrap을
-  적용했다. `aws-admin` root 세션에서 role과 `KiwoomLocalProvisioner`를
+  적용했다. 관리자 1회 bootstrap 세션에서 role과 `KiwoomLocalProvisioner`를
   생성하고, 기존 `KiwoomLocalAssumeOperatorRole`에 provisioner AssumeRole을
   추가했다. `SignInLocalDevelopmentAccess`는 `aws login`용 exact read-back 정책으로
   유지됐으며, 최종 role은 `kiwoom-local-provisioner`다. account/ARN은
@@ -403,6 +459,13 @@ EventBridge Scheduler이며, 호스트 SSH는 preflight·복구·read-back에만
   한정된 `iam:PassRole`만 허용한다. 기존 release item은 수정·삭제하지 않고
   새 release item과 조건부 active pointer 전환만 수행한다. 저장소 템플릿은
   `cstar-release-rotator-*.json.example`이다;
+- `kiwoom-local-observer` 역할·trust·inline policy를 추가하고,
+  `kiwoom-local-user`의 AssumeRole 대상에 exact 역할을 추가했다. 이 역할은
+  C* 원장·evidence prefix·start/stop/reconciliation schedule·SSM command 결과·
+  EC2 상태·CloudWatch alarm/metric·세 DLQ 속성만 읽는다. DynamoDB/S3 변경,
+  SSM 실행·shell, schedule 변경, Parameter Store/Secrets Manager, 주문·계좌,
+  IAM 변경 권한은 없다. 저장소 템플릿은
+  `local-observer-*.json.example`이며 일상 C* 검증은 이 역할을 사용한다;
 - 새 실제 Kiwoom 인증/시세 검증은 별도 명시적 read-only window 없이는 수행하지
   않는다. 과거 read-only evidence가 live worker·계좌·주문 capability를 승인하는
   근거가 되지는 않는다.

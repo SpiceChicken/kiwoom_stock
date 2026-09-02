@@ -178,6 +178,7 @@ def test_session_lease_pins_release_and_activation_for_both_phases():
         ("runtime", "UNKNOWN", "CLOSED_HOLIDAY"),
         ("closure", "OPEN", "EVIDENCE_PENDING"),
         ("closure", "EVIDENCE_PENDING", "ALERTED"),
+        ("closure", "ALERTED", "EVIDENCE_PENDING"),
         ("closure", "CLOSED", "CLOSED"),
     ],
 )

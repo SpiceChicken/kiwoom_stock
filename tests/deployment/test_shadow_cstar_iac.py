@@ -64,6 +64,23 @@ def test_observer_iam_mentions_only_exact_evidence_document_for_send_command():
     assert "scheduler:UpdateSchedule" not in text
 
 
+def test_observer_iam_can_resolve_ssm_command_ids_via_command_index():
+    policies = load()["Resources"]["ObserverRole"]["Properties"]["Policies"]
+    statements = [
+        statement
+        for policy in policies
+        for statement in policy["PolicyDocument"]["Statement"]
+    ]
+    query_statement = next(
+        statement
+        for statement in statements
+        if "dynamodb:Query" in statement.get("Action", [])
+    )
+    resources = json.dumps(query_statement["Resource"], sort_keys=True)
+    assert "/index/closure-due-index" in resources
+    assert "/index/command-index" in resources
+
+
 def test_submitter_iam_allows_transaction_put_only_on_cstar_table():
     policies = load()["Resources"]["SubmitterRole"]["Properties"]["Policies"]
     statements = [
@@ -126,3 +143,11 @@ def test_lambda_versions_change_when_immutable_package_key_changes():
     resources = load()["Resources"]
     assert resources["SubmitterVersion"]["Properties"]["Description"] == {"Ref": "SubmitterPackageKey"}
     assert resources["ObserverVersion"]["Properties"]["Description"] == {"Ref": "ObserverPackageKey"}
+
+
+def test_observer_rule_uses_per_instance_ssm_invocation_events():
+    pattern = load()["Resources"]["ObserverRule"]["Properties"]["EventPattern"]
+    assert pattern["detail-type"] == [
+        "EC2 Command Invocation Status-change Notification"
+    ]
+    assert pattern["detail"]["instance-id"] == [{"Ref": "InstanceId"}]
