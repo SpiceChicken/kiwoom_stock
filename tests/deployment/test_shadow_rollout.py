@@ -108,9 +108,11 @@ def test_rollout_workflow_is_source_only_protected_and_serialized():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     triggers = workflow.get("on", workflow.get(True))
     inputs = triggers["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"source_sha"}
+    assert set(inputs) == {"source_sha", "image_digest"}
     assert inputs["source_sha"]["required"] is True
     assert "default" not in inputs["source_sha"]
+    assert inputs["image_digest"]["required"] is True
+    assert "default" not in inputs["image_digest"]
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {
         "group": "kiwoom-stock-shadow-i-0e42e09d6c087ba29",
@@ -124,6 +126,13 @@ def test_rollout_workflow_is_source_only_protected_and_serialized():
     assert "ref: ${{ inputs.source_sha }}" in text
     assert '[[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]' in text
     assert "KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN" in text
+    assert "KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN" in text
+    assert "KIWOOM_CSTAR_TABLE_NAME" in text
+    assert "KIWOOM_CSTAR_SCHEDULE_GENERATION" in text
+    assert "KIWOOM_CSTAR_PROTOCOL_SHA256" in text
+    assert "Synchronize C* active release with exact rollout" in text
+    assert "--audit \"${ROTATION_EVIDENCE_FILENAME}\"" in text
+    assert "09:00-16:00 KST weekday market window" in text
     assert "KIWOOM_AWS_SHADOW_ROLE_ARN" not in text
     assert "AWS-RunShellScript" not in text
     assert "retention-days: 14" in text

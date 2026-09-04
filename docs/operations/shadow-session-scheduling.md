@@ -33,6 +33,13 @@ EventBridge cutover가 완료되었다. generation은 `cstar-g000001`이며 실�
 activation clock owner는 EventBridge Scheduler다. 첫 개장일의 submission→host
 effect→observer→evidence closure를 추가 acceptance evidence로 확인한다.
 
+2026-09-04 KST start는 EventBridge→SSM까지 정상 전달되었으나, DynamoDB
+`CONTROL#CSTAR/RELEASE`가 이전 rollout tuple을 가리키고 EC2 binding은 최신
+rollout tuple을 가리켜 host fence가 `worker_exit_1`로 차단했다. 이는 AWS 로컬
+세션이나 SSM 연결 장애가 아니다. 이 사고에서 확인된 구조적 결함은 host rollout과
+release pointer rotation이 별도 수동 절차였다는 점이며, 이후에는 보호된 rollout
+workflow가 두 단계를 직렬화한다.
+
 이전 GitHub activation workflow의 weekday schedules는 cutover 시 제거되었다.
 원격 workflow는 `workflow_dispatch` 선언만 보존하지만 activation job은
 `if: ${{ false }}`로 비활성화되어 second owner가 아니다.
@@ -260,6 +267,28 @@ The current C* release is recorded by the DynamoDB `ACTIVE` pointer and its
 release metadata; exact values are read through the observer boundary. Do not
 copy a historical GitHub tuple from the production-check guide into the C*
 ledger.
+
+정상 배포 경로에서는 `cd-shadow-worker-rollout.yml`이 먼저 동일 source SHA의
+worker/validator/document/Compose 해시를 계산하고 host rollout을 수행한 뒤,
+동일한 `rollout_attempt_id`와 image digest를 사용해 release rotator OIDC role로
+`rotate_shadow_cstar_release.py --apply`를 호출한다. rotator는 기존의 exact
+DynamoDB/Scheduler 권한만 사용하며, audit JSON에 성공·실패 상태와 새 release ID를
+남긴다. 따라서 host rollout만 성공하고 C* active pointer가 남는 부분 배포는
+workflow의 성공 조건에 포함되지 않는다.
+
+이 workflow를 사용하려면 `production-shadow` Environment/Repository variables에
+다음 비밀이 아닌 운영 메타데이터를 1회 등록해야 한다.
+
+- `KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN`
+- `KIWOOM_CSTAR_TABLE_NAME`
+- `KIWOOM_CSTAR_SCHEDULE_GENERATION`
+- `KIWOOM_CSTAR_PROTOCOL_SHA256`
+
+rotator role trust에는 기존 `kiwoom-local-user`의 임시 세션 trust를 보존하면서
+GitHub OIDC subject를 `repo:SpiceChicken/kiwoom_stock:environment:production-shadow`
+로 exact 추가한다. physical table name과 protocol hash는 C* stack/ledger
+read-back 값만 사용하고 문서에 값을 복제하지 않는다. 평일 09:00~16:00 KST에는
+workflow가 host mutation 전에 중단되어 장중 부분 rollout을 만들지 않는다.
 
 현재 비활성 legacy GitHub schedule tuple:
 

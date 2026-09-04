@@ -347,13 +347,25 @@ and are not proved by local mocks or the static checker.
 
 ## Protected shadow rollout boundary
 
-`.github/workflows/cd-shadow-worker-rollout.yml` has one required, no-default
-`source_sha` input. It requires `refs/heads/main`, equality with the trigger SHA,
-and exact-SHA checkout before OIDC. Region, instance, document names, raw GitHub
-URL, host paths, and actions are fixed. The separate
+`.github/workflows/cd-shadow-worker-rollout.yml` has two required, no-default
+inputs: `source_sha` and the exact public GHCR `image_digest`. It requires
+`refs/heads/main`, equality with the trigger SHA, and exact-SHA checkout before
+OIDC. Region, instance, document names, raw GitHub URL, host paths, and actions
+are fixed. The separate
 `KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN` can run only the fixed rollout document on
 the exact instance and update only the exact activation document; activation
 role gains only the exact-document read-only attestation actions described above.
+
+The rollout job then uses a second, separately trusted
+`KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN` OIDC session to conditionally move
+the C* DynamoDB active-release pointer to the same source/image/artifact tuple.
+The rotation role is limited to the exact C* table, two schedules, and scheduler
+PassRole. The job fails before host mutation during the weekday 09:00-16:00 KST
+market window, and a rollout is successful only when both host evidence and
+release-rotation evidence are available. C* metadata variables
+`KIWOOM_CSTAR_TABLE_NAME`, `KIWOOM_CSTAR_SCHEDULE_GENERATION`, and
+`KIWOOM_CSTAR_PROTOCOL_SHA256` are required; they are read-back configuration,
+not Kiwoom secrets.
 
 The rollout role additionally has read-only `DescribeDocument`/`GetDocument` on
 the exact rollout document. Before its first host command, every routine run

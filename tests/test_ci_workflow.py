@@ -73,16 +73,25 @@ def test_shadow_rollout_cd_has_exact_protected_source_only_wiring():
         SHADOW_ROLLOUT_WORKFLOW_PATH.read_text(encoding="utf-8")
     )
     triggers = workflow.get("on", workflow.get(True))
-    assert set(triggers["workflow_dispatch"]["inputs"]) == {"source_sha"}
+    assert set(triggers["workflow_dispatch"]["inputs"]) == {
+        "source_sha", "image_digest"
+    }
     assert workflow["concurrency"] == {
         "group": "kiwoom-stock-shadow-i-0e42e09d6c087ba29",
         "cancel-in-progress": False,
     }
     text = SHADOW_ROLLOUT_WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "vars.KIWOOM_AWS_SHADOW_ROLLOUT_ROLE_ARN" in text
+    assert "vars.KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN" in text
+    assert "vars.KIWOOM_CSTAR_TABLE_NAME" in text
+    assert "vars.KIWOOM_CSTAR_SCHEDULE_GENERATION" in text
+    assert "vars.KIWOOM_CSTAR_PROTOCOL_SHA256" in text
+    assert "Synchronize C* active release with exact rollout" in text
+    assert "--audit \"${ROTATION_EVIDENCE_FILENAME}\"" in text
+    assert "09:00-16:00 KST weekday market window" in text
     assert "ref: ${{ inputs.source_sha }}" in text
     assert "github.ref == 'refs/heads/main'" in text
-    assert "validator_sha256=" in text
+    assert '"validator_sha256": hashlib.sha256' in text
     assert "compile(open(\"deploy/ec2/shadow_runtime_evidence.py\"" in text
 
 

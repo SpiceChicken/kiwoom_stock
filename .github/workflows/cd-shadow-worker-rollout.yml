@@ -7,6 +7,10 @@ on:
         description: Full 40-character lowercase main source SHA
         required: true
         type: string
+      image_digest:
+        description: Exact public GHCR image digest for the released runtime
+        required: true
+        type: string
 
 permissions: {}
 
@@ -20,6 +24,7 @@ env:
   ROLLOUT_DOCUMENT_NAME: KiwoomStock-ShadowWorkerRollout
   SHADOW_DOCUMENT_NAME: KiwoomStock-ShadowWorker
   EVIDENCE_FILENAME: shadow-rollout-evidence.json
+  ROTATION_EVIDENCE_FILENAME: cstar-release-rotation.json
 
 jobs:
   rollout:
@@ -46,19 +51,31 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           TRIGGER_SHA: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          CSTAR_TABLE_NAME: ${{ vars.KIWOOM_CSTAR_TABLE_NAME }}
+          CSTAR_GENERATION: ${{ vars.KIWOOM_CSTAR_SCHEDULE_GENERATION }}
+          CSTAR_PROTOCOL_SHA256: ${{ vars.KIWOOM_CSTAR_PROTOCOL_SHA256 }}
         shell: bash
         run: |
           set -euo pipefail
+          printf '{"schema_version":1,"status":"not_run"}\n' > "${ROTATION_EVIDENCE_FILENAME}"
           [[ "${GITHUB_REF}" == refs/heads/main ]]
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${SOURCE_SHA}" == "${TRIGGER_SHA}" ]]
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ "${IMAGE_DIGEST}" =~ ^ghcr\.io/spicechicken/kiwoom_stock@sha256:[0-9a-f]{64}$ ]]
+          [[ -n "${CSTAR_TABLE_NAME}" && "${#CSTAR_TABLE_NAME}" -le 255 ]]
+          [[ "${CSTAR_GENERATION}" =~ ^cstar-g[0-9]{6,}$ ]]
+          [[ "${CSTAR_PROTOCOL_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           bash -n deploy/ec2/shadow_worker_control.sh
           python3 -c 'compile(open("deploy/ec2/shadow_runtime_evidence.py", encoding="utf-8").read(), "deploy/ec2/shadow_runtime_evidence.py", "exec")'
-          python3 - <<'PY'
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          from datetime import datetime, time
           import hashlib
           import json
+          import os
           from pathlib import Path
+          from zoneinfo import ZoneInfo
 
           def reject(pairs):
               result = {}
@@ -74,11 +91,24 @@ jobs:
           value = json.loads(raw, object_pairs_hook=reject)
           canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
           rollout = Path("deploy/ssm/shadow-worker-rollout-document.yaml").read_bytes()
-          print("worker_sha256=" + hashlib.sha256(worker).hexdigest())
-          print("validator_sha256=" + hashlib.sha256(validator).hexdigest())
-          print("shadow_document_raw_sha256=" + hashlib.sha256(raw).hexdigest())
-          print("shadow_document_sha256=" + hashlib.sha256(canonical).hexdigest())
-          print("rollout_document_sha256=" + hashlib.sha256(rollout).hexdigest())
+          values = {
+              "worker_sha256": hashlib.sha256(worker).hexdigest(),
+              "validator_sha256": hashlib.sha256(validator).hexdigest(),
+              "shadow_document_raw_sha256": hashlib.sha256(raw).hexdigest(),
+              "shadow_document_sha256": hashlib.sha256(canonical).hexdigest(),
+              "rollout_document_sha256": hashlib.sha256(rollout).hexdigest(),
+              "compose_shadow_sha256": hashlib.sha256(
+                  Path("compose.shadow.yaml").read_bytes()
+              ).hexdigest(),
+          }
+          for key, value in values.items():
+              print(f"{key}={value}")
+          now = datetime.now(tz=ZoneInfo("Asia/Seoul"))
+          if now.weekday() < 5 and time(9, 0) <= now.time() < time(16, 0):
+              raise SystemExit(
+                  "C* release synchronization is blocked during the "
+                  "09:00-16:00 KST weekday market window"
+              )
           PY
 
       - name: Configure exact shadow rollout role with OIDC
@@ -110,6 +140,69 @@ jobs:
             --rollout-attempt-id "${ROLLOUT_ATTEMPT_ID}" \
             --audit "${EVIDENCE_FILENAME}"
 
+      - name: Clear rollout OIDC credentials before C* rotation
+        if: success()
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          {
+            echo 'AWS_ACCESS_KEY_ID='
+            echo 'AWS_SECRET_ACCESS_KEY='
+            echo 'AWS_SESSION_TOKEN='
+            echo 'AWS_REGION='
+            echo 'AWS_DEFAULT_REGION='
+          } >>"${GITHUB_ENV}"
+
+      - name: Configure exact C* release rotator role with OIDC
+        if: success()
+        id: cstar_oidc
+        timeout-minutes: 1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: kiwoom-cstar-release-rotation
+          output-credentials: true
+          output-env-credentials: false
+          unset-current-credentials: true
+
+      - name: Synchronize C* active release with exact rollout
+        if: success()
+        timeout-minutes: 8
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.cstar_oidc.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.cstar_oidc.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.cstar_oidc.outputs.aws-session-token }}
+          CSTAR_TABLE_NAME: ${{ vars.KIWOOM_CSTAR_TABLE_NAME }}
+          CSTAR_GENERATION: ${{ vars.KIWOOM_CSTAR_SCHEDULE_GENERATION }}
+          CSTAR_PROTOCOL_SHA256: ${{ vars.KIWOOM_CSTAR_PROTOCOL_SHA256 }}
+          RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          RELEASE_ROLLOUT_ATTEMPT_ID: ${{ github.run_id }}
+          RELEASE_COMPOSE_SHADOW_SHA256: ${{ steps.source.outputs.compose_shadow_sha256 }}
+          RELEASE_WORKER_SHA256: ${{ steps.source.outputs.worker_sha256 }}
+          RELEASE_VALIDATOR_SHA256: ${{ steps.source.outputs.validator_sha256 }}
+          RELEASE_SHADOW_DOCUMENT_SHA256: ${{ steps.source.outputs.shadow_document_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+          python3 deploy/rotate_shadow_cstar_release.py \
+            --apply \
+            --region "${AWS_REGION}" \
+            --table-name "${CSTAR_TABLE_NAME}" \
+            --generation "${CSTAR_GENERATION}" \
+            --protocol-sha256 "${CSTAR_PROTOCOL_SHA256}" \
+            --source-sha "${RELEASE_SOURCE_SHA}" \
+            --image-digest "${RELEASE_IMAGE_DIGEST}" \
+            --compose-shadow-sha256 "${RELEASE_COMPOSE_SHADOW_SHA256}" \
+            --worker-sha256 "${RELEASE_WORKER_SHA256}" \
+            --validator-sha256 "${RELEASE_VALIDATOR_SHA256}" \
+            --shadow-document-sha256 "${RELEASE_SHADOW_DOCUMENT_SHA256}" \
+            --rollout-attempt-id "${RELEASE_ROLLOUT_ATTEMPT_ID}" \
+            --repository-root "${GITHUB_WORKSPACE}" \
+            --audit "${ROTATION_EVIDENCE_FILENAME}"
+
       - name: Clear OIDC credentials before evidence upload
         if: always()
         timeout-minutes: 1
@@ -129,6 +222,8 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: shadow-rollout-${{ inputs.source_sha }}-${{ github.run_id }}
-          path: ${{ env.EVIDENCE_FILENAME }}
+          path: |
+            ${{ env.EVIDENCE_FILENAME }}
+            ${{ env.ROTATION_EVIDENCE_FILENAME }}
           if-no-files-found: error
           retention-days: 14
