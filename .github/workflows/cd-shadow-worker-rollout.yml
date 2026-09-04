@@ -111,6 +111,24 @@ jobs:
               )
           PY
 
+      - name: Set up exact release synchronizer Python
+        if: success()
+        timeout-minutes: 2
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements/locks/runtime-py314.txt
+
+      - name: Install exact release synchronizer dependencies
+        if: success()
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes \
+            -r requirements/locks/runtime-py314.txt
+
       - name: Configure exact shadow rollout role with OIDC
         id: oidc
         timeout-minutes: 1
