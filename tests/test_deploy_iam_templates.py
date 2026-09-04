@@ -301,16 +301,38 @@ def test_cstar_document_deployer_is_limited_to_evidence_document_and_schedules()
     ]
 
 
-def test_cstar_release_rotator_trust_requires_exact_user_and_temporary_session():
-    statement = _statements(
+def test_cstar_release_rotator_trust_has_exact_local_and_github_subjects():
+    statements = _statements(
         _policy("cstar-release-rotator-trust-policy.json.example")
-    )[0]
+    )
 
-    assert statement["Principal"] == {
+    assert statements[0]["Principal"] == {
         "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/kiwoom-local-user"
     }
-    assert statement["Action"] == "sts:AssumeRole"
-    assert statement["Condition"] == {"Null": {"aws:TokenIssueTime": "false"}}
+    assert statements[0]["Action"] == "sts:AssumeRole"
+    assert statements[0]["Condition"] == {
+        "Null": {"aws:TokenIssueTime": "false"}
+    }
+    assert statements[1] == {
+        "Sid": "TrustExactGitHubActionsProductionShadow",
+        "Effect": "Allow",
+        "Principal": {
+            "Federated": (
+                "arn:aws:iam::<AWS_ACCOUNT_ID>:oidc-provider/"
+                "token.actions.githubusercontent.com"
+            )
+        },
+        "Action": "sts:AssumeRoleWithWebIdentity",
+        "Condition": {
+            "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                "token.actions.githubusercontent.com:sub": (
+                    "repo:SpiceChicken/kiwoom_stock:environment:"
+                    "production-shadow"
+                ),
+            }
+        },
+    }
 
 
 def test_cstar_release_rotator_is_limited_to_ledger_transaction_and_schedule_state():

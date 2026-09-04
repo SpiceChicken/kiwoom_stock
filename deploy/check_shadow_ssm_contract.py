@@ -1722,16 +1722,36 @@ def _canonical_text(value: object) -> str:
 
 
 def _verify_rollout_workflow(workflow: Mapping[str, Any]) -> None:
-    if set(_dispatch_inputs(workflow, "rollout.workflow")) != {"source_sha"}:
+    if set(_dispatch_inputs(workflow, "rollout.workflow")) != {
+        "source_sha", "image_digest"
+    }:
         raise ContractMismatch("rollout.workflow.dispatch_input_set")
     if workflow.get("env") != {
         "AWS_REGION": REGION, "EC2_INSTANCE_ID": INSTANCE_ID,
         "ROLLOUT_DOCUMENT_NAME": ROLLOUT_DOCUMENT_NAME,
         "SHADOW_DOCUMENT_NAME": ACTIVATION_DOCUMENT_NAME,
         "EVIDENCE_FILENAME": "shadow-rollout-evidence.json",
+        "ROTATION_EVIDENCE_FILENAME": "cstar-release-rotation.json",
     }:
         raise ContractMismatch("rollout.workflow.global_env")
     steps = _steps(workflow, "rollout.workflow")
+    names = [step.get("name") for step in steps]
+    required_names = [
+        "Validate immutable rollout sources before OIDC",
+        "Configure exact shadow rollout role with OIDC",
+        "Execute authoritative exact rollout",
+        "Clear rollout OIDC credentials before C* rotation",
+        "Configure exact C* release rotator role with OIDC",
+        "Synchronize C* active release with exact rollout",
+        "Clear OIDC credentials before evidence upload",
+        "Upload bounded rollout evidence",
+    ]
+    try:
+        positions = [names.index(name) for name in required_names]
+    except ValueError:
+        raise ContractMismatch("rollout.workflow.step_order") from None
+    if positions != sorted(positions):
+        raise ContractMismatch("rollout.workflow.step_order")
     candidates = _run_steps_with(steps, "-m kiwoom_stock.deployment.shadow_rollout")
     if len(candidates) != 1:
         raise ContractMismatch("rollout.workflow.execute_unit")
@@ -1761,6 +1781,70 @@ def _verify_rollout_workflow(workflow: Mapping[str, Any]) -> None:
         "--audit": "${EVIDENCE_FILENAME}",
     }:
         raise ContractMismatch("rollout.workflow.executor_flags")
+
+    oidc_steps = [step for step in steps if step.get("id") == "cstar_oidc"]
+    if len(oidc_steps) != 1:
+        raise ContractMismatch("rollout.workflow.cstar_oidc")
+    oidc = oidc_steps[0]
+    if oidc.get("uses") != (
+        "aws-actions/configure-aws-credentials@"
+        "e6de054238d6b7531b4efff3b6587d9aade6a06c"
+    ) or oidc.get("with") != {
+        "role-to-assume": "${{ vars.KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN }}",
+        "aws-region": "${{ env.AWS_REGION }}",
+        "role-session-name": "kiwoom-cstar-release-rotation",
+        "output-credentials": True,
+        "output-env-credentials": False,
+        "unset-current-credentials": True,
+    }:
+        raise ContractMismatch("rollout.workflow.cstar_oidc")
+
+    rotation_candidates = _run_steps_with(
+        steps, "python3 deploy/rotate_shadow_cstar_release.py"
+    )
+    if len(rotation_candidates) != 1:
+        raise ContractMismatch("rollout.workflow.rotation_unit")
+    rotation = rotation_candidates[0]
+    if rotation.get("if") != "success()":
+        raise ContractMismatch("rollout.workflow.rotation_order")
+    if rotation.get("env") != {
+        "AWS_ACCESS_KEY_ID": "${{ steps.cstar_oidc.outputs.aws-access-key-id }}",
+        "AWS_SECRET_ACCESS_KEY": "${{ steps.cstar_oidc.outputs.aws-secret-access-key }}",
+        "AWS_SESSION_TOKEN": "${{ steps.cstar_oidc.outputs.aws-session-token }}",
+        "CSTAR_TABLE_NAME": "${{ vars.KIWOOM_CSTAR_TABLE_NAME }}",
+        "CSTAR_GENERATION": "${{ vars.KIWOOM_CSTAR_SCHEDULE_GENERATION }}",
+        "CSTAR_PROTOCOL_SHA256": "${{ vars.KIWOOM_CSTAR_PROTOCOL_SHA256 }}",
+        "RELEASE_SOURCE_SHA": "${{ inputs.source_sha }}",
+        "RELEASE_IMAGE_DIGEST": "${{ inputs.image_digest }}",
+        "RELEASE_ROLLOUT_ATTEMPT_ID": "${{ github.run_id }}",
+        "RELEASE_COMPOSE_SHADOW_SHA256": "${{ steps.source.outputs.compose_shadow_sha256 }}",
+        "RELEASE_WORKER_SHA256": "${{ steps.source.outputs.worker_sha256 }}",
+        "RELEASE_VALIDATOR_SHA256": "${{ steps.source.outputs.validator_sha256 }}",
+        "RELEASE_SHADOW_DOCUMENT_SHA256": "${{ steps.source.outputs.shadow_document_sha256 }}",
+    }:
+        raise ContractMismatch("rollout.workflow.rotation_env")
+    rotation_script = rotation.get("run")
+    if not isinstance(rotation_script, str):
+        raise ContractMismatch("rollout.workflow.rotation_run")
+    rotation_tokens = _shell_command(
+        rotation_script,
+        "python3 deploy/rotate_shadow_cstar_release.py",
+        "rollout.workflow.rotation_command",
+    )
+    if rotation_tokens != [
+        "python3", "deploy/rotate_shadow_cstar_release.py", "--apply",
+        "--region", "${AWS_REGION}", "--table-name", "${CSTAR_TABLE_NAME}",
+        "--generation", "${CSTAR_GENERATION}", "--protocol-sha256",
+        "${CSTAR_PROTOCOL_SHA256}", "--source-sha", "${RELEASE_SOURCE_SHA}",
+        "--image-digest", "${RELEASE_IMAGE_DIGEST}", "--compose-shadow-sha256",
+        "${RELEASE_COMPOSE_SHADOW_SHA256}", "--worker-sha256",
+        "${RELEASE_WORKER_SHA256}", "--validator-sha256",
+        "${RELEASE_VALIDATOR_SHA256}", "--shadow-document-sha256",
+        "${RELEASE_SHADOW_DOCUMENT_SHA256}", "--rollout-attempt-id",
+        "${RELEASE_ROLLOUT_ATTEMPT_ID}", "--repository-root",
+        "${GITHUB_WORKSPACE}", "--audit", "${ROTATION_EVIDENCE_FILENAME}",
+    ]:
+        raise ContractMismatch("rollout.workflow.rotation_flags")
 
 
 def _verify_rollout_document(document: Mapping[str, Any]) -> None:

@@ -277,6 +277,36 @@ Environment write는 AWS partial rollback과 원자적으로 묶을 수 없으�
 ARN을 등록한 다음 API/화면에서 byte-for-byte read-back한다. Kiwoom secret이나 장기
 AWS key는 등록하지 않는다. 이 read-back 전에는 rollout을 실행하지 않는다.
 
+## C* release rotator의 sessionless rollout 연계
+
+EC2 host rollout만 갱신하고 C* DynamoDB `ACTIVE` release pointer를 갱신하지
+않으면 다음 Scheduler occurrence가 host fence에서 fail-closed 된다. 따라서
+release rotator를 별도 사람용 세션에 의존시키지 않고, 기존
+`kiwoom-cstar-release-rotator` role을 GitHub OIDC의 동일한
+`production-shadow` subject에 exact trust한다. 기존 local-user trust와
+DynamoDB/Scheduler/PassRole resource 제한은 유지하며 새 broad policy나 새 table
+권한은 추가하지 않는다.
+
+관리자 권한은 다음 1회 작업에만 필요하다.
+
+1. `deploy/iam/cstar-release-rotator-trust-policy.json.example`의 placeholder를
+   실제 account ID로 치환해 기존 role의 trust policy에 두 번째 OIDC statement를
+   추가한다. 기존 `TrustExactLocalUser` statement를 삭제하거나 완화하지 않는다.
+2. GitHub `production-shadow` Environment 또는 Repository variables에 아래 값을
+   등록하고 exact read-back한다.
+
+   - `KIWOOM_AWS_CSTAR_RELEASE_ROTATOR_ROLE_ARN`
+   - `KIWOOM_CSTAR_TABLE_NAME`
+   - `KIWOOM_CSTAR_SCHEDULE_GENERATION`
+   - `KIWOOM_CSTAR_PROTOCOL_SHA256`
+
+이후 routine rollout은 `cd-shadow-worker-rollout.yml`의 job-scoped OIDC 세션으로
+host rollout과 release rotation을 연속 수행하므로 로컬 AWS 세션, SSH, SSM
+interactive session이 필요하지 않다. workflow는 평일 09:00~16:00 KST mutation을
+사전 차단하고, rotation 실패 시 schedules를 disabled 상태로 남기며 두 bounded
+JSON evidence를 artifact로 보존한다. 위 trust/변수의 최초 적용과 read-back이
+끝나기 전에는 자동 rollout을 성공으로 간주하지 않는다.
+
 ## Shadow rollout document versioned migration
 
 rollout document migration은

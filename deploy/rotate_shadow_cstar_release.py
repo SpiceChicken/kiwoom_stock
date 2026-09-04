@@ -285,6 +285,32 @@ def _config_from_args(args: argparse.Namespace) -> BootstrapConfig:
     )
 
 
+def _audit_context(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "mode": "apply" if args.apply else "check",
+        "generation": args.generation,
+        "protocol_sha256": args.protocol_sha256,
+        "source_sha": args.source_sha,
+        "image_digest": args.image_digest,
+        "compose_shadow_sha256": args.compose_shadow_sha256,
+        "worker_sha256": args.worker_sha256,
+        "validator_sha256": args.validator_sha256,
+        "shadow_document_sha256": args.shadow_document_sha256,
+        "rollout_attempt_id": args.rollout_attempt_id,
+    }
+
+
+def _write_audit(path: str | None, payload: Mapping[str, object]) -> None:
+    if path is None:
+        return
+    target = Path(path)
+    target.write_text(
+        json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Rotate the active C* release with an atomic pointer update."
@@ -304,10 +330,15 @@ def main() -> int:
     parser.add_argument("--shadow-document-sha256", required=True)
     parser.add_argument("--rollout-attempt-id", required=True)
     parser.add_argument(
+        "--audit",
+        help="write bounded JSON rotation evidence to this path",
+    )
+    parser.add_argument(
         "--repository-root",
         default=str(Path(__file__).resolve().parents[1]),
     )
     args = parser.parse_args()
+    audit = _audit_context(args)
     try:
         config = _config_from_args(args)
         _validate_config(config)
@@ -318,8 +349,19 @@ def main() -> int:
             check=args.check,
         )
     except (RotationError, ValueError) as error:
+        _write_audit(
+            args.audit,
+            {**audit, "status": "failed", "error_type": type(error).__name__},
+        )
         print(f"C* release rotation failed: {error}")
         return 1
+    except Exception as error:
+        _write_audit(
+            args.audit,
+            {**audit, "status": "failed", "error_type": type(error).__name__},
+        )
+        raise
+    _write_audit(args.audit, {**audit, **result, "status": "success"})
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

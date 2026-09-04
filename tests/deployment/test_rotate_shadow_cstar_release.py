@@ -1,6 +1,7 @@
 """Regression tests for immutable C* release rotation."""
 
 from datetime import datetime
+import json
 
 import pytest
 
@@ -16,7 +17,16 @@ from deploy.rotate_shadow_cstar_release import (
     _assert_safe_rotation_time,
     _prepare_rotation,
     _rotation_transactions,
+    _write_audit,
 )
+
+
+def test_rotation_audit_is_bounded_json(tmp_path):
+    path = tmp_path / "rotation.json"
+    _write_audit(path.as_posix(), {"status": "success", "new_release_id": "b" * 64})
+
+    value = json.loads(path.read_text(encoding="utf-8"))
+    assert value == {"new_release_id": "b" * 64, "status": "success"}
 from deploy.shadow_cstar_contract import release_id_for
 
 

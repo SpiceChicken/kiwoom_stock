@@ -296,6 +296,23 @@ observer/reconciliation closure evidence를 별도 확인한다.
   `Success → evidence export → CLOSED` 전체 자동 closure는 다음 실제 개장일의
   정상 start/stop에서 최종 acceptance한다.
 
+2026-09-04 KST 자동 start 실패 원인:
+
+- EventBridge Scheduler와 SSM invocation은 정상 도달했으며, EC2의 디스크·SSM
+  agent·Docker 기동 전제조건에는 이상이 없었다.
+- DynamoDB `CONTROL#CSTAR/RELEASE`의 active release는 source
+  `0721f5e82c...`, rollout attempt `33413950764`인 이전 immutable tuple이었다.
+  EC2 host binding은 source `8bc3fd68...`, rollout attempt `33635128744`인 최신
+  tuple이었다.
+- `shadow_worker_control.sh`의 fail-closed binding 검증이 이를 감지해
+  `shadow worker failed: rollout binding does not match the approved artifact set`와
+  `worker_exit_1`을 반환했다. 따라서 worker/API/가상 거래는 실행되지 않았다.
+- 원인은 host rollout workflow와 C* release rotation이 분리된 구조였다는 점이다.
+  수정 후에는 동일 workflow에서 host rollout 성공 직후 release pointer를 원자
+  rotation하고, rotation evidence까지 성공해야 배포를 성공으로 판정한다.
+  수정·IAM trust 추가·운영 변수 등록·다음 개장일 정상 closure 검증 전까지는
+  자동 실행 복구 완료로 표시하지 않는다.
+
 2026-08-25 KST post-repair acceptance에서 start/stop Scheduler delivery는
 정상적으로 Submitter Lambda에 도달했지만, Lambda role의 C* DynamoDB 정책에
 `dynamodb:PutItem`이 빠져 session/occurrence와 rejection audit을 저장하지 못했다.
